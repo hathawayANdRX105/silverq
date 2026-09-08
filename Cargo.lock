@@ -1302,6 +1302,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures-util",
+ "meow-common",
  "meow-proxy",
  "rand 0.8.8",
  "serde",
