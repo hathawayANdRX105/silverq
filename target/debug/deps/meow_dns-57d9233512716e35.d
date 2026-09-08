@@ -1,0 +1,12 @@
+/home/hathaway/projects/lift/target/debug/deps/meow_dns-57d9233512716e35.d: /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/lib.rs /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/cache.rs /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/client.rs /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/fakeip.rs /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/host_resolver_hook.rs /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/resolver.rs /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/server.rs /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/upstream.rs
+
+/home/hathaway/projects/lift/target/debug/deps/libmeow_dns-57d9233512716e35.rmeta: /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/lib.rs /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/cache.rs /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/client.rs /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/fakeip.rs /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/host_resolver_hook.rs /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/resolver.rs /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/server.rs /home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/upstream.rs
+
+/home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/lib.rs:
+/home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/cache.rs:
+/home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/client.rs:
+/home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/fakeip.rs:
+/home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/host_resolver_hook.rs:
+/home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/resolver.rs:
+/home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/server.rs:
+/home/hathaway/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/meow-dns-0.21.2/src/upstream.rs:
