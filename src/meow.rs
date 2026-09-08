@@ -1,79 +1,64 @@
-//! MeowMeasurer - real implementation using meow-rs's health module.
+//! MeowMeasurer: 按节点 tag 查 adapter registry，委托 meow-rs 做协议感知测速。
 //!
-//! Uses `meow_proxy::health::probe_and_record` to perform protocol-aware
-//! delay measurement through a real proxy connection.
-//!
-//! lift only handles scheduling; all protocol/transport concerns are
-//! delegated to meow-rs.
+//! lift 只做调度；连接、握手、TLS/Reality/QUIC 全部由 meow 完成。
 #![cfg(feature = "meow")]
 
 use crate::batch::Measurer;
 use crate::node::Node;
 use async_trait::async_trait;
+use meow_common::adapter::ProxyAdapter;
+use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// URL to probe for delay measurement.
-/// gstatic's generate_204 is small (no body), stable, and widely used.
-const PROBE_URL: &str = "https://www.gstatic.com/generate_204";
+/// gstatic generate_204：无 body、稳定、适合做延迟探测。
+pub const PROBE_URL: &str = "https://www.gstatic.com/generate_204";
 
-/// MeowMeasurer uses a meow-rs Proxy and probes it via probe_and_record.
-///
-/// To use this, you must provide a pre-built `Arc<dyn meow_proxy::Proxy>`
-/// (or a way to construct one) that represents the proxy under test.
+pub type Registry = Arc<RwLock<HashMap<String, Arc<dyn ProxyAdapter>>>>;
+
+/// 每个节点一个 meow 协议 adapter（由 factory 构建），按 tag 索引。
+/// registry 与数据面 inbound 共享；可用 [`replace`] 在运行时换 adapter。
 pub struct MeowMeasurer {
-    /// Optional probe target proxy. If `None`, this measurer returns `None`
-    /// for every node (effectively disabled — useful for testing the scheduler
-    /// without a real meow pipeline).
-    ///
-    /// In production, this would be either:
-    proxy: Option<Arc<dyn meow_common::adapter::Proxy>>,
+    registry: Registry,
 }
 
 impl MeowMeasurer {
-    pub fn new() -> Self {
-        Self { proxy: None }
+    pub fn new(registry: Registry) -> Self {
+        Self { registry }
     }
 
-    /// Construct a measurer with a pre-built meow Proxy.
-    pub fn with_proxy(proxy: Arc<dyn meow_common::adapter::Proxy>) -> Self {
-        Self { proxy: Some(proxy) }
+    /// 运行时更换某节点的 adapter（重建连接后）。
+    pub fn replace(&self, tag: &str, adapter: Arc<dyn ProxyAdapter>) {
+        self.registry.write().insert(tag.to_string(), adapter);
     }
-}
 
-impl Default for MeowMeasurer {
-    fn default() -> Self {
-        Self::new()
+    /// 暴露共享 registry 给数据面 inbound。
+    pub fn registry(&self) -> &Registry {
+        &self.registry
     }
 }
 
 #[async_trait]
 impl Measurer for MeowMeasurer {
-    async fn measure(&self, _node: &Node, timeout_ms: u64) -> Option<f64> {
-        // No proxy configured → skip. The caller will treat this as None
-        // (timeout) and apply the heavy penalty.
-        let proxy = self.proxy.as_ref()?;
+    async fn measure(&self, node: &Node, timeout_ms: u64) -> Option<f64> {
+        let adapter = {
+            let guard = self.registry.read();
+            guard.get(&node.tag).cloned()
+        }?;
 
-        let url: Arc<str> = Arc::from(PROBE_URL);
-        let expected: Option<Arc<str>> = Some(Arc::from("200,204"));
-        let timeout = Duration::from_millis(timeout_ms);
-
-        // Wall-clock start to detect internal timeouts.
-        let started = Instant::now();
-
-        let result = meow_proxy::health::probe_and_record(
-            proxy,
-            url.as_ref(),
-            expected.as_deref(),
-            timeout,
+        // meow 协议感知探测：建立真实连接 + 握手 + HTTP GET，返回延迟 ms。
+        // 成功返回 Some(delay)；超时/失败返回 None（lift 按超时扣分后移）。
+        match meow_proxy::health::url_test(
+            adapter.as_ref(),
+            PROBE_URL,
+            Some("200,204"),
+            Duration::from_millis(timeout_ms),
         )
-        .await;
-
-        let elapsed_ms = started.elapsed().as_millis();
-
-        match result {
-            Ok(delay) if delay > 0 => Some(elapsed_ms.min(u32::MAX as u128) as f64),
-            _ => None,
+        .await
+        {
+            Ok(delay) => Some(delay as f64),
+            Err(_) => None,
         }
     }
 }

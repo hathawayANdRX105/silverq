@@ -11,11 +11,13 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 tokio-util = { version = "0.7", features = ["time"] }
-rand = "0.8"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 futures-util = { version = "0.3", features = ["std"] }
 async-trait = "0.1"
+base64 = "0.22"
+parking_lot = "0.12"
+
 [dependencies.meow-proxy]
 version = "0.21"
 optional = true
@@ -23,8 +25,14 @@ optional = true
 [dependencies.meow-common]
 version = "0.21"
 optional = true
+
+[dependencies.meow-transport]
+version = "0.21"
+optional = true
+
 [features]
-meow = ["meow-proxy", "meow-common"]
+default = []
+meow = ["meow-proxy", "meow-common", "meow-transport"]
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -1,64 +1,72 @@
 # lift
 
-Stability-first proxy node scheduler.
+稳定性优先的代理节点调度器（Rust）。
 
-## Core Idea
+**只干两件事：测速 + 切换**——把池子里最稳定、最快的节点选出来，并切到它上。
+协议/传输/TLS/Reality/QUIC **全部复用 meow-rs**，lift 零自研协议。
 
-- **Batch concurrent measurement** — nodes are measured in small batches so the fast path never waits for the slowest node.
-- **EWMA scoring** — exponential weighted moving average for stability, not single-shot delay.
-- **Fast / Slow path separation** — measurement is completely decoupled from node switching decisions.
-- **No blocking on full pool** — each batch returns as soon as its measurements finish.
-
-## Architecture
+## 工作原理
 
 ```
-┌─────────────────────────────┐
-│        Slow Path            │  ← periodic full-pool offline measurement
-│  (start_slow_path)          │     (runs in background, never blocks fast path)
-└──────────────┬──────────────┘
-               │
-               ▼
-┌─────────────────────────────┐
-│        Fast Path            │  ← applies measurements immediately per batch
-│   (fast_update)             │
-└──────────────┬──────────────┘
-               │
-               ▼
-┌─────────────────────────────┐
-│      Decision Layer         │  ← select_top() based on current EWMA scores
-│   (only reads scores)       │     (measurement and switching are decoupled)
-└─────────────────────────────┘
+节点表 (nodes.yaml)
+   │  NodeSpec: 协议 + 凭证
+   ▼
+factory::build_proxy ──▶ meow 协议 adapter (Vless/Trojan/SS/Hy2)   [复用 meow]
+   │                        │
+   │                        ▼
+   │              MeowMeasurer: health::url_test (真实握手+探测)     [复用 meow]
+   ▼
+自适应 EWMA (方案 C: 波动 + 方向混合)  ← 分批并发测速, ranked 顺序
+   │      超时/失败 → 大幅扣分 → 后移观察
+   ▼
+select_top(N)  纯 EWMA 取前 N（无迟滞轮次）
+   │
+   ▼
+切换:  ① 写共享选择 (inbound 数据面读取, best→次优 fallback)
+       ② 写 meow SelectorStore (外部 meow kernel 读取)
 ```
 
-## Key Modules
+## 关键设计（按需求）
 
-- `node.rs` — `Node` with EWMA state
-- `batch.rs` — concurrent batched measurement (`run_batch`)
-- `ewma.rs` — EWMA update helpers
-- `fast_path.rs` — non-blocking immediate updates
-- `slow_path.rs` — background periodic full-pool measurement
-- `decision.rs` — `select_top()` for choosing active nodes
+- **自适应 EWMA**：alpha 自动，无需手调。波动大→更稳，出现明确趋势→更快跟上。
+- **分批并发**：节点池按当前排名分批测速，`buffer_unordered(concurrency)`，不阻塞在最慢节点。
+- **快慢分离**：测速（周期全池离线）与切换（只读已算好的 EWMA）完全解耦，卡顿隔离。
+- **超时扣分后移**：死/慢节点拿不到前排。
+- **切换=selector**：lift 自己就是 selector；meow 只负责连接。
 
-## Design Principles
+## 使用
 
-1. **分批并发**：把节点池分成小批次，并发测速，避免一次把全部节点拖慢。
-2. **EWMA 优先**：用指数加权移动平均做稳定性评分，而不是单次 delay。
-3. **快慢分离**：
-   - Fast path：每批测完立即更新分数，不等全池。
-   - Slow path：独立后台任务定时对全池做离线并发测速。
-4. **解耦**：测速 ≠ 切换。切换只读已算好的 EWMA 分数。
+```bash
+# 无 meow（演示/调度逻辑自测，NoopMeasurer）
+cargo run -- path/to/nodes.yaml
 
-## Current Status
+# 完整（协议感知测速 + 数据面 inbound）
+cargo run --features meow -- path/to/nodes.yaml
+#   LIFT_LISTEN=127.0.0.1:17321   数据面端口（SOCKS5 / HTTP-CONNECT）
+#   LIFT_SELECTOR_STORE=...       外部 meow kernel 的 selector store 路径
+```
 
-This is a minimal skeleton. The `NoopMeasurer` is a placeholder.
+节点表见 `nodes.example.yaml`（VLESS / Trojan / Shadowsocks / Hysteria2 四协议示例）。
 
-### Proxy Engine Integration
+## 模块
 
-`lift` is designed to work with **meow-rs** (https://github.com/meow-rs/meow-rs) as the underlying proxy engine.
+| 文件 | 职责 |
+|------|------|
+| `node.rs` | Node + 自适应 EWMA（方案 C） |
+| `nodespec.rs` | 节点 YAML 配置模型（协议 + 凭证 + 校验） |
+| `factory.rs` | NodeSpec → meow 协议 adapter |
+| `meow.rs` | MeowMeasurer（按 tag 查 adapter，委托 meow 测速） |
+| `batch.rs` | 分批并发测速 + Measurer trait |
+| `fast_path.rs` | 立即应用结果 + 超时扣分 |
+| `decision.rs` | 纯 EWMA select_top |
+| `inbound.rs` | 数据面（SOCKS5/HTTP-CONNECT → 当前选择 fallback） |
+| `config.rs` | 默认参数 |
 
-- Enable the `meow` feature to pull in `meow-proxy`.
-- Implement `MeowMeasurer` (see `src/meow.rs`) to perform real delay measurements using meow-proxy / meow-transport.
-- The `Measurer` trait is engine-agnostic, so HTTP-based backends (e.g. sing-box clash_api) can still be added for migration.
+## 已知范围（MVP）
+
+- 数据面为 **SOCKS5 / HTTP-CONNECT**，UDP 数据面与 TUN 未做（测速走 TCP 探测）。
+- EWMA 分数**未持久化**，重启后从零累积。
+- selector 切换依赖外部 meow kernel 轮询 `SelectorStore`，lift 自身不驱动内核热重载。
 
 ## License
 
