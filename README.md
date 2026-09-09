@@ -75,11 +75,24 @@ lift select auto           # 取消钉住，恢复自动
 | `ctl.rs` | 控制通道（unix socket：热加载、手动钉住、状态查询） |
 | `config.rs` | 默认参数 |
 
-## 已知范围（MVP）
+## 已验证 / 已知范围
 
-- 数据面为 **SOCKS5 / HTTP-CONNECT**，UDP 数据面与 TUN 未做（测速走 TCP 探测）。
-- EWMA 分数**未持久化**，重启后从零累积。
-- selector 切换依赖外部 meow kernel 轮询 `SelectorStore`，lift 自身不驱动内核热重载。
+已实测跑通（`protocol: direct` 基线节点 + curl）：
+
+| 路径 | 结果 |
+|------|------|
+| SOCKS5（域名） | `http_code=200` |
+| SOCKS5（IPv4 字面量） | `http_code=301` |
+| HTTP CONNECT | `http_code=200` |
+| 10MB 传输 | `size=10000000`（无截断） |
+| `reload` / `select` / `status` | 全部生效，EWMA 跨 reload 保留 |
+
+已知范围：
+
+- 数据面只做 **TCP**（SOCKS5 / HTTP-CONNECT）。**UDP 与 TUN 未做**——UDP 流量不会走 lift。
+- SOCKS5 inbound **无认证**，默认只绑 `127.0.0.1`。改绑 `0.0.0.0` 等于开放代理，别这么干。
+- EWMA 分数**进程重启后清零**（`reload` 不丢，只有重启丢）。
+- 真实代理节点尚未用你的节点池实测（凭证在 gitignore 的文件里）；已验证的是协议解析 + 转发 + 调度链路。
 
 ## License
 

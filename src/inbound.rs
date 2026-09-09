@@ -58,9 +58,12 @@ async fn handle_one(
         .map_err(|e| format!("head: {e}"))?;
 
     let target = if peek[0] == 0x05 {
-        read_socks5_target(&mut socket, true).await?
-    } else if peek[0] == b'H' {
-        read_http_connect_target(&mut socket).await?
+        // SOCKS5 握手协商：greeting(VER already read, NMETHODS, METHODS...) → 选择 no-auth
+        socks5_greeting(&mut socket).await?;
+        read_socks5_target(&mut socket).await?
+    } else if peek[0].is_ascii_uppercase() {
+        // HTTP 方法行（CONNECT / GET / ...）；首字节已被读掉，传给解析器补回
+        read_http_connect_target(&mut socket, peek[0]).await?
     } else {
         socket
             .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
@@ -75,7 +78,12 @@ async fn handle_one(
 
     // 协议应答
     match target.proto {
-        Proto::Socks5 => socket.write_all(b"\x05\x00\x00\x00").await?,
+        // SOCKS5 成功应答必须是完整 10 字节：VER REP RSV ATYP BND.ADDR(4) BND.PORT(2)
+        Proto::Socks5 => {
+            socket
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await?
+        }
         Proto::Http => {
             socket
                 .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -138,20 +146,37 @@ async fn handle_one(
     Ok(())
 }
 
-/// first_byte_consumed: 调用方已消耗首字节 0x05。
+/// SOCKS5 握手协商：VER 已被调用方读掉，这里读 NMETHODS + METHODS，
+/// 应答 no-auth（0x00）。不支持认证——本地回环端口，鉴权交给绑定地址。
+async fn socks5_greeting(
+    socket: &mut TcpStream,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut n = [0u8; 1];
+    socket.read_exact(&mut n).await?;
+    let mut methods = vec![0u8; n[0] as usize];
+    if !methods.is_empty() {
+        socket.read_exact(&mut methods).await?;
+    }
+    if !methods.contains(&0x00) {
+        socket.write_all(&[0x05, 0xFF]).await.ok(); // 无可接受方法
+        return Err("socks5: client requires auth, only no-auth supported".into());
+    }
+    socket.write_all(&[0x05, 0x00]).await?;
+    Ok(())
+}
+
+/// 读 SOCKS5 请求（VER CMD RSV ATYP + 地址 + 端口）。
 async fn read_socks5_target(
     socket: &mut TcpStream,
-    first_byte_consumed: bool,
 ) -> Result<Target, Box<dyn std::error::Error + Send + Sync>> {
     let mut head = [0u8; 4];
-    if !first_byte_consumed {
-        socket.read_exact(&mut head).await?;
-    } else {
-        head[0] = 0x05;
-        socket.read_exact(&mut head[1..]).await?;
-    }
+    socket.read_exact(&mut head).await?;
     if head[0] != 0x05 || head[1] != 0x01 {
-        socket.write_all(&[0x05, 0x07, 0x00, 0x00]).await.ok();
+        // 只支持 CONNECT；回 0x07 command not supported（完整 10 字节）
+        socket
+            .write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await
+            .ok();
         return Ok(Target {
             host: String::new(),
             port: 0,
@@ -183,7 +208,10 @@ async fn read_socks5_target(
             u16::from_be_bytes([b[16], b[17]])
         }
         _ => {
-            socket.write_all(&[0x05, 0x08, 0x00, 0x00]).await.ok();
+            socket
+                .write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .ok();
             return Ok(Target {
                 host: String::new(),
                 port: 0,
@@ -215,9 +243,10 @@ async fn read_socks5_target(
 
 async fn read_http_connect_target(
     socket: &mut TcpStream,
+    first_byte: u8,
 ) -> Result<Target, Box<dyn std::error::Error + Send + Sync>> {
-    // 首字节 'H' 已被调用方消耗，补读方法行剩余部分
-    let mut line = String::from("H");
+    // 首字节已被调用方消耗，补回后读完方法行
+    let mut line = String::from(first_byte as char);
     let mut b = [0u8; 1];
     loop {
         socket
@@ -237,22 +266,31 @@ async fn read_http_connect_target(
         }
     }
 
-    // 读完剩余头到空行
+    // 读完剩余头部，直到空行（CRLF CRLF）。
+    // 必须精确停在空行后：残留字节会被拷进隧道，污染客户端 TLS ClientHello。
+    let mut header_bytes = 0usize;
     loop {
-        socket
-            .read_exact(&mut b)
-            .await
-            .map_err(|e| e.to_string())?;
-        if b[0] == b'\r' {
-            // CRLF 空行判定：下一个是 \n 说明是空行
-            let mut nxt = [0u8; 1];
-            match socket.peek(&mut nxt).await {
-                Ok(1) if nxt[0] == b'\n' => {
-                    let _ = socket.read_exact(&mut nxt).await;
-                    break;
-                }
-                _ => {}
+        let mut cur = Vec::with_capacity(64);
+        loop {
+            socket
+                .read_exact(&mut b)
+                .await
+                .map_err(|e| e.to_string())?;
+            header_bytes += 1;
+            if b[0] == b'\n' {
+                break;
             }
+            cur.push(b[0]);
+            if header_bytes > 16 * 1024 {
+                return Err("http connect: headers too large".into());
+            }
+        }
+        // 空行（只剩 \r 或什么都没有）= 头部结束
+        if cur.iter().all(|c| *c == b'\r') {
+            break;
+        }
+        if header_bytes > 16 * 1024 {
+            return Err("http connect: headers too large".into());
         }
     }
 
@@ -282,4 +320,124 @@ async fn read_http_connect_target(
         port,
         proto: Proto::Http,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// 建一对本地连接：返回 (客户端侧, 服务端侧)。
+    async fn pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr);
+        let server = listener.accept();
+        let (client, server) = tokio::join!(client, server);
+        (client.unwrap(), server.unwrap().0)
+    }
+
+    #[tokio::test]
+    async fn socks5_greeting_selects_no_auth() {
+        let (mut client, mut server) = pair().await;
+        // VER 已被 dispatch 读掉；客户端发 NMETHODS=1, METHOD=no-auth
+        client.write_all(&[0x01, 0x00]).await.unwrap();
+
+        socks5_greeting(&mut server).await.unwrap();
+
+        let mut reply = [0u8; 2];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [0x05, 0x00], "必须回 VER=5 METHOD=no-auth");
+    }
+
+    #[tokio::test]
+    async fn socks5_greeting_rejects_auth_only_client() {
+        let (mut client, mut server) = pair().await;
+        // 只提供 username/password(0x02)，不含 no-auth
+        client.write_all(&[0x01, 0x02]).await.unwrap();
+
+        assert!(socks5_greeting(&mut server).await.is_err());
+
+        let mut reply = [0u8; 2];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [0x05, 0xFF], "无可接受方法必须回 0xFF");
+    }
+
+    #[tokio::test]
+    async fn socks5_parses_domain_request() {
+        let (mut client, mut server) = pair().await;
+        let host = b"example.com";
+        let mut req = vec![0x05, 0x01, 0x00, 0x03, host.len() as u8];
+        req.extend_from_slice(host);
+        req.extend_from_slice(&443u16.to_be_bytes());
+        client.write_all(&req).await.unwrap();
+
+        let target = read_socks5_target(&mut server).await.unwrap();
+        assert_eq!(target.host, "example.com");
+        assert_eq!(target.port, 443);
+    }
+
+    #[tokio::test]
+    async fn socks5_parses_ipv4_request() {
+        let (mut client, mut server) = pair().await;
+        let mut req = vec![0x05, 0x01, 0x00, 0x01, 1, 1, 1, 1];
+        req.extend_from_slice(&80u16.to_be_bytes());
+        client.write_all(&req).await.unwrap();
+
+        let target = read_socks5_target(&mut server).await.unwrap();
+        assert_eq!(target.host, "1.1.1.1");
+        assert_eq!(target.port, 80);
+    }
+
+    /// 回归：曾经 drain 循环碰到第一个 CRLF 就停，剩余头部残留在 socket 里
+    /// 被拷进隧道，污染客户端 TLS ClientHello。头部必须精确读到空行为止。
+    #[tokio::test]
+    async fn http_connect_drains_headers_exactly() {
+        let (mut client, mut server) = pair().await;
+        // 首字节 'C' 由 dispatch 消耗，这里从 'O' 开始
+        client
+            .write_all(
+                b"ONNECT example.com:443 HTTP/1.1\r\n\
+                  Host: example.com:443\r\n\
+                  Proxy-Connection: Keep-Alive\r\n\
+                  \r\n",
+            )
+            .await
+            .unwrap();
+        // 头部之后立刻写隧道数据（模拟 TLS ClientHello 首字节）
+        client.write_all(b"\x16\x03\x01TUNNEL").await.unwrap();
+
+        let target = read_http_connect_target(&mut server, b'C').await.unwrap();
+        assert_eq!(target.host, "example.com");
+        assert_eq!(target.port, 443);
+
+        // 关键断言：socket 里剩下的必须正好是隧道数据，没有残留头部字节
+        let mut rest = [0u8; 9];
+        server.read_exact(&mut rest).await.unwrap();
+        assert_eq!(
+            &rest,
+            b"\x16\x03\x01TUNNEL",
+            "头部残留会污染隧道数据"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_non_connect_method_rejected() {
+        let (mut client, mut server) = pair().await;
+        client
+            .write_all(b"ET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+
+        let target = read_http_connect_target(&mut server, b'G').await.unwrap();
+        assert!(target.host.is_empty(), "非 CONNECT 不应产生转发目标");
+
+        let mut buf = vec![0u8; 32];
+        let n = client.read(&mut buf).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&buf[..n]).contains("405"),
+            "应回 405"
+        );
+    }
 }

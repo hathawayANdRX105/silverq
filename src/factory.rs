@@ -87,6 +87,7 @@ pub fn build_proxy(spec: &NodeSpec) -> Result<Arc<dyn ProxyAdapter>, String> {
             };
             Box::new(Hy2Adapter::new(options).map_err(|e| e.to_string())?)
         }
+        crate::nodespec::Protocol::Direct => Box::new(meow_proxy::DirectAdapter::new()),
     };
 
     Ok(Arc::from(proxy))

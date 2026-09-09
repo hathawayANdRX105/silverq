@@ -45,6 +45,8 @@ pub enum Protocol {
     Trojan,
     Shadowsocks,
     Hysteria2,
+    /// 直连（无代理）。用作基线对照：测出的延迟就是不走代理的延迟。
+    Direct,
 }
 
 /// VLESS 凭证（Reality 可选内嵌）。
@@ -128,6 +130,8 @@ impl NodeSpec {
                     .as_ref()
                     .ok_or_else(|| format!("{}: hysteria2 protocol needs hysteria2 spec", self.tag))?;
             }
+            // 直连无凭证可校验
+            Protocol::Direct => {}
         }
         Ok(())
     }
