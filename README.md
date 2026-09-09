@@ -75,33 +75,49 @@ lift select auto           # 取消钉住，恢复自动
 | `tun.rs` | **未实现占位**（`unimplemented!`），见文件内说明 |
 | `cli.rs` | 子命令解析（serve / reload / select / status） |
 | `ctl.rs` | 控制通道（unix socket：热加载、手动钉住、状态查询） |
-| `config.rs` | 默认参数 |
+| `config.rs` | 默认参数 + 环境变量覆盖（探测 URL / 间隔 / 超时 / 容量） |
+| `scripts/singbox2lift.py` | sing-box `nodes.json` → lift YAML（凭证只在本地文件间流动） |
 
 ## 已验证 / 已知范围
 
-`cargo test --features meow` 共 21 项（16 单测 + 5 e2e），e2e 真起 `lift serve` 进程、
-用真 SOCKS5 / HTTP-CONNECT 客户端打流量，全程本地回环、不依赖外网：
+### 自动化测试（22 项，`cargo test --features meow`）
+
+17 单测 + 5 e2e。e2e 真起 `lift serve` 进程、用真 SOCKS5 / HTTP-CONNECT 客户端打流量，
+目标是本地 echo 服务、探测端点也在本地 —— **全程回环，不依赖外网**，CI 可稳定跑。
 
 | 覆盖 | 内容 |
 |------|------|
 | SOCKS5 TCP CONNECT | 握手协商 + 完整 10 字节应答 + echo 往返 |
 | SOCKS5 UDP ASSOCIATE | 中继端口分配 + 头部编解码 + UDP echo 往返 + 回程来源正确 |
-| UDP 分片 | `FRAG != 0` 必须丢弃（不做重组） |
+| UDP 分片 | `FRAG != 0` 丢弃（不做重组） |
 | SOCKS5 BIND | 回 `0x07` command not supported |
-| HTTP CONNECT | 200 应答 + **隧道无头部残留**（曾污染 TLS ClientHello 的回归点） |
-| 手工验证 | 10MB 传输无截断；`reload`/`select`/`status` 生效，EWMA 跨 reload 保留 |
+| HTTP CONNECT | 200 应答 + 隧道无头部残留（曾污染 TLS ClientHello 的回归点） |
+| Reality 公钥 | 43 字符无 padding base64url（真实形态）+ 带 padding 变体 |
 
-已知范围：
+### 真实节点池实测（本地，不进 CI）
+
+用 `scripts/singbox2lift.py` 从 sing-box 的 `nodes.json` 转出 179 个节点
+（vless 123 / hysteria2 23 / shadowsocks 22 / trojan 11），实测结果：
+
+- 179/179 全部成功构建 meow adapter（四种协议路径都真实跑过）
+- 经 lift + 真实代理节点出网：`http_code=204`，稳定 0.18~0.22s
+- 出口 IP 确认为代理落地 IP（直连被墙 → 证明没有静默走直连兜底）
+- UDP ASSOCIATE 经真实节点查 DNS：回包 tid 匹配、`ANCOUNT=2`
+
+对照 sing-box 同节点测速可知：池中大量节点（含 46 个 Vision+Reality）**本身已死** ——
+sing-box 测同样超时。这不是 lift 的问题，排查时容易误判成协议 bug。
+
+### 已知范围
 
 - **TUN 未实现**：`src/tun.rs` 是显式占位（`unimplemented!` / `todo!`），不接线。
-  原因是 meow-rs 上游有 TUN 但**未发布到 crates.io**；要做需改 git 依赖复用上游，
-  或自行基于 `tun` + `smoltcp` 实现。细节与两条路线见该文件模块文档。
-  CI 有一个 job 专门守着它没被误接线。
-- **UDP 已支持**（SOCKS5 UDP ASSOCIATE），但不做分片重组。
-- SOCKS5 inbound **无认证**，默认只绑 `127.0.0.1`。改绑 `0.0.0.0` 等于开放代理，别这么干。
+  meow-rs 上游有 TUN 但**未发布到 crates.io**；要做需改 git 依赖复用上游，
+  或自行基于 `tun` + `smoltcp` 实现。两条路线与证据见该文件模块文档，CI 有 job 守着它没被误接。
+- **transport 未支持**：ws / grpc 的 VLESS 节点转换时会被跳过（真实池里 35 个）。
+- **UDP 不做分片重组**。
+- SOCKS5 inbound **无认证**，默认只绑 `127.0.0.1`。改绑 `0.0.0.0` 等于开放代理。
 - EWMA 分数**进程重启后清零**（`reload` 不丢，只有重启丢）。
-- 真实代理节点尚未用你的节点池实测（凭证在 gitignore 的文件里）；
-  已验证的是协议解析 + 转发 + 调度链路（用 `protocol: direct` 基线节点）。
+- 冷启动：真实池 179 节点跑完一轮约 75s。已用"配置顺序播种 + 每批发布中间结果"
+  把数据面可用时间从 85s 压到约 20s，但**头几秒仍可能选到死节点**（靠 fallback 兜）。
 
 ## CI
 

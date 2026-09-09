@@ -214,6 +214,20 @@ struct SchedulerHandles {
 }
 
 /// 调度主循环：周期全池测速 → EWMA 更新 → 纯 EWMA 选前 N → 写共享选择。
+///
+/// # 冷启动
+///
+/// 真实节点池（179 个 / 6 并发 / 2.5s 超时）跑完一轮要约 75s。早先的实现把
+/// `ticker.tick()` 放在循环开头、且只在整轮结束后才写 selection，导致启动后
+/// **85 秒内 selection 为空、数据面所有请求返回失败**（实测 http_code=000）。
+///
+/// 三处修正：
+/// 1. 启动即用配置顺序播种 selection —— 未测速时按配置序当候选，inbound 的
+///    best→次优 fallback 会自然跳过死节点，比"什么都没有"强得多
+/// 2. 首个 tick 立刻触发（`MissedTickBehavior` 默认首 tick 是立即的，
+///    但要先 tick 再算间隔，不能先干等一个 interval）
+/// 3. **每批测完就发布一次**中间结果，而不是等整轮 —— 头几批就是当前最优节点，
+///    第一批（6 个）测完约 2.5s 内数据面就可用
 async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
     let SchedulerHandles {
         measurer,
@@ -229,6 +243,23 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
         concurrency,
         timeout_penalty,
     } = cfg;
+
+    // 冷启动播种：还没有任何测速数据时，按配置顺序给数据面一个候选集，
+    // 免得首轮测完前（真实池约 75s）所有请求直接失败。
+    if selection.read().await.is_empty() && !pinned.load(Ordering::Relaxed) {
+        let seed: Vec<String> = pool
+            .read()
+            .await
+            .iter()
+            .take(capacity)
+            .map(|n| n.tag.clone())
+            .collect();
+        if !seed.is_empty() {
+            tracing::info!(count = seed.len(), "冷启动：按配置顺序播种 selection");
+            *selection.write().await = seed;
+        }
+    }
+
     let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
     let mut last_selection: Vec<String> = Vec::new();
 
@@ -239,55 +270,72 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
         let mut snapshot: Vec<Node> = pool.read().await.clone();
         snapshot.sort_by(|a, b| a.score().partial_cmp(&b.score()).unwrap());
 
-        // 分批并发测速（ranked 顺序，不阻塞）
-        let mut all_results: Vec<batch::Measurement> = Vec::new();
+        // 分批并发测速（ranked 顺序）。每批测完立即写回并重算选择：
+        // 排名靠前的批次就是当前最优节点，先发布让数据面尽早可用，
+        // 不必等整轮（真实池 ~75s）跑完。
         for chunk in snapshot.chunks(batch_size) {
             let results =
                 batch::run_batch_owned(measurer.as_ref(), chunk.to_vec(), timeout_ms, concurrency)
                     .await;
-            all_results.extend(results);
-        }
 
-        // 写回 EWMA + 超时扣分（钉住时仍更新分数，只暂停切换）
-        {
-            let mut guard = pool.write().await;
-            fast_path::apply_batch(&mut guard, &all_results, timeout_penalty);
-        }
+            // 写回 EWMA + 超时扣分（钉住时仍更新分数，只暂停切换）
+            {
+                let mut guard = pool.write().await;
+                fast_path::apply_batch(&mut guard, &results, timeout_penalty);
+            }
 
-        // 纯 EWMA 选前 N → 切换（pinned 时暂停）
-        if !pinned.load(Ordering::Relaxed) {
-            let new_selection = decision::select_top(&pool.read().await, capacity);
-            if new_selection != last_selection {
-                tracing::info!(?new_selection, "selection changed");
-                apply_selection(&new_selection, &selection).await;
-                last_selection = new_selection;
+            if !pinned.load(Ordering::Relaxed) {
+                let new_selection = decision::select_top(&pool.read().await, capacity);
+                if new_selection != last_selection {
+                    apply_selection(&new_selection, &selection).await;
+                    last_selection = new_selection;
+                }
             }
         }
+
+        tracing::info!(
+            nodes = snapshot.len(),
+            selection = ?last_selection,
+            "测速轮完成"
+        );
     }
 }
 
 /// 切换执行器：写共享选择（数据面用）+ meow SelectorStore（外部 kernel 用）。
+///
+/// 现在按批调用（179 节点 ≈ 30 批/轮），所以不能每次 `SelectorStore::open`
+/// ——那会每批读一次盘、建一个新 Arc。meow 的 store 自带进程级全局槽，
+/// 首次 open 后用 `global()` 复用；`store.set` 内部对同值写入是 no-op，
+/// 所以 best 没变时不落盘。
 async fn apply_selection(selection: &[String], shared: &SharedSelection) {
     *shared.write().await = selection.to_vec();
 
     #[cfg(feature = "meow")]
     {
         use meow_proxy::group::selector_store::SelectorStore;
-        use std::path::PathBuf;
         const GROUP: &str = "lift-active";
-        let path = PathBuf::from(std::env::var("LIFT_SELECTOR_STORE").unwrap_or_else(|_| {
-            format!(
-                "{}/.local/state/lift-selector.json",
-                std::env::var("HOME").unwrap_or_default()
-            )
-        }));
-        if let Some(best) = selection.first() {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+
+        let Some(best) = selection.first() else {
+            return;
+        };
+        let store = match SelectorStore::global() {
+            Some(s) => s,
+            None => {
+                let path = std::path::PathBuf::from(
+                    std::env::var("LIFT_SELECTOR_STORE").unwrap_or_else(|_| {
+                        format!(
+                            "{}/.local/state/lift-selector.json",
+                            std::env::var("HOME").unwrap_or_default()
+                        )
+                    }),
+                );
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                SelectorStore::open(path)
             }
-            let store = SelectorStore::open(path);
-            store.set(GROUP, best);
-        }
+        };
+        store.set(GROUP, best);
     }
 
     #[cfg(not(feature = "meow"))]

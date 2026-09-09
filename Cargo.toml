@@ -29,6 +29,9 @@ optional = true
 [dependencies.meow-transport]
 version = "0.21"
 optional = true
+# reality：你的节点池主力是 VLESS+Reality，不开这个 feature 时
+# TlsLayer::new 会直接拒绝 reality-opts，节点全建不出来
+features = ["reality"]
 
 [features]
 default = []

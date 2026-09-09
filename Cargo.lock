@@ -1531,6 +1531,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "webpki-roots 0.26.11",
+ "x25519-dalek",
 ]
 
 [[package]]

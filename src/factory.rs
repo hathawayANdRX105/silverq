@@ -155,12 +155,25 @@ fn parse_uuid(s: &str) -> Result<[u8; 16], String> {
     Ok(out)
 }
 
+/// 解码 Reality 公钥（32 字节）。
+///
+/// Reality 公钥的实际形态是 **43 字符无 padding base64url**（含 `-` / `_`）。
+/// 只用带 padding 的引擎会全线失败：真实节点池里 116/179 个节点曾因此
+/// 报 `Invalid symbol 95`（95 = `_`）。四种变体全试，顺序按出现频率。
 fn base64url_decode32(s: &str) -> Result<[u8; 32], String> {
     use base64::Engine;
-    let bytes = base64::engine::general_purpose::URL_SAFE
-        .decode(s)
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(s))
-        .map_err(|e| format!("bad base64 public_key: {e}"))?;
+    let s = s.trim();
+    let engines: [&base64::engine::GeneralPurpose; 4] = [
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        &base64::engine::general_purpose::URL_SAFE,
+        &base64::engine::general_purpose::STANDARD_NO_PAD,
+        &base64::engine::general_purpose::STANDARD,
+    ];
+    let bytes = engines
+        .iter()
+        .find_map(|e| e.decode(s).ok())
+        .ok_or_else(|| format!("public_key 不是合法 base64（len={}）", s.len()))?;
+
     if bytes.len() != 32 {
         return Err(format!(
             "reality public_key must decode to 32 bytes, got {}",
@@ -200,6 +213,28 @@ mod tests {
             ]
         );
         assert!(parse_uuid("garbage").is_err());
+    }
+
+    /// 回归：Reality 公钥的真实形态是 43 字符无 padding base64url。
+    /// 曾只试带 padding 的引擎，导致真实节点池里 116/179 个节点建不出 adapter
+    /// （报 Invalid symbol 95，即 `_`）。
+    #[test]
+    fn reality_key_accepts_unpadded_base64url() {
+        // 43 字符、含 `-` 与 `_`、无 padding —— 与真实节点里的形态一致
+        let k = "uoXBNYcBgR-h2YmU1NFhFyASr6qh9UghWOuo1WZIikw";
+        assert_eq!(k.len(), 43);
+        let decoded = base64url_decode32(k).expect("无 padding base64url 必须能解");
+        assert_eq!(decoded.len(), 32);
+
+        // 带 padding 的标准 base64 也要继续能解（不同订阅源格式不一）
+        use base64::Engine;
+        let padded = base64::engine::general_purpose::STANDARD.encode(decoded);
+        assert_eq!(base64url_decode32(&padded).unwrap(), decoded);
+
+        // 解出来不是 32 字节要报错，而不是静默截断
+        let short = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1u8; 16]);
+        assert!(base64url_decode32(&short).is_err(), "长度不对必须报错");
+        assert!(base64url_decode32("!!!not base64!!!").is_err());
     }
 
     #[test]
