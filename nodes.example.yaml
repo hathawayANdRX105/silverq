@@ -1,0 +1,46 @@
+# silverq 节点表示例
+# 用法: cargo run --features meow -- nodes.yaml
+# 每个节点 = 协议 + 凭证；silverq 用 meow-rs 构建 adapter 并做协议感知测速。
+nodes:
+  - tag: "WB-JP-01"
+    protocol: vless
+    server: "1.2.3.4"
+    port: 443
+    vless:
+      uuid: "b85798ef-9edc-46a4-9a87-8da4499d36d0"
+      sni: "www.cloudflare.com"
+      reality:
+        public_key: "PASTE_BASE64URL_X25519_PUBLIC_KEY"
+        short_id: "17d824dd68e24aaf"
+
+  - tag: "WB-HK-03"
+    protocol: trojan
+    server: "5.6.7.8"
+    port: 443
+    trojan:
+      password: "PASTE_PASSWORD"
+      sni: "proxy.example.com"
+      # skip_cert_verify 默认 true
+
+  - tag: "SS-SG-01"
+    protocol: shadowsocks
+    server: "9.10.11.12"
+    port: 8388
+    shadowsocks:
+      password: "PASTE_PASSWORD"
+      cipher: "2022-blake3-aes-256-gcm"
+
+  - tag: "HY2-US-01"
+    protocol: hysteria2
+    server: "13.14.15.16"
+    port: 443
+    hysteria2:
+      password: "PASTE_PASSWORD"
+      sni: "hysteria.example.com"
+
+  # 直连基线：不走代理，测出的延迟就是裸连延迟。
+  # 放一个进池可以对照——代理节点全都远慢于直连，说明链路本身有问题。
+  - tag: "direct-baseline"
+    protocol: direct
+    server: "-"
+    port: 0

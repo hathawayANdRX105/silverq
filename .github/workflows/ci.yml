@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # 失败时打印完整 backtrace，e2e 排障要靠它
+  RUST_BACKTRACE: 1
+
+jobs:
+  # fmt 单独一个 job：不用编译依赖，几秒出结果，PR 上最快反馈
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 两种 feature 组合都要过：meow 关掉时 NoopMeasurer 路径独立编译，
+        # 只测一种会漏掉 cfg 分支里的错误（这个项目已经踩过一次）
+        include:
+          - mode: default
+            features: ""
+          - mode: meow
+            features: "--features meow"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.mode }}
+      - name: clippy (warnings are errors)
+        run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
+
+  test:
+    name: test (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: default
+            features: ""
+          - mode: meow
+            features: "--features meow"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.mode }}
+
+      - name: build
+        run: cargo build --all-targets ${{ matrix.features }}
+
+      # 单测：协议解析、UDP 头编解码、EWMA、配置校验。
+      # 用 --bins 而非 --lib：本 crate 只有 bin target，--lib 会报
+      # "no library targets found" 让 CI 无意义地失败。
+      - name: unit tests
+        run: cargo test --bins ${{ matrix.features }}
+
+      # e2e：真起 silverq serve 进程，用真 SOCKS5 / HTTP-CONNECT 客户端打流量，
+      # 覆盖 TCP CONNECT、UDP ASSOCIATE、分片丢弃、BIND 拒绝、隧道无残留。
+      # 全程走 127.0.0.1（本地 echo + 本地探测端点），不依赖外网，CI 可稳定跑。
+      # 只在 meow 模式有意义：数据面在该 feature 下。
+      - name: e2e data plane
+        if: matrix.mode == 'meow'
+        run: cargo test --features meow --test e2e_data_plane
+
+  # TUN 是显式未实现的占位（src/tun.rs 里是 unimplemented!/todo!）。
+  # 这个 job 保证占位没被误接线到运行路径上：一旦有人真调用它，
+  # 应该是编译期就被这里拦住，而不是线上 panic 或静默假装 TUN 在跑。
+  tun-placeholder:
+    name: TUN placeholder not wired
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: assert tun::run is never called
+        run: |
+          if grep -rn --include=*.rs "tun::run\|tun::setup_route_protection" src/ tests/ \
+             | grep -v "^src/tun.rs:"; then
+            echo "::error::src/tun.rs 是未实现占位，不应被调用（见该文件模块文档）"
+            exit 1
+          fi
+          echo "ok: TUN 占位未接线"

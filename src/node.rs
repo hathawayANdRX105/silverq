@@ -12,8 +12,11 @@ const ALPHA_MIN: f64 = 0.12;
 const ALPHA_MAX: f64 = 0.65;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // server/port 见下方说明
 pub struct Node {
     pub tag: String,
+    // server/port 目前调度侧不读（测速按 tag 查 registry 里的 adapter），
+    // 保留是为了日志可读与将来按节点重建 adapter，不删。
     pub server: String,
     pub port: u16,
     /// Current EWMA score (lower is better)
@@ -100,5 +103,20 @@ impl Node {
     /// Stability score (lower is better)
     pub fn score(&self) -> f64 {
         self.ewma
+    }
+
+    /// 从存档恢复分数。`recent` 窗口不恢复（只影响自适应 alpha 的头几次取值，
+    /// 不影响排序），所以重启后 alpha 会先偏保守，几次测量后回归正常。
+    pub fn restore_score(&mut self, ewma: f64, samples: u32) {
+        self.ewma = ewma;
+        self.samples = samples;
+    }
+
+    /// 从另一个 Node 接管 EWMA 状态（配置热加载时保留分数）。
+    pub fn adopt_score(&mut self, other: &Node) {
+        self.ewma = other.ewma;
+        self.samples = other.samples;
+        self.last_measured = other.last_measured;
+        self.recent = other.recent.clone();
     }
 }

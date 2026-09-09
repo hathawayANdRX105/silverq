@@ -1,0 +1,37 @@
+# silverq 配置示例。
+# 复制为 silverq.toml 放在启动目录，或用 `silverq serve nodes.yaml --config path` 指定。
+# 文件不存在时全部用内置默认值，零配置可跑。
+# 环境变量（SILVERQ_*）优先级高于本文件。
+
+[scheduler]
+# 主组容量：EWMA 排名前 N 进 selection
+capacity = 10
+# 每批测速节点数
+batch_size = 5
+# 测速轮间隔（秒）
+interval_secs = 45
+# 单节点测速超时（毫秒）
+timeout_ms = 2500
+# 批内最大并发
+concurrency = 6
+# 超时扣分幅度（毫秒）
+timeout_penalty = 3000.0
+# 探测 URL（generate_204 风格）
+probe_url = "https://www.gstatic.com/generate_204"
+
+[data_plane]
+# 监听地址（SOCKS5 / HTTP-CONNECT 混合）
+listen = "127.0.0.1:17321"
+# fallback 尝试上限：按 EWMA 顺序最多试几个候选。
+# 3 = 队首 + 两个次优；1 = 只用队首不 fallback。
+# 池子普遍半死时可调大，但每个死候选都要烧一个 dial 超时（timeout_ms × 2），
+# 单请求最坏延迟随之上升。
+fallback_attempts = 3
+
+[paths]
+# EWMA 分数存档（重启恢复；超过 6 小时视为过期丢弃）
+state = "~/.local/state/silverq/scores.json"
+# ctl socket（silverq reload / select / status）
+ctl_sock = "~/.local/state/silverq/ctl.sock"
+# 外部 meow kernel 读的 selector store
+selector_store = "~/.local/state/silverq-selector.json"

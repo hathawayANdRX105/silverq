@@ -1,38 +1,68 @@
-//! MeowMeasurer - thin adapter that delegates delay measurement to meow-rs.
+//! MeowMeasurer: 按节点 tag 查 adapter registry，委托 meow-rs 做协议感知测速。
 //!
-//! lift 只负责调度，不处理任何协议细节。
-//! 所有 outbound 创建、TLS、Reality、Hysteria2 等全部由 meow-rs 负责。
+//! silverq 只做调度；连接、握手、TLS/Reality/QUIC 全部由 meow 完成。
 #![cfg(feature = "meow")]
 
 use crate::batch::Measurer;
 use crate::node::Node;
 use async_trait::async_trait;
+use meow_common::adapter::ProxyAdapter;
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
-/// MeowMeasurer simply forwards measurement requests to meow-rs.
-/// The actual connection and timing logic lives inside meow-proxy / meow-transport.
+// 探测 URL 见 `config::probe_url()`（`SILVERQ_PROBE_URL` 可覆盖，供测试指向本地端点）。
+pub type Registry = Arc<RwLock<HashMap<String, Arc<dyn ProxyAdapter>>>>;
+
+/// 每个节点一个 meow 协议 adapter（由 factory 构建），按 tag 索引。
+/// registry 与数据面 inbound 共享；可用 [`replace`] 在运行时换 adapter。
 pub struct MeowMeasurer {
-    // In real implementation, this would hold a reference or factory
-    // that can produce meow outbounds for different nodes.
-    // For now it is just a marker.
+    registry: Registry,
+    probe_url: String,
+    timeout_ms: u64,
 }
 
 impl MeowMeasurer {
-    pub fn new() -> Self {
-        Self {}
+    #[cfg_attr(feature = "meow", allow(dead_code))] // 生产走 with_probe；new 供无 env 场景
+    pub fn new(registry: Registry) -> Self {
+        Self {
+            registry,
+            probe_url: crate::config::probe_url(),
+            timeout_ms: crate::config::DEFAULT_TIMEOUT_MS,
+        }
+    }
+
+    /// 生产入口：探测 URL 与超时来自 silverq.toml / env。
+    pub fn with_probe(registry: Registry, probe_url: String, timeout_ms: u64) -> Self {
+        Self {
+            registry,
+            probe_url,
+            timeout_ms,
+        }
     }
 }
 
 #[async_trait]
 impl Measurer for MeowMeasurer {
-    /// Delegate to meow-rs to measure the node.
-    /// Returns None if meow reports timeout or failure.
-    async fn measure(&self, _node: &Node, _timeout_ms: u64) -> Option<f64> {
-        // TODO: call into meow-proxy to create outbound for this node and measure RTT
-        // Example direction:
-        //   let outbound = meow_outbound_factory.create_for_node(node);
-        //   let start = Instant::now();
-        //   outbound.connect().await?;
-        //   Some(start.elapsed().as_millis() as f64)
-        None
+    async fn measure(&self, node: &Node, timeout_ms: u64) -> Option<f64> {
+        let adapter = {
+            let guard = self.registry.read();
+            guard.get(&node.tag).cloned()
+        }?;
+
+        // meow 协议感知探测：建立真实连接 + 握手 + HTTP GET，返回延迟 ms。
+        // 成功返回 Some(delay)；超时/失败返回 None（silverq 按超时扣分后移）。
+        match meow_proxy::health::url_test(
+            adapter.as_ref(),
+            &self.probe_url,
+            Some("200,204"),
+            Duration::from_millis(self.timeout_ms.min(timeout_ms)),
+        )
+        .await
+        {
+            Ok(delay) => Some(delay as f64),
+            Err(_) => None,
+        }
     }
 }

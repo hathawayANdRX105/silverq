@@ -1,8 +1,8 @@
 [package]
-name = "lift"
+name = "silverq"
 version = "0.1.0"
 edition = "2021"
-description = "Stability-first proxy node scheduler (EWMA + batch concurrent testing + fast/slow path separation)"
+description = "silverq — stability-first proxy node scheduler (EWMA + batch concurrent testing + fast/slow path separation)"
 license = "MIT"
 authors = ["hathaway"]
 
@@ -10,20 +10,36 @@ authors = ["hathaway"]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+serde_json = "1"
+toml = "0.8"
 tokio-util = { version = "0.7", features = ["time"] }
-rand = "0.8"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 futures-util = { version = "0.3", features = ["std"] }
 async-trait = "0.1"
+base64 = "0.22"
+parking_lot = "0.12"
 
 [dependencies.meow-proxy]
 version = "0.21"
 optional = true
 
+[dependencies.meow-common]
+version = "0.21"
+optional = true
+
+[dependencies.meow-transport]
+version = "0.21"
+optional = true
+# reality：你的节点池主力是 VLESS+Reality，不开这个 feature 时
+# TlsLayer::new 会直接拒绝 reality-opts，节点全建不出来
+# reality：节点池主力是 VLESS+Reality，不开则 TlsLayer::new 直接拒绝 reality-opts
+# grpc/ws：ws 在 default features 里，grpc 要显式开，否则 grpc 节点接不了
+features = ["reality", "grpc"]
+
 [features]
 default = []
-meow = ["meow-proxy"]
+meow = ["meow-proxy", "meow-common", "meow-transport"]
 
 [dev-dependencies]
 tokio-test = "0.4"
