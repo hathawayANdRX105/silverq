@@ -101,4 +101,12 @@ impl Node {
     pub fn score(&self) -> f64 {
         self.ewma
     }
+
+    /// 从另一个 Node 接管 EWMA 状态（配置热加载时保留分数）。
+    pub fn adopt_score(&mut self, other: &Node) {
+        self.ewma = other.ewma;
+        self.samples = other.samples;
+        self.last_measured = other.last_measured;
+        self.recent = other.recent.clone();
+    }
 }

@@ -37,14 +37,25 @@ select_top(N)  纯 EWMA 取前 N（无迟滞轮次）
 ## 使用
 
 ```bash
-# 无 meow（演示/调度逻辑自测，NoopMeasurer）
-cargo run -- path/to/nodes.yaml
+# 启动 daemon（调度 + 数据面 + ctl socket）
+cargo run --features meow -- serve nodes.yaml
 
-# 完整（协议感知测速 + 数据面 inbound）
-cargo run --features meow -- path/to/nodes.yaml
-#   LIFT_LISTEN=127.0.0.1:17321   数据面端口（SOCKS5 / HTTP-CONNECT）
-#   LIFT_SELECTOR_STORE=...       外部 meow kernel 的 selector store 路径
+# 控制命令（另开终端，走 unix socket，不重启进程）
+lift status                # 当前池大小 / 选择 / 是否钉住
+lift reload [nodes.yaml]   # 热加载节点表：新增进池、删除出池、存活继承 EWMA
+lift select <tag>          # 手动钉住某节点（调度暂停覆盖）
+lift select auto           # 取消钉住，恢复自动
 ```
+
+环境变量：
+
+| 变量 | 默认 | 作用 |
+|------|------|------|
+| `LIFT_LISTEN` | `127.0.0.1:17321` | 数据面端口（SOCKS5 / HTTP-CONNECT） |
+| `LIFT_CTL_SOCK` | `~/.local/state/lift/ctl.sock` | 控制通道 socket |
+| `LIFT_SELECTOR_STORE` | `~/.local/state/lift-selector.json` | 外部 meow kernel 读的 selector store |
+
+无 `meow` feature 时用 `NoopMeasurer` 空跑（自测调度逻辑）：`cargo run -- serve nodes.yaml`
 
 节点表见 `nodes.example.yaml`（VLESS / Trojan / Shadowsocks / Hysteria2 四协议示例）。
 
@@ -52,14 +63,16 @@ cargo run --features meow -- path/to/nodes.yaml
 
 | 文件 | 职责 |
 |------|------|
-| `node.rs` | Node + 自适应 EWMA（方案 C） |
+| `node.rs` | Node + 自适应 EWMA（方案 C）+ adopt_score（reload 继承） |
 | `nodespec.rs` | 节点 YAML 配置模型（协议 + 凭证 + 校验） |
 | `factory.rs` | NodeSpec → meow 协议 adapter |
-| `meow.rs` | MeowMeasurer（按 tag 查 adapter，委托 meow 测速） |
+| `meow.rs` | MeowMeasurer（按 tag 查 adapter，委托 meow `health::url_test`） |
 | `batch.rs` | 分批并发测速 + Measurer trait |
 | `fast_path.rs` | 立即应用结果 + 超时扣分 |
 | `decision.rs` | 纯 EWMA select_top |
-| `inbound.rs` | 数据面（SOCKS5/HTTP-CONNECT → 当前选择 fallback） |
+| `inbound.rs` | 数据面（SOCKS5/HTTP-CONNECT → 当前选择，best→次优 fallback） |
+| `cli.rs` | 子命令解析（serve / reload / select / status） |
+| `ctl.rs` | 控制通道（unix socket：热加载、手动钉住、状态查询） |
 | `config.rs` | 默认参数 |
 
 ## 已知范围（MVP）
