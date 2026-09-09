@@ -109,6 +109,7 @@ pub fn save_to(path: &std::path::Path, nodes: &[Node]) {
 }
 
 /// 从默认路径恢复分数。
+#[allow(dead_code)] // 生产入口用 load_from(显式路径)；保留默认路径版给嵌入式调用
 pub fn load_into(nodes: &mut [Node]) -> usize {
     load_from(&state_path(), nodes)
 }

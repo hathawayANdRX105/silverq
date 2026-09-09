@@ -7,9 +7,16 @@
 use std::process;
 
 pub enum Cmd {
-    Serve { nodes: String },
-    Reload { nodes: Option<String> },
-    Select { tag: String },
+    Serve {
+        nodes: String,
+        config: Option<String>,
+    },
+    Reload {
+        nodes: Option<String>,
+    },
+    Select {
+        tag: String,
+    },
     Status,
 }
 impl Cmd {
@@ -30,9 +37,22 @@ impl Cmd {
 pub fn parse() -> Cmd {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
-        Some("serve") => Cmd::Serve {
-            nodes: args.get(1).cloned().unwrap_or_else(|| "nodes.yaml".into()),
-        },
+        Some("serve") => {
+            // serve [nodes.yaml] [--config silverq.toml]
+            let nodes = args
+                .iter()
+                .skip(1)
+                .find(|a| !a.starts_with("--") && !a.ends_with(".toml"))
+                .cloned()
+                .unwrap_or_else(|| "nodes.yaml".into());
+            let config = args
+                .iter()
+                .skip(1)
+                .position(|a| a == "--config")
+                .and_then(|i| args.get(i + 2))
+                .cloned();
+            Cmd::Serve { nodes, config }
+        }
         Some("reload") => Cmd::Reload {
             nodes: args.get(1).cloned(),
         },
@@ -47,6 +67,7 @@ pub fn parse() -> Cmd {
             if first.starts_with('.') || first.ends_with(".yaml") || first.ends_with(".yml") {
                 Cmd::Serve {
                     nodes: first.to_string(),
+                    config: None,
                 }
             } else {
                 die(&format!("未知命令: {first}（serve | reload | select）"))
@@ -54,6 +75,7 @@ pub fn parse() -> Cmd {
         }
         None => Cmd::Serve {
             nodes: "nodes.yaml".into(),
+            config: None,
         },
     }
 }

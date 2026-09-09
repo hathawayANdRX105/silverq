@@ -72,8 +72,8 @@ pub fn ctl_path() -> std::path::PathBuf {
         })
 }
 
-pub async fn serve_ctl(state: Arc<CtlState>) -> std::io::Result<()> {
-    let path = ctl_path();
+pub async fn serve_ctl(state: Arc<CtlState>, sock_path: std::path::PathBuf) -> std::io::Result<()> {
+    let path = sock_path;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
@@ -168,7 +168,6 @@ async fn do_reload(state: &CtlState, path_arg: Option<&str>) -> Result<String, S
     }
     Ok(format!("reloaded {path} (pinned, selection unchanged)"))
 }
-
 async fn do_select(state: &CtlState, arg: Option<&str>) -> Result<String, String> {
     let tag = arg.ok_or_else(|| "select: missing <tag|auto>".to_string())?;
     if tag == "auto" {
@@ -189,8 +188,10 @@ async fn do_select(state: &CtlState, arg: Option<&str>) -> Result<String, String
     if !exists {
         return Err(format!("unknown node: {tag}"));
     }
-    *state.selection.write().await = vec![tag.to_string()];
+    // 先置 pinned 再写 selection：pinned=true 后调度循环不会覆盖 selection。
+    // 反过来的话，两步之间夹进一次批发布，钉住的节点会被 EWMA 排序顶掉。
     state.pinned.store(true, Ordering::Relaxed);
+    *state.selection.write().await = vec![tag.to_string()];
     Ok(format!("pinned {tag}"))
 }
 

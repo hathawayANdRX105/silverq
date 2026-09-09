@@ -151,7 +151,7 @@ mod tempdirlike {
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            if self.owned {
+            if self.owned && std::env::var("SILVERQ_KEEP_TEST_DIRS").is_err() {
                 let _ = std::fs::remove_dir_all(&self.path);
             }
         }
@@ -205,6 +205,17 @@ fn start_daemon_in(
     probe: SocketAddr,
     extra_nodes_before: Option<&str>,
 ) -> Daemon {
+    start_daemon_in_inner(dir, probe, extra_nodes_before, "1")
+}
+
+/// `interval_secs`: 调度间隔。fallback 计数测试要用长间隔——
+/// 否则首轮测速在请求前就跑完，死节点已被挤出 selection，测不到 fallback。
+fn start_daemon_in_inner(
+    dir: tempdirlike::TempDir,
+    probe: SocketAddr,
+    extra_nodes_before: Option<&str>,
+    interval_secs: &str,
+) -> Daemon {
     let nodes_path = dir.path().join("nodes.yaml");
     let mut yaml = String::from("nodes:\n");
     if let Some(extra) = extra_nodes_before {
@@ -218,15 +229,21 @@ fn start_daemon_in(
     let socks_port = free_port();
     let socks: SocketAddr = format!("127.0.0.1:{socks_port}").parse().unwrap();
 
-    let child = Command::new(env!("CARGO_BIN_EXE_silverq"))
-        .arg("serve")
-        .arg(&nodes_path)
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_silverq"));
+    cmd.arg("serve").arg(&nodes_path);
+    if dir.path().join("silverq.toml").exists() {
+        cmd.arg("--config").arg(dir.path().join("silverq.toml"));
+    }
+    if dir.path().join("silverq.toml").exists() {
+        cmd.arg("--config").arg(dir.path().join("silverq.toml"));
+    }
+    let child = cmd
         .env("SILVERQ_LISTEN", socks.to_string())
         .env("SILVERQ_CTL_SOCK", dir.path().join("ctl.sock"))
         .env("SILVERQ_SELECTOR_STORE", dir.path().join("selector.json"))
         .env("SILVERQ_STATE", dir.path().join("scores.json"))
         .env("SILVERQ_PROBE_URL", format!("http://{probe}/"))
-        .env("SILVERQ_INTERVAL_SECS", "1")
+        .env("SILVERQ_INTERVAL_SECS", interval_secs)
         .env("SILVERQ_TIMEOUT_MS", "1500")
         .stdout(std::fs::File::create(dir.path().join("log")).unwrap())
         .stderr(std::process::Stdio::from(

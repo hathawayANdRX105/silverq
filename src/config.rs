@@ -12,6 +12,7 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 2000;
 pub const DEFAULT_TIMEOUT_PENALTY: f64 = 3000.0;
 pub const DEFAULT_SLOW_INTERVAL_SECS: u64 = 30;
 pub const DEFAULT_ACTIVE_CAPACITY: usize = 5;
+pub const DEFAULT_LISTEN: &str = "127.0.0.1:17321";
 
 /// gstatic generate_204：无 body、稳定，适合做延迟探测。
 /// 仅 meow feature 下用到（真实探测），默认模式的 NoopMeasurer 不发请求。
@@ -31,12 +32,8 @@ pub fn probe_url() -> String {
     std::env::var("SILVERQ_PROBE_URL").unwrap_or_else(|_| DEFAULT_PROBE_URL.to_string())
 }
 
-/// 调度轮间隔秒数（`SILVERQ_INTERVAL_SECS`）。
-pub fn interval_secs() -> u64 {
-    env_parsed("SILVERQ_INTERVAL_SECS", DEFAULT_SLOW_INTERVAL_SECS)
-}
-
 /// 单节点测速超时毫秒（`SILVERQ_TIMEOUT_MS`）。
+#[cfg_attr(not(feature = "meow"), allow(dead_code))] // inbound 仅 meow 模式编译
 pub fn timeout_ms() -> u64 {
     env_parsed("SILVERQ_TIMEOUT_MS", DEFAULT_TIMEOUT_MS)
 }
@@ -44,4 +41,11 @@ pub fn timeout_ms() -> u64 {
 /// 主组容量（`SILVERQ_CAPACITY`）。
 pub fn active_capacity() -> usize {
     env_parsed("SILVERQ_CAPACITY", DEFAULT_ACTIVE_CAPACITY)
+}
+
+/// fallback 尝试上限（`SILVERQ_FALLBACK_ATTEMPTS`）。
+#[cfg_attr(feature = "meow", allow(dead_code))] // 生产走 settings::Effective
+#[cfg_attr(not(feature = "meow"), allow(dead_code))]
+pub fn fallback_attempts() -> usize {
+    env_parsed("SILVERQ_FALLBACK_ATTEMPTS", 3)
 }

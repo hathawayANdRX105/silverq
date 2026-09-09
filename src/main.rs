@@ -14,6 +14,7 @@ mod fast_path;
 mod node;
 mod nodespec;
 mod persist;
+mod settings;
 
 #[cfg(feature = "meow")]
 mod factory;
@@ -36,7 +37,6 @@ mod ctl;
 use batch::NoopMeasurer;
 
 use batch::Measurer;
-use config::{DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_PENALTY};
 use node::Node;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cmd = cli::parse();
     match &cmd {
-        cli::Cmd::Serve { nodes } => serve(nodes.clone()).await,
+        cli::Cmd::Serve { nodes, config } => serve(nodes.clone(), config.clone()).await,
         _ => {
             ctl::client(&cli::ctl_line(&cmd)).await?;
             Ok(())
@@ -68,7 +68,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     serve("nodes.yaml".into()).await
 }
 
-async fn serve(nodes: String) -> Result<(), Box<dyn std::error::Error>> {
+async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    // 0. 配置：TOML 为底，env 覆盖
+    let cfg_path = cfg_path.unwrap_or_else(|| "silverq.toml".into());
+    let file_cfg = settings::load(std::path::Path::new(&cfg_path))?;
+    let eff = settings::Effective::from(&file_cfg);
+    tracing::info!(
+        config = %cfg_path,
+        listen = %eff.listen,
+        fallback_attempts = eff.fallback_attempts,
+        interval_secs = eff.interval_secs,
+        "配置加载完成"
+    );
+
     // 1. 加载节点
     let specs = nodespec::load_nodes_yaml(&nodes)?;
     tracing::info!(count = specs.len(), "loaded nodes from {nodes}");
@@ -93,7 +105,11 @@ async fn serve(nodes: String) -> Result<(), Box<dyn std::error::Error>> {
     let measurer: Arc<dyn Measurer> = {
         #[cfg(feature = "meow")]
         {
-            Arc::new(meow::MeowMeasurer::new(registry.clone()))
+            Arc::new(meow::MeowMeasurer::with_probe(
+                registry.clone(),
+                eff.probe_url.clone(),
+                eff.timeout_ms,
+            ))
         }
         #[cfg(not(feature = "meow"))]
         {
@@ -107,7 +123,7 @@ async fn serve(nodes: String) -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| Node::new(s.tag.clone(), s.server.clone(), s.port))
         .collect();
     let mut nodes_pool = nodes_pool;
-    let restored = persist::load_into(&mut nodes_pool);
+    let restored = persist::load_from(std::path::Path::new(&eff.state), &mut nodes_pool);
     if restored > 0 {
         tracing::info!(restored, "从存档恢复 EWMA 分数");
     }
@@ -121,14 +137,15 @@ async fn serve(nodes: String) -> Result<(), Box<dyn std::error::Error>> {
         pool: pool.clone(),
         selection: selection.clone(),
         pinned: pinned.clone(),
+        selector_store: eff.selector_store.clone(),
     };
     let sched_cfg = SchedulerConfig {
-        capacity: config::active_capacity(),
-        batch_size: DEFAULT_BATCH_SIZE,
-        interval_secs: config::interval_secs(),
-        timeout_ms: config::timeout_ms(),
-        concurrency: DEFAULT_CONCURRENCY,
-        timeout_penalty: DEFAULT_TIMEOUT_PENALTY,
+        capacity: eff.capacity,
+        batch_size: eff.batch_size,
+        interval_secs: eff.interval_secs,
+        timeout_ms: eff.timeout_ms,
+        concurrency: eff.concurrency,
+        timeout_penalty: eff.timeout_penalty,
     };
     let sched = tokio::spawn(schedule_loop(handles, sched_cfg));
 
@@ -148,8 +165,9 @@ async fn serve(nodes: String) -> Result<(), Box<dyn std::error::Error>> {
             selection.clone(),
             nodes.clone(),
         ));
+        let ctl_sock = std::path::PathBuf::from(eff.ctl_sock.clone());
         let inb = tokio::spawn(async move {
-            if let Err(e) = ctl::serve_ctl(ctl_state).await {
+            if let Err(e) = ctl::serve_ctl(ctl_state, ctl_sock).await {
                 tracing::error!("ctl socket exited: {e}");
             }
         });
@@ -157,12 +175,13 @@ async fn serve(nodes: String) -> Result<(), Box<dyn std::error::Error>> {
         // 6. 数据面 inbound（feature meow）
         #[cfg(feature = "meow")]
         {
-            let listen =
-                std::env::var("SILVERQ_LISTEN").unwrap_or_else(|_| "127.0.0.1:17321".to_string());
+            let listen = eff.listen.clone();
             let inbound_sel = selection.clone();
             let inbound_reg = registry.clone();
             let inb2 = tokio::spawn(async move {
-                if let Err(e) = inbound::run(&listen, inbound_reg, inbound_sel).await {
+                if let Err(e) =
+                    inbound::run(&listen, inbound_reg, inbound_sel, eff.fallback_attempts).await
+                {
                     tracing::error!("inbound exited: {e}");
                 }
             });
@@ -182,7 +201,7 @@ async fn serve(nodes: String) -> Result<(), Box<dyn std::error::Error>> {
     }
     #[cfg(not(unix))]
     {
-        let _ = (&measurer, &pool, &selection, &pinned);
+        let _ = (&measurer, &pool, &selection, &pinned, &eff);
         sched.await?;
     }
 
@@ -217,6 +236,8 @@ struct SchedulerHandles {
     selection: SharedSelection,
     /// true 时跳过切换（手动钉住中），但测速继续
     pinned: Arc<AtomicBool>,
+    /// SelectorStore 路径（apply_selection 用）
+    selector_store: String,
 }
 
 /// 调度主循环：周期全池测速 → EWMA 更新 → 纯 EWMA 选前 N → 写共享选择。
@@ -240,6 +261,7 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
         pool,
         selection,
         pinned,
+        selector_store,
     } = h;
     let SchedulerConfig {
         capacity,
@@ -292,7 +314,7 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
                 let new_selection = decision::select_top(&pool.read().await, capacity);
                 let current = selection.read().await.clone();
                 if new_selection != current {
-                    apply_selection(&new_selection, &selection).await;
+                    apply_selection(&new_selection, &selection, &selector_store).await;
                 }
                 last_selection = new_selection;
             }
@@ -309,11 +331,12 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
 
 /// 切换执行器：写共享选择（数据面用）+ meow SelectorStore（外部 kernel 用）。
 ///
-/// 现在按批调用（179 节点 ≈ 30 批/轮），所以不能每次 `SelectorStore::open`
+/// 现在按批调用（217 节点 ≈ 44 批/轮），所以不能每次 `SelectorStore::open`
 /// ——那会每批读一次盘、建一个新 Arc。meow 的 store 自带进程级全局槽，
 /// 首次 open 后用 `global()` 复用；`store.set` 内部对同值写入是 no-op，
 /// 所以 best 没变时不落盘。
-async fn apply_selection(selection: &[String], shared: &SharedSelection) {
+#[cfg_attr(not(feature = "meow"), allow(unused_variables))] // 非 meow 分支不用 store
+async fn apply_selection(selection: &[String], shared: &SharedSelection, selector_store: &str) {
     *shared.write().await = selection.to_vec();
 
     #[cfg(feature = "meow")]
@@ -327,14 +350,7 @@ async fn apply_selection(selection: &[String], shared: &SharedSelection) {
         let store = match SelectorStore::global() {
             Some(s) => s,
             None => {
-                let path = std::path::PathBuf::from(
-                    std::env::var("SILVERQ_SELECTOR_STORE").unwrap_or_else(|_| {
-                        format!(
-                            "{}/.local/state/silverq-selector.json",
-                            std::env::var("HOME").unwrap_or_default()
-                        )
-                    }),
-                );
+                let path = std::path::PathBuf::from(selector_store);
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }

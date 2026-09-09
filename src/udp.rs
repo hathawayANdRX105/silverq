@@ -145,6 +145,7 @@ pub async fn run_relay(
     relay: Arc<UdpSocket>,
     registry: Registry,
     selection: crate::inbound::SharedSelection,
+    fallback_attempts: usize,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
@@ -190,9 +191,14 @@ pub async fn run_relay(
             match guard.get(&key) {
                 Some(c) => Arc::clone(c),
                 None => {
-                    let Some(conn) =
-                        dial_udp_via_selection(&registry, &selection, &hdr.dst_host, hdr.dst_port)
-                            .await
+                    let Some(conn) = dial_udp_via_selection(
+                        &registry,
+                        &selection,
+                        &hdr.dst_host,
+                        hdr.dst_port,
+                        fallback_attempts,
+                    )
+                    .await
                     else {
                         tracing::warn!(
                             dst = %format!("{}:{}", hdr.dst_host, hdr.dst_port),
@@ -241,6 +247,7 @@ async fn dial_udp_via_selection(
     selection: &crate::inbound::SharedSelection,
     dst_host: &str,
     dst_port: u16,
+    max_attempts: usize,
 ) -> Option<Arc<dyn ProxyPacketConn>> {
     let order = selection.read().await.clone();
     let candidates: Vec<_> = {
@@ -258,7 +265,7 @@ async fn dial_udp_via_selection(
         ..Default::default()
     };
 
-    for adapter in &candidates {
+    for adapter in candidates.iter().take(max_attempts.max(1)) {
         if !adapter.support_udp() {
             continue;
         }

@@ -5,6 +5,7 @@
 
 use crate::meow::Registry;
 use meow_common::Metadata;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +19,7 @@ pub async fn run(
     listener_addr: &str,
     registry: Registry,
     selection: SharedSelection,
+    fallback_attempts: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(listener_addr).await?;
     tracing::info!(
@@ -30,7 +32,8 @@ pub async fn run(
         let registry = registry.clone();
         let selection = selection.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_one(socket, peer, &registry, &selection).await {
+            if let Err(e) = handle_one(socket, peer, &registry, &selection, fallback_attempts).await
+            {
                 tracing::debug!(peer = %peer, "{e}");
             }
         });
@@ -62,6 +65,7 @@ async fn handle_one(
     peer: SocketAddr,
     registry: &Registry,
     selection: &SharedSelection,
+    fallback_attempts: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut peek = [0u8; 1];
     socket
@@ -87,7 +91,7 @@ async fn handle_one(
     // UDP ASSOCIATE：分配中继 socket，回其地址，然后在 TCP 存活期间跑中继循环。
     // 注意：客户端常填 0.0.0.0:0（自己也不知道源地址），所以不能用 host 空判断拦。
     if target.cmd == Cmd::UdpAssociate {
-        return handle_udp_associate(socket, registry, selection).await;
+        return handle_udp_associate(socket, registry, selection, fallback_attempts).await;
     }
 
     if target.host.is_empty() {
@@ -118,13 +122,11 @@ async fn handle_one(
         ..Default::default()
     };
 
-    // 先在无锁情况下把候选 adapter 克隆出来，避免 guard 跨 await
+    // 先在无锁情况下把候选 adapter 克隆出来（截断到 fallback 上限），
+    // 避免 guard 跨 await
     let candidates: Vec<_> = {
         let guard = registry.read();
-        order
-            .iter()
-            .filter_map(|tag| guard.get(tag).cloned())
-            .collect()
+        pick_candidates(&order, &guard, fallback_attempts)
     };
     // 逐个 dial，**每个都带超时**。
     //
@@ -132,6 +134,10 @@ async fn handle_one(
     // （可达数十秒），fallback 根本轮不到下一个候选 —— 实测表现为请求卡满
     // 客户端超时后失败，而后排明明有活节点。超时取测速超时的 2 倍：
     // 测速能过说明这个节点建连一般在测速超时内完成，留 2 倍余量给抖动。
+    // fallback 尝试上限来自配置（silverq.toml [data_plane].fallback_attempts，
+    // SILVERQ_FALLBACK_ATTEMPTS 可覆盖）。按 EWMA 顺序最多试 N 个候选：
+    // 池子普遍半死时，大值能救回更多请求；但每个死候选都要烧一个 dial 超时，
+    // 单请求最坏延迟随之上升。
     let dial_timeout = Duration::from_millis(crate::config::timeout_ms() * 2);
     let mut conn = None;
     for adapter in &candidates {
@@ -141,10 +147,11 @@ async fn handle_one(
                 break;
             }
             Ok(Err(e)) => {
-                tracing::debug!(tag = adapter.name(), "dial failed: {e}");
+                // info 级：死候选是运维必须能看到的信号（fallback 计数也靠它）
+                tracing::info!(tag = adapter.name(), "dial failed: {e}");
             }
             Err(_) => {
-                tracing::debug!(
+                tracing::info!(
                     tag = adapter.name(),
                     "dial 超时 {dial_timeout:?}，换下一个候选"
                 );
@@ -406,10 +413,27 @@ async fn read_http_connect_target(
 ///
 /// RFC 1928 要求 TCP 控制连接是 association 的生命周期锚点：TCP 一断，
 /// 服务端必须回收该 association 的所有 UDP 状态。这里用 oneshot 通知中继循环退出。
+/// 按 selection 顺序取前 `max_attempts` 个候选 adapter。
+///
+/// 抽成纯函数以便单测截断逻辑——e2e 层面这个行为被 EWMA 排序的时序淹没，
+/// 测不稳（试过三版 e2e 都被"首轮测速改排序"击穿）。
+fn pick_candidates(
+    order: &[String],
+    registry: &HashMap<String, Arc<dyn meow_common::adapter::ProxyAdapter>>,
+    max_attempts: usize,
+) -> Vec<Arc<dyn meow_common::adapter::ProxyAdapter>> {
+    order
+        .iter()
+        .filter_map(|tag| registry.get(tag).cloned())
+        .take(max_attempts.max(1))
+        .collect()
+}
+
 async fn handle_udp_associate(
     mut socket: TcpStream,
     registry: &Registry,
     selection: &SharedSelection,
+    fallback_attempts: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let control_local = socket.local_addr()?;
     let (relay, relay_addr) = match crate::udp::bind_relay(control_local).await {
@@ -446,6 +470,7 @@ async fn handle_udp_associate(
         relay,
         registry.clone(),
         selection.clone(),
+        fallback_attempts,
         shutdown_rx,
     ));
 
@@ -477,6 +502,56 @@ mod tests {
         let server = listener.accept();
         let (client, server) = tokio::join!(client, server);
         (client.unwrap(), server.unwrap().0)
+    }
+
+    #[test]
+    fn pick_candidates_truncates_to_fallback_limit() {
+        use meow_common::adapter::ProxyAdapter;
+        let reg: Registry = std::sync::Arc::new(parking_lot::RwLock::new(
+            ["a", "b", "c", "d"]
+                .iter()
+                .map(|t| {
+                    (
+                        t.to_string(),
+                        std::sync::Arc::new(meow_proxy::DirectAdapter::new())
+                            as std::sync::Arc<dyn ProxyAdapter>,
+                    )
+                })
+                .collect(),
+        ));
+        let map = reg.read();
+        let order = vec![
+            "a".into(),
+            "b".into(),
+            "c".into(),
+            "d".into(),
+            "missing".into(),
+        ];
+        // 上限 2：只取前两个，且不存在的 tag 被跳过后**不占名额**。
+        // adapter 的 name() 是协议内置名（DIRECT 之类），所以按位置对应
+        // order 里的 tag 来断言，而不是比名字。
+        let got = pick_candidates(&order, &map, 2);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].name(), map["a"].name());
+        assert_eq!(got[1].name(), map["b"].name());
+
+        // 上限 1：只有队首
+        assert_eq!(pick_candidates(&order, &map, 1).len(), 1);
+
+        // 上限大：全部存在节点（missing 跳过）
+        assert_eq!(pick_candidates(&order, &map, 10).len(), 4);
+
+        // 上限 0：至少保底 1 个（max(1)），完全不放行会让请求必死
+        assert_eq!(pick_candidates(&order, &map, 0).len(), 1);
+
+        // 上限 1：只有队首
+        assert_eq!(pick_candidates(&order, &map, 1).len(), 1);
+
+        // 上限大：全部存在节点（missing 跳过）
+        assert_eq!(pick_candidates(&order, &map, 10).len(), 4);
+
+        // 上限 0：至少保底 1 个（max(1)），完全不放行会让请求必死
+        assert_eq!(pick_candidates(&order, &map, 0).len(), 1);
     }
 
     #[tokio::test]

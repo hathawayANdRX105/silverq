@@ -19,11 +19,27 @@ pub type Registry = Arc<RwLock<HashMap<String, Arc<dyn ProxyAdapter>>>>;
 /// registry 与数据面 inbound 共享；可用 [`replace`] 在运行时换 adapter。
 pub struct MeowMeasurer {
     registry: Registry,
+    probe_url: String,
+    timeout_ms: u64,
 }
 
 impl MeowMeasurer {
+    #[cfg_attr(feature = "meow", allow(dead_code))] // 生产走 with_probe；new 供无 env 场景
     pub fn new(registry: Registry) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            probe_url: crate::config::probe_url(),
+            timeout_ms: crate::config::DEFAULT_TIMEOUT_MS,
+        }
+    }
+
+    /// 生产入口：探测 URL 与超时来自 silverq.toml / env。
+    pub fn with_probe(registry: Registry, probe_url: String, timeout_ms: u64) -> Self {
+        Self {
+            registry,
+            probe_url,
+            timeout_ms,
+        }
     }
 }
 
@@ -39,9 +55,9 @@ impl Measurer for MeowMeasurer {
         // 成功返回 Some(delay)；超时/失败返回 None（silverq 按超时扣分后移）。
         match meow_proxy::health::url_test(
             adapter.as_ref(),
-            &crate::config::probe_url(),
+            &self.probe_url,
             Some("200,204"),
-            Duration::from_millis(timeout_ms),
+            Duration::from_millis(self.timeout_ms.min(timeout_ms)),
         )
         .await
         {
