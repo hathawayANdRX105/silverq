@@ -301,7 +301,7 @@ fn socks5_tcp_connect_relays_traffic() {
     let (mut s, _) = socks5_handshake(d.socks, 0x01, echo);
     s.write_all(b"hello-silverq").unwrap();
 
-    let mut buf = [0u8; 10];
+    let mut buf = [0u8; 13];
     s.read_exact(&mut buf).unwrap();
     assert_eq!(&buf, b"hello-silverq", "TCP echo 应原样返回");
 }
