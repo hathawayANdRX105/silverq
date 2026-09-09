@@ -272,19 +272,17 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
     loop {
         ticker.tick().await;
 
-        // 快照 + 按当前分数排序（好节点先测）
-        let mut snapshot: Vec<Node> = pool.read().await.clone();
-        snapshot.sort_by(|a, b| a.score().partial_cmp(&b.score()).unwrap());
+        // 交错分批：已测的按分数、未测的按配置序，每批混合两者。
+        // 详见 decision::measurement_order 的文档（含为什么必须交错）。
+        let batches = {
+            let guard = pool.read().await;
+            decision::measurement_order(&guard, batch_size)
+        };
 
-        // 分批并发测速（ranked 顺序）。每批测完立即写回并重算选择：
-        // 排名靠前的批次就是当前最优节点，先发布让数据面尽早可用，
-        // 不必等整轮（真实池 ~75s）跑完。
-        for chunk in snapshot.chunks(batch_size) {
+        for chunk in batches {
             let results =
-                batch::run_batch_owned(measurer.as_ref(), chunk.to_vec(), timeout_ms, concurrency)
-                    .await;
+                batch::run_batch_owned(measurer.as_ref(), chunk, timeout_ms, concurrency).await;
 
-            // 写回 EWMA + 超时扣分（钉住时仍更新分数，只暂停切换）
             {
                 let mut guard = pool.write().await;
                 fast_path::apply_batch(&mut guard, &results, timeout_penalty);
@@ -292,24 +290,17 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
 
             if !pinned.load(Ordering::Relaxed) {
                 let new_selection = decision::select_top(&pool.read().await, capacity);
-                // 和**实际共享状态**比，不能和本地 last_selection 比：
-                // 钉住期间 ctl 会把 selection 改成单个节点，而 last_selection
-                // 还是旧值。解钉后若 EWMA 结果恰好等于 last_selection，
-                // 就永远不会重新发布，selection 会卡在钉住的那个节点上。
                 let current = selection.read().await.clone();
                 if new_selection != current {
                     apply_selection(&new_selection, &selection).await;
                 }
                 last_selection = new_selection;
             }
+
+            persist::save(&pool.read().await);
         }
 
-        // 每轮存盘。频率够低（一轮几十秒到几分钟），不必再加定时器；
-        // 进程被 kill -9 最多丢一轮的增量。
-        persist::save(&pool.read().await);
-
         tracing::info!(
-            nodes = snapshot.len(),
             selection = ?last_selection,
             "测速轮完成"
         );
