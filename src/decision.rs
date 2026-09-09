@@ -9,5 +9,9 @@ use crate::node::Node;
 pub fn select_top(nodes: &[Node], capacity: usize) -> Vec<String> {
     let mut ranked: Vec<_> = nodes.iter().collect();
     ranked.sort_by(|a, b| a.score().partial_cmp(&b.score()).unwrap());
-    ranked.into_iter().take(capacity).map(|n| n.tag.clone()).collect()
+    ranked
+        .into_iter()
+        .take(capacity)
+        .map(|n| n.tag.clone())
+        .collect()
 }

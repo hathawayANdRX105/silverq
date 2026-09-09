@@ -19,7 +19,10 @@ pub async fn run(
     selection: SharedSelection,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(listener_addr).await?;
-    tracing::info!(addr = listener_addr, "lift inbound listening (SOCKS5/HTTP-CONNECT)");
+    tracing::info!(
+        addr = listener_addr,
+        "lift inbound listening (SOCKS5/HTTP-CONNECT)"
+    );
 
     loop {
         let (socket, peer) = listener.accept().await?;
@@ -39,10 +42,18 @@ enum Proto {
     Http,
 }
 
+/// SOCKS5 命令。HTTP-CONNECT 永远是 Connect。
+#[derive(PartialEq, Clone, Copy)]
+enum Cmd {
+    Connect,
+    UdpAssociate,
+}
+
 struct Target {
     host: String,
     port: u16,
     proto: Proto,
+    cmd: Cmd,
 }
 
 async fn handle_one(
@@ -72,8 +83,14 @@ async fn handle_one(
         return Ok(());
     };
 
+    // UDP ASSOCIATE：分配中继 socket，回其地址，然后在 TCP 存活期间跑中继循环。
+    // 注意：客户端常填 0.0.0.0:0（自己也不知道源地址），所以不能用 host 空判断拦。
+    if target.cmd == Cmd::UdpAssociate {
+        return handle_udp_associate(socket, registry, selection).await;
+    }
+
     if target.host.is_empty() {
-        return Ok(()); // 非 CONNECT 命令，协议层已应答
+        return Ok(()); // 不支持的命令 / 地址类型，协议层已应答
     }
 
     // 协议应答
@@ -166,23 +183,29 @@ async fn socks5_greeting(
 }
 
 /// 读 SOCKS5 请求（VER CMD RSV ATYP + 地址 + 端口）。
+/// 支持 CMD=0x01 CONNECT 与 CMD=0x03 UDP ASSOCIATE；BIND(0x02) 不支持。
 async fn read_socks5_target(
     socket: &mut TcpStream,
 ) -> Result<Target, Box<dyn std::error::Error + Send + Sync>> {
     let mut head = [0u8; 4];
     socket.read_exact(&mut head).await?;
-    if head[0] != 0x05 || head[1] != 0x01 {
-        // 只支持 CONNECT；回 0x07 command not supported（完整 10 字节）
-        socket
-            .write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-            .await
-            .ok();
-        return Ok(Target {
-            host: String::new(),
-            port: 0,
-            proto: Proto::Socks5,
-        });
-    }
+    let cmd = match (head[0], head[1]) {
+        (0x05, 0x01) => Cmd::Connect,
+        (0x05, 0x03) => Cmd::UdpAssociate,
+        _ => {
+            // 回 0x07 command not supported（完整 10 字节）
+            socket
+                .write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .ok();
+            return Ok(Target {
+                host: String::new(),
+                port: 0,
+                proto: Proto::Socks5,
+                cmd: Cmd::Connect,
+            });
+        }
+    };
 
     let mut host_bytes: Vec<u8> = Vec::new();
     let port = match head[3] {
@@ -216,6 +239,7 @@ async fn read_socks5_target(
                 host: String::new(),
                 port: 0,
                 proto: Proto::Socks5,
+                cmd,
             });
         }
     };
@@ -233,11 +257,11 @@ async fn read_socks5_target(
     } else {
         String::from_utf8_lossy(&host_bytes).into_owned()
     };
-
     Ok(Target {
         host,
         port,
         proto: Proto::Socks5,
+        cmd,
     })
 }
 
@@ -249,10 +273,7 @@ async fn read_http_connect_target(
     let mut line = String::from(first_byte as char);
     let mut b = [0u8; 1];
     loop {
-        socket
-            .read_exact(&mut b)
-            .await
-            .map_err(|e| e.to_string())?;
+        socket.read_exact(&mut b).await.map_err(|e| e.to_string())?;
         line.push(b[0] as char);
         if b[0] == b'\n' {
             break;
@@ -262,6 +283,7 @@ async fn read_http_connect_target(
                 host: String::new(),
                 port: 0,
                 proto: Proto::Http,
+                cmd: Cmd::Connect,
             });
         }
     }
@@ -272,10 +294,7 @@ async fn read_http_connect_target(
     loop {
         let mut cur = Vec::with_capacity(64);
         loop {
-            socket
-                .read_exact(&mut b)
-                .await
-                .map_err(|e| e.to_string())?;
+            socket.read_exact(&mut b).await.map_err(|e| e.to_string())?;
             header_bytes += 1;
             if b[0] == b'\n' {
                 break;
@@ -294,7 +313,7 @@ async fn read_http_connect_target(
         }
     }
 
-    let parts: Vec<&str> = line.trim_end().split_whitespace().collect();
+    let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.len() < 2 || !parts[0].eq_ignore_ascii_case("CONNECT") {
         socket
             .write_all(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
@@ -304,6 +323,7 @@ async fn read_http_connect_target(
             host: String::new(),
             port: 0,
             proto: Proto::Http,
+            cmd: Cmd::Connect,
         });
     }
 
@@ -319,7 +339,69 @@ async fn read_http_connect_target(
         host,
         port,
         proto: Proto::Http,
+        cmd: Cmd::Connect,
     })
+}
+
+/// 处理 UDP ASSOCIATE：绑中继 socket → 回其地址 → 跑中继循环直到 TCP 断开。
+///
+/// RFC 1928 要求 TCP 控制连接是 association 的生命周期锚点：TCP 一断，
+/// 服务端必须回收该 association 的所有 UDP 状态。这里用 oneshot 通知中继循环退出。
+async fn handle_udp_associate(
+    mut socket: TcpStream,
+    registry: &Registry,
+    selection: &SharedSelection,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let control_local = socket.local_addr()?;
+    let (relay, relay_addr) = match crate::udp::bind_relay(control_local).await {
+        Ok(v) => v,
+        Err(e) => {
+            // 0x01 general failure
+            socket
+                .write_all(&[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .ok();
+            return Err(format!("udp associate: bind relay failed: {e}").into());
+        }
+    };
+
+    // 成功应答带上中继地址，客户端后续把数据报发到这里
+    let mut reply = vec![0x05, 0x00, 0x00];
+    match relay_addr {
+        SocketAddr::V4(a) => {
+            reply.push(0x01);
+            reply.extend_from_slice(&a.ip().octets());
+            reply.extend_from_slice(&a.port().to_be_bytes());
+        }
+        SocketAddr::V6(a) => {
+            reply.push(0x04);
+            reply.extend_from_slice(&a.ip().octets());
+            reply.extend_from_slice(&a.port().to_be_bytes());
+        }
+    }
+    socket.write_all(&reply).await?;
+    tracing::debug!(%relay_addr, "udp associate established");
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let relay_task = tokio::spawn(crate::udp::run_relay(
+        relay,
+        registry.clone(),
+        selection.clone(),
+        shutdown_rx,
+    ));
+
+    // TCP 控制连接读到 EOF = 客户端结束 association
+    let mut sink = [0u8; 1];
+    loop {
+        match socket.read(&mut sink).await {
+            Ok(0) => break,    // EOF
+            Ok(_) => continue, // 控制连接上不应有数据，忽略
+            Err(_) => break,
+        }
+    }
+    let _ = shutdown_tx.send(());
+    let _ = relay_task.await;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -415,11 +497,7 @@ mod tests {
         // 关键断言：socket 里剩下的必须正好是隧道数据，没有残留头部字节
         let mut rest = [0u8; 9];
         server.read_exact(&mut rest).await.unwrap();
-        assert_eq!(
-            &rest,
-            b"\x16\x03\x01TUNNEL",
-            "头部残留会污染隧道数据"
-        );
+        assert_eq!(&rest, b"\x16\x03\x01TUNNEL", "头部残留会污染隧道数据");
     }
 
     #[tokio::test]

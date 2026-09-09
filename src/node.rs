@@ -12,8 +12,11 @@ const ALPHA_MIN: f64 = 0.12;
 const ALPHA_MAX: f64 = 0.65;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // server/port 见下方说明
 pub struct Node {
     pub tag: String,
+    // server/port 目前调度侧不读（测速按 tag 查 registry 里的 adapter），
+    // 保留是为了日志可读与将来按节点重建 adapter，不删。
     pub server: String,
     pub port: u16,
     /// Current EWMA score (lower is better)

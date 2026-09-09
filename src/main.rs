@@ -20,6 +20,11 @@ mod factory;
 mod inbound;
 #[cfg(feature = "meow")]
 mod meow;
+/// TUN 数据面未实现，见模块文档；不接线，仅作占位提醒。
+#[cfg(feature = "meow")]
+mod tun;
+#[cfg(feature = "meow")]
+mod udp;
 
 #[cfg(unix)]
 mod cli;
@@ -30,10 +35,7 @@ mod ctl;
 use batch::NoopMeasurer;
 
 use batch::Measurer;
-use config::{
-    DEFAULT_ACTIVE_CAPACITY, DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY, DEFAULT_SLOW_INTERVAL_SECS,
-    DEFAULT_TIMEOUT_MS, DEFAULT_TIMEOUT_PENALTY,
-};
+use config::{DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_PENALTY};
 use node::Node;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -108,25 +110,21 @@ async fn serve(nodes: String) -> Result<(), Box<dyn std::error::Error>> {
     let pinned = Arc::new(AtomicBool::new(false));
 
     // 4. 调度循环（测速 + EWMA + 切换），pinned 时暂停覆盖
-    let sched_measurer = measurer.clone();
-    let sched_pool = pool.clone();
-    let sched_selection = selection.clone();
-    let sched_pinned = pinned.clone();
-    let sched = tokio::spawn(async move {
-        schedule_loop(
-            sched_measurer,
-            sched_pool,
-            sched_selection,
-            sched_pinned,
-            DEFAULT_ACTIVE_CAPACITY,
-            DEFAULT_BATCH_SIZE,
-            DEFAULT_SLOW_INTERVAL_SECS,
-            DEFAULT_TIMEOUT_MS,
-            DEFAULT_CONCURRENCY,
-            DEFAULT_TIMEOUT_PENALTY,
-        )
-        .await
-    });
+    let handles = SchedulerHandles {
+        measurer: measurer.clone(),
+        pool: pool.clone(),
+        selection: selection.clone(),
+        pinned: pinned.clone(),
+    };
+    let sched_cfg = SchedulerConfig {
+        capacity: config::active_capacity(),
+        batch_size: DEFAULT_BATCH_SIZE,
+        interval_secs: config::interval_secs(),
+        timeout_ms: config::timeout_ms(),
+        concurrency: DEFAULT_CONCURRENCY,
+        timeout_penalty: DEFAULT_TIMEOUT_PENALTY,
+    };
+    let sched = tokio::spawn(schedule_loop(handles, sched_cfg));
 
     // 5. ctl socket（unix）：reload / select / status
     #[cfg(unix)]
@@ -162,11 +160,18 @@ async fn serve(nodes: String) -> Result<(), Box<dyn std::error::Error>> {
                     tracing::error!("inbound exited: {e}");
                 }
             });
-            tokio::join!(inb, inb2, sched);
+            // 三个任务都是常驻的；任一退出都说明出事了。JoinError 必须报出来，
+            // 否则 panic 被静默吞掉，进程看起来还活着但实际已经瘸了。
+            let (ctl_res, inbound_res, sched_res) = tokio::join!(inb, inb2, sched);
+            report_task_exit("ctl", ctl_res);
+            report_task_exit("inbound", inbound_res);
+            report_task_exit("scheduler", sched_res);
         }
         #[cfg(not(feature = "meow"))]
         {
-            tokio::join!(inb, sched);
+            let (ctl_res, sched_res) = tokio::join!(inb, sched);
+            report_task_exit("ctl", ctl_res);
+            report_task_exit("scheduler", sched_res);
         }
     }
     #[cfg(not(unix))]
@@ -178,20 +183,52 @@ async fn serve(nodes: String) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 调度主循环：周期全池测速 → EWMA 更新 → 纯 EWMA 选前 N → 写共享选择。
-/// `pinned` 为 true 时跳过切换（手动钉住中）。
-async fn schedule_loop(
-    measurer: Arc<dyn Measurer>,
-    pool: Arc<RwLock<Vec<Node>>>,
-    selection: SharedSelection,
-    pinned: Arc<AtomicBool>,
+/// 常驻任务退出时把原因报出来（含 panic）。
+/// 静默 `let _ = join!(...)` 会让 panic 消失，进程看着还在跑，实则功能已缺。
+fn report_task_exit(name: &str, res: Result<(), tokio::task::JoinError>) {
+    match res {
+        Ok(()) => tracing::warn!(task = name, "常驻任务提前退出"),
+        Err(e) if e.is_panic() => tracing::error!(task = name, "任务 panic: {e}"),
+        Err(e) => tracing::warn!(task = name, "任务异常结束: {e}"),
+    }
+}
+
+/// 调度参数。收拢成结构体：之前 10 个位置参数，加一个就得改所有调用点，
+/// 且相邻的同类型 usize/u64 很容易传错位置。
+struct SchedulerConfig {
     capacity: usize,
     batch_size: usize,
     interval_secs: u64,
     timeout_ms: u64,
     concurrency: usize,
     timeout_penalty: f64,
-) {
+}
+
+/// 调度共享句柄。
+struct SchedulerHandles {
+    measurer: Arc<dyn Measurer>,
+    pool: Arc<RwLock<Vec<Node>>>,
+    selection: SharedSelection,
+    /// true 时跳过切换（手动钉住中），但测速继续
+    pinned: Arc<AtomicBool>,
+}
+
+/// 调度主循环：周期全池测速 → EWMA 更新 → 纯 EWMA 选前 N → 写共享选择。
+async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
+    let SchedulerHandles {
+        measurer,
+        pool,
+        selection,
+        pinned,
+    } = h;
+    let SchedulerConfig {
+        capacity,
+        batch_size,
+        interval_secs,
+        timeout_ms,
+        concurrency,
+        timeout_penalty,
+    } = cfg;
     let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
     let mut last_selection: Vec<String> = Vec::new();
 
@@ -238,15 +275,12 @@ async fn apply_selection(selection: &[String], shared: &SharedSelection) {
         use meow_proxy::group::selector_store::SelectorStore;
         use std::path::PathBuf;
         const GROUP: &str = "lift-active";
-        let path = PathBuf::from(
-            std::env::var("LIFT_SELECTOR_STORE")
-                .unwrap_or_else(|_| {
-                    format!(
-                        "{}/.local/state/lift-selector.json",
-                        std::env::var("HOME").unwrap_or_default()
-                    )
-                }),
-        );
+        let path = PathBuf::from(std::env::var("LIFT_SELECTOR_STORE").unwrap_or_else(|_| {
+            format!(
+                "{}/.local/state/lift-selector.json",
+                std::env::var("HOME").unwrap_or_default()
+            )
+        }));
         if let Some(best) = selection.first() {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);

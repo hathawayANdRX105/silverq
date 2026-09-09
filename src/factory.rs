@@ -4,7 +4,7 @@
 
 use meow_common::adapter::ProxyAdapter;
 use meow_proxy::{
-    Hy2Adapter, Hy2Options, ShadowsocksAdapter, TrojanAdapter, TransportChain, VlessAdapter,
+    Hy2Adapter, Hy2Options, ShadowsocksAdapter, TransportChain, TrojanAdapter, VlessAdapter,
     VlessFlow,
 };
 use meow_transport::tls::{RealityConfig, TlsConfig};
@@ -25,8 +25,12 @@ pub fn build_proxy(spec: &NodeSpec) -> Result<Arc<dyn ProxyAdapter>, String> {
             } else {
                 None
             };
-            let transport =
-                build_transport(spec, v.sni.as_deref(), v.reality.clone(), v.fingerprint.clone())?;
+            let transport = build_transport(
+                spec,
+                v.sni.as_deref(),
+                v.reality.clone(),
+                v.fingerprint.clone(),
+            )?;
             Box::new(VlessAdapter::new(
                 spec.tag.as_str(),
                 spec.server.as_str(),
@@ -51,7 +55,10 @@ pub fn build_proxy(spec: &NodeSpec) -> Result<Arc<dyn ProxyAdapter>, String> {
             ))
         }
         crate::nodespec::Protocol::Shadowsocks => {
-            let s = spec.shadowsocks.as_ref().ok_or("shadowsocks spec missing")?;
+            let s = spec
+                .shadowsocks
+                .as_ref()
+                .ok_or("shadowsocks spec missing")?;
             Box::new(
                 ShadowsocksAdapter::new(
                     spec.tag.as_str(),
@@ -201,9 +208,6 @@ mod tests {
             hex_to_short_id("17d824dd68e24aaf").unwrap(),
             [0x17, 0xd8, 0x24, 0xdd, 0x68, 0xe2, 0x4a, 0xaf]
         );
-        assert_eq!(
-            hex_to_short_id("aa").unwrap(),
-            [0xaa, 0, 0, 0, 0, 0, 0, 0]
-        );
+        assert_eq!(hex_to_short_id("aa").unwrap(), [0xaa, 0, 0, 0, 0, 0, 0, 0]);
     }
 }

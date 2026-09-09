@@ -45,7 +45,9 @@ pub fn parse() -> Cmd {
         Some(first) => {
             // 无子命令：第一个参数视为 nodes.yaml（serve 简写）
             if first.starts_with('.') || first.ends_with(".yaml") || first.ends_with(".yml") {
-                Cmd::Serve { nodes: first.to_string() }
+                Cmd::Serve {
+                    nodes: first.to_string(),
+                }
             } else {
                 die(&format!("未知命令: {first}（serve | reload | select）"))
             }

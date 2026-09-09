@@ -1,6 +1,6 @@
 //! Batch concurrent measurement with fast/slow path separation.
-use async_trait::async_trait;
 use crate::node::Node;
+use async_trait::async_trait;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -19,7 +19,9 @@ pub trait Measurer: Send + Sync {
     async fn measure(&self, node: &Node, timeout_ms: u64) -> Option<f64>;
 }
 
-/// Placeholder measurer for testing (always returns a stable value).
+/// 空测速器：默认（无 meow feature）模式用，恒定返回 100ms。
+/// 用途是脱离 meow 自测调度逻辑本身（分批、EWMA、选择、切换）。
+#[cfg_attr(feature = "meow", allow(dead_code))]
 #[derive(Clone)]
 pub struct NoopMeasurer;
 

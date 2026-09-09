@@ -70,29 +70,52 @@ lift select auto           # 取消钉住，恢复自动
 | `batch.rs` | 分批并发测速 + Measurer trait |
 | `fast_path.rs` | 立即应用结果 + 超时扣分 |
 | `decision.rs` | 纯 EWMA select_top |
-| `inbound.rs` | 数据面（SOCKS5/HTTP-CONNECT → 当前选择，best→次优 fallback） |
+| `inbound.rs` | 数据面 TCP（SOCKS5 CONNECT / HTTP-CONNECT → 当前选择，best→次优 fallback） |
+| `udp.rs` | 数据面 UDP（SOCKS5 UDP ASSOCIATE 中继，按 (客户端,目标) 分会话） |
+| `tun.rs` | **未实现占位**（`unimplemented!`），见文件内说明 |
 | `cli.rs` | 子命令解析（serve / reload / select / status） |
 | `ctl.rs` | 控制通道（unix socket：热加载、手动钉住、状态查询） |
 | `config.rs` | 默认参数 |
 
 ## 已验证 / 已知范围
 
-已实测跑通（`protocol: direct` 基线节点 + curl）：
+`cargo test --features meow` 共 21 项（16 单测 + 5 e2e），e2e 真起 `lift serve` 进程、
+用真 SOCKS5 / HTTP-CONNECT 客户端打流量，全程本地回环、不依赖外网：
 
-| 路径 | 结果 |
+| 覆盖 | 内容 |
 |------|------|
-| SOCKS5（域名） | `http_code=200` |
-| SOCKS5（IPv4 字面量） | `http_code=301` |
-| HTTP CONNECT | `http_code=200` |
-| 10MB 传输 | `size=10000000`（无截断） |
-| `reload` / `select` / `status` | 全部生效，EWMA 跨 reload 保留 |
+| SOCKS5 TCP CONNECT | 握手协商 + 完整 10 字节应答 + echo 往返 |
+| SOCKS5 UDP ASSOCIATE | 中继端口分配 + 头部编解码 + UDP echo 往返 + 回程来源正确 |
+| UDP 分片 | `FRAG != 0` 必须丢弃（不做重组） |
+| SOCKS5 BIND | 回 `0x07` command not supported |
+| HTTP CONNECT | 200 应答 + **隧道无头部残留**（曾污染 TLS ClientHello 的回归点） |
+| 手工验证 | 10MB 传输无截断；`reload`/`select`/`status` 生效，EWMA 跨 reload 保留 |
 
 已知范围：
 
-- 数据面只做 **TCP**（SOCKS5 / HTTP-CONNECT）。**UDP 与 TUN 未做**——UDP 流量不会走 lift。
+- **TUN 未实现**：`src/tun.rs` 是显式占位（`unimplemented!` / `todo!`），不接线。
+  原因是 meow-rs 上游有 TUN 但**未发布到 crates.io**；要做需改 git 依赖复用上游，
+  或自行基于 `tun` + `smoltcp` 实现。细节与两条路线见该文件模块文档。
+  CI 有一个 job 专门守着它没被误接线。
+- **UDP 已支持**（SOCKS5 UDP ASSOCIATE），但不做分片重组。
 - SOCKS5 inbound **无认证**，默认只绑 `127.0.0.1`。改绑 `0.0.0.0` 等于开放代理，别这么干。
 - EWMA 分数**进程重启后清零**（`reload` 不丢，只有重启丢）。
-- 真实代理节点尚未用你的节点池实测（凭证在 gitignore 的文件里）；已验证的是协议解析 + 转发 + 调度链路。
+- 真实代理节点尚未用你的节点池实测（凭证在 gitignore 的文件里）；
+  已验证的是协议解析 + 转发 + 调度链路（用 `protocol: direct` 基线节点）。
+
+## CI
+
+`.github/workflows/ci.yml`：
+
+| job | 作用 |
+|-----|------|
+| `rustfmt` | 格式 gate |
+| `clippy (default / meow)` | 两种 feature 组合，`-D warnings` |
+| `test (default / meow)` | build + 单测；meow 额外跑 e2e 数据面 |
+| `TUN placeholder not wired` | 防止未实现的 TUN 占位被误接进运行路径 |
+
+两种 feature 都进矩阵的原因：meow 关掉时走 `NoopMeasurer`，是独立编译路径，
+只测一种会漏掉 `cfg` 分支里的错误。
 
 ## License
 

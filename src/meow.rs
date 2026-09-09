@@ -12,9 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// gstatic generate_204：无 body、稳定、适合做延迟探测。
-pub const PROBE_URL: &str = "https://www.gstatic.com/generate_204";
-
+// 探测 URL 见 `config::probe_url()`（`LIFT_PROBE_URL` 可覆盖，供测试指向本地端点）。
 pub type Registry = Arc<RwLock<HashMap<String, Arc<dyn ProxyAdapter>>>>;
 
 /// 每个节点一个 meow 协议 adapter（由 factory 构建），按 tag 索引。
@@ -26,16 +24,6 @@ pub struct MeowMeasurer {
 impl MeowMeasurer {
     pub fn new(registry: Registry) -> Self {
         Self { registry }
-    }
-
-    /// 运行时更换某节点的 adapter（重建连接后）。
-    pub fn replace(&self, tag: &str, adapter: Arc<dyn ProxyAdapter>) {
-        self.registry.write().insert(tag.to_string(), adapter);
-    }
-
-    /// 暴露共享 registry 给数据面 inbound。
-    pub fn registry(&self) -> &Registry {
-        &self.registry
     }
 }
 
@@ -51,7 +39,7 @@ impl Measurer for MeowMeasurer {
         // 成功返回 Some(delay)；超时/失败返回 None（lift 按超时扣分后移）。
         match meow_proxy::health::url_test(
             adapter.as_ref(),
-            PROBE_URL,
+            &crate::config::probe_url(),
             Some("200,204"),
             Duration::from_millis(timeout_ms),
         )

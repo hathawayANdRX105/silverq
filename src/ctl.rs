@@ -99,7 +99,7 @@ async fn handle_one(
     use tokio::io::AsyncWriteExt;
 
     let line = read_line(&mut stream).await?;
-    let parts: Vec<&str> = line.trim().split_whitespace().collect();
+    let parts: Vec<&str> = line.split_whitespace().collect();
     let cmd = parts.first().copied().unwrap_or("");
 
     let reply = match cmd {
@@ -114,9 +114,7 @@ async fn handle_one(
         Ok(msg) => format!("ok {msg}"),
         Err(e) => format!("error {e}"),
     };
-    stream
-        .write_all(format!("{text}\n").as_bytes())
-        .await?;
+    stream.write_all(format!("{text}\n").as_bytes()).await?;
     Ok(())
 }
 
@@ -164,8 +162,7 @@ async fn do_reload(state: &CtlState, path_arg: Option<&str>) -> Result<String, S
 
     *state.nodes_path.lock() = path.clone();
     if !state.pinned.load(Ordering::Relaxed) {
-        let top =
-            crate::decision::select_top(&pool, crate::config::DEFAULT_ACTIVE_CAPACITY);
+        let top = crate::decision::select_top(&pool, crate::config::active_capacity());
         *state.selection.write().await = top.clone();
         return Ok(format!("reloaded {path} ({top:?})"));
     }
@@ -196,9 +193,7 @@ async fn do_status(state: &CtlState) -> String {
     let pool_len = state.pool.read().await.len();
     let pinned = state.pinned.load(Ordering::Relaxed);
     let path = state.nodes_path.lock().clone();
-    format!(
-        "nodes={pool_len} selection={sel:?} pinned={pinned} nodes_path={path}"
-    )
+    format!("nodes={pool_len} selection={sel:?} pinned={pinned} nodes_path={path}")
 }
 
 /// 读一行（到 '\n' 或长度上限）。
@@ -229,11 +224,9 @@ pub async fn client(line: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = match UnixStream::connect(&path).await {
         Ok(s) => s,
         Err(e) => {
-            return Err(format!(
-                "daemon 未运行？ctl socket 不可用 ({}): {e}",
-                path.display()
+            return Err(
+                format!("daemon 未运行？ctl socket 不可用 ({}): {e}", path.display()).into(),
             )
-            .into())
         }
     };
     stream.write_all(line.as_bytes()).await?;

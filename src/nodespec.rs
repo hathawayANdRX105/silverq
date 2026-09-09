@@ -121,14 +121,14 @@ impl NodeSpec {
                     .ok_or_else(|| format!("{}: trojan protocol needs trojan spec", self.tag))?;
             }
             Protocol::Shadowsocks => {
-                self.shadowsocks
-                    .as_ref()
-                    .ok_or_else(|| format!("{}: shadowsocks protocol needs shadowsocks spec", self.tag))?;
+                self.shadowsocks.as_ref().ok_or_else(|| {
+                    format!("{}: shadowsocks protocol needs shadowsocks spec", self.tag)
+                })?;
             }
             Protocol::Hysteria2 => {
-                self.hysteria2
-                    .as_ref()
-                    .ok_or_else(|| format!("{}: hysteria2 protocol needs hysteria2 spec", self.tag))?;
+                self.hysteria2.as_ref().ok_or_else(|| {
+                    format!("{}: hysteria2 protocol needs hysteria2 spec", self.tag)
+                })?;
             }
             // 直连无凭证可校验
             Protocol::Direct => {}
@@ -139,10 +139,9 @@ impl NodeSpec {
 
 /// 从 YAML 文件加载节点表。
 pub fn load_nodes_yaml(path: &str) -> Result<Vec<NodeSpec>, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {}", path, e))?;
-    let file: NodeFile = serde_yaml::from_str(&raw)
-        .map_err(|e| format!("parse {}: {}", path, e))?;
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path, e))?;
+    let file: NodeFile =
+        serde_yaml::from_str(&raw).map_err(|e| format!("parse {}: {}", path, e))?;
     for n in &file.nodes {
         n.validate()?;
     }
