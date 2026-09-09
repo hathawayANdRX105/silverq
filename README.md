@@ -96,10 +96,10 @@ lift select auto           # 取消钉住，恢复自动
 
 ### 真实节点池实测（本地，不进 CI）
 
-用 `scripts/singbox2lift.py` 从 sing-box 的 `nodes.json` 转出 179 个节点
-（vless 123 / hysteria2 23 / shadowsocks 22 / trojan 11），实测结果：
+用 `scripts/singbox2lift.py` 从 sing-box 的 `nodes.json` 转出 **217 个节点**
+（vless 161 / hysteria2 23 / shadowsocks 22 / trojan 11），实测结果：
 
-- 179/179 全部成功构建 meow adapter（四种协议路径都真实跑过）
+- 217/217 全部成功构建 meow adapter（四种协议 + ws/grpc transport 都真实跑过）
 - 经 lift + 真实代理节点出网：`http_code=204`，稳定 0.18~0.22s
 - 出口 IP 确认为代理落地 IP（直连被墙 → 证明没有静默走直连兜底）
 - UDP ASSOCIATE 经真实节点查 DNS：回包 tid 匹配、`ANCOUNT=2`
@@ -112,7 +112,12 @@ sing-box 测同样超时。这不是 lift 的问题，排查时容易误判成�
 - **TUN 未实现**：`src/tun.rs` 是显式占位（`unimplemented!` / `todo!`），不接线。
   meow-rs 上游有 TUN 但**未发布到 crates.io**；要做需改 git 依赖复用上游，
   或自行基于 `tun` + `smoltcp` 实现。两条路线与证据见该文件模块文档，CI 有 job 守着它没被误接。
-- **transport 未支持**：ws / grpc 的 VLESS 节点转换时会被跳过（真实池里 35 个）。
+- **ws / grpc 已支持**（VLESS）：层序为 TLS 贴 TCP、ws/grpc 叠其上，明文 ws 节点
+  （`tls: false`）也可接。trojan 的 transport 还没接（其 adapter 无 TransportChain 入口）。
+- **黑洞节点会拖慢请求**：节点 TCP 连得上、握手也"成功"、但之后不回数据时，
+  AEAD 类协议（shadowsocks）的 `dial_tcp` 不等服务端响应就返回 Ok，
+  所以 dial 超时管不到，请求会挂到客户端超时。实测钉住这类节点会卡满 25s。
+  要修需在建连后加首字节读超时，属架构级改动，尚未做。
 - **UDP 不做分片重组**。
 - SOCKS5 inbound **无认证**，默认只绑 `127.0.0.1`。改绑 `0.0.0.0` 等于开放代理。
 - EWMA 分数**进程重启后清零**（`reload` 不丢，只有重启丢）。

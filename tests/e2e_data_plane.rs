@@ -88,6 +88,18 @@ struct Daemon {
     _dir: tempdirlike::TempDir,
 }
 
+impl Daemon {
+    /// 通过 ctl socket 发一条命令，返回 daemon 应答。
+    fn ctl(&self, cmd: &str) -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_lift"))
+            .args(cmd.split_whitespace())
+            .env("LIFT_CTL_SOCK", self._dir.path().join("ctl.sock"))
+            .output()
+            .expect("ctl 调用失败");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+}
+
 impl Drop for Daemon {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -134,13 +146,22 @@ fn free_port() -> u16 {
 
 /// 启动 lift serve，等到它把 selection 写出来（即第一轮测速完成）为止。
 fn start_daemon(probe: SocketAddr) -> Daemon {
+    start_daemon_with(probe, None)
+}
+
+/// `extra_nodes_before`: 插在 direct 节点**之前**的节点 YAML 片段，
+/// 用来让某个坏节点排在候选队首，测 fallback。
+fn start_daemon_with(probe: SocketAddr, extra_nodes_before: Option<&str>) -> Daemon {
     let dir = tempdirlike::TempDir::new("daemon");
     let nodes_path = dir.path().join("nodes.yaml");
-    std::fs::write(
-        &nodes_path,
-        "nodes:\n  - tag: \"direct-baseline\"\n    protocol: direct\n    server: \"-\"\n    port: 0\n",
-    )
-    .unwrap();
+    let mut yaml = String::from("nodes:\n");
+    if let Some(extra) = extra_nodes_before {
+        yaml.push_str(extra);
+    }
+    yaml.push_str(
+        "  - tag: \"direct-baseline\"\n    protocol: direct\n    server: \"-\"\n    port: 0\n",
+    );
+    std::fs::write(&nodes_path, yaml).unwrap();
 
     let socks_port = free_port();
     let socks: SocketAddr = format!("127.0.0.1:{socks_port}").parse().unwrap();
@@ -352,4 +373,79 @@ fn socks5_rejects_bind_command() {
     let mut reply = [0u8; 10];
     s.read_exact(&mut reply).unwrap();
     assert_eq!(reply[1], 0x07, "BIND 应回 0x07 command not supported");
+}
+
+/// EWMA 必须把连不上的节点从队首挤走 —— 这是"自动挡"的核心保证。
+///
+/// 配置里死节点排第一，但一轮测速后它应该被扣分后移，数据面请求走活节点。
+/// 这条比"测 fallback"更贴近真实价值：fallback 是兜底，EWMA 排序是主线。
+#[test]
+fn ewma_demotes_unreachable_node_from_head() {
+    let probe = spawn_probe_endpoint();
+    let echo = spawn_tcp_echo();
+
+    // 占一个端口再释放，得到一个几乎确定无人监听的端口
+    let dead_port = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let bad = format!(
+        "  - tag: \"unreachable\"\n    protocol: shadowsocks\n    server: \"127.0.0.1\"\n    port: {dead_port}\n    shadowsocks:\n      password: \"0123456789abcdef\"\n      cipher: \"aes-128-gcm\"\n"
+    );
+    let d = start_daemon_with(probe, Some(&bad));
+
+    // 死节点在配置里排第一，但测速后应被挤到 direct 之后
+    let status = d.ctl("status");
+    let head = status
+        .split("selection=[")
+        .nth(1)
+        .and_then(|r| r.split(']').next())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        head.starts_with("\"direct-baseline\""),
+        "EWMA 应把死节点挤出队首，实际 selection={head}"
+    );
+
+    // 且数据面确实可用
+    let (mut s, _) = socks5_handshake(d.socks, 0x01, echo);
+    s.write_all(b"ewma-works").unwrap();
+    let mut buf = [0u8; 10];
+    s.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, b"ewma-works");
+}
+
+/// 钉住一个连不上的节点时，必须**快速失败**而不是挂住。
+///
+/// 钉住的语义是"只用这个节点"，所以不该 fallback（否则钉住就失去意义）。
+/// 但也不能让请求悬着——实测应在毫秒级返回，而非拖到客户端超时。
+#[test]
+fn pinned_unreachable_node_fails_fast() {
+    let probe = spawn_probe_endpoint();
+    let echo = spawn_tcp_echo();
+
+    let dead_port = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let bad = format!(
+        "  - tag: \"unreachable\"\n    protocol: shadowsocks\n    server: \"127.0.0.1\"\n    port: {dead_port}\n    shadowsocks:\n      password: \"0123456789abcdef\"\n      cipher: \"aes-128-gcm\"\n"
+    );
+    let d = start_daemon_with(probe, Some(&bad));
+
+    let reply = d.ctl("select unreachable");
+    assert!(reply.contains("pinned"), "钉住应成功，实际: {reply}");
+
+    let started = Instant::now();
+    let (mut s, _) = socks5_handshake(d.socks, 0x01, echo);
+    s.write_all(b"should-fail").unwrap();
+    let mut buf = [0u8; 11];
+    let res = s.read_exact(&mut buf);
+
+    assert!(res.is_err(), "钉住死节点不应 fallback 到活节点");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "必须快速失败，实际 {:?}",
+        started.elapsed()
+    );
 }

@@ -2,3 +2,5 @@
 /Cargo.lock
 *.swp
 *.swo
+__pycache__/
+*.pyc

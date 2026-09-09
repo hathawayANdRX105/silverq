@@ -17,6 +17,30 @@ import sys
 from collections import Counter
 
 
+def conv_transport(o):
+    """sing-box transport -> lift transport spec。不支持的返回 (None, 原因)。"""
+    t = o.get("transport")
+    if not t:
+        return None, None
+    kind = t.get("type")
+    if kind == "ws":
+        spec = {"type": "ws", "path": t.get("path") or "/"}
+        # sing-box 的 ws host 在 headers.Host（大小写不定）
+        headers = t.get("headers") or {}
+        host = next((v for k, v in headers.items() if k.lower() == "host"), None)
+        if isinstance(host, list):
+            host = host[0] if host else None
+        if host:
+            spec["host"] = host
+        return spec, None
+    if kind == "grpc":
+        return {
+            "type": "grpc",
+            "service_name": t.get("service_name") or "GunService",
+        }, None
+    return None, f"transport={kind} 未支持"
+
+
 def conv_vless(o):
     tls = o.get("tls") or {}
     spec = {"uuid": o["uuid"]}
@@ -35,12 +59,16 @@ def conv_vless(o):
     if utls := tls.get("utls"):
         if fp := utls.get("fingerprint"):
             spec["fingerprint"] = fp
-    # lift 的 factory 对 vless 一定会建 TLS 层；没开 tls 的节点接不了
-    if not tls.get("enabled"):
-        return None, "vless 未启用 tls（lift factory 目前必建 TLS 层）"
-    # transport（ws/grpc 等）lift 还没接
-    if o.get("transport"):
-        return None, f"transport={o['transport'].get('type', '?')} 未支持"
+    # TLS 可选：明文 + ws/grpc 伪装的节点也能接
+    spec["tls"] = bool(tls.get("enabled"))
+    tr, reason = conv_transport(o)
+    if reason:
+        return None, reason
+    if tr:
+        spec["transport"] = tr
+    elif not spec["tls"]:
+        # 既没 TLS 又没传输层伪装 = 裸 VLESS over TCP，服务端基本不会这么配
+        return None, "vless 无 tls 且无 transport"
     return {"protocol": "vless", "vless": spec}, None
 
 
@@ -50,8 +78,9 @@ def conv_trojan(o):
     if sni := tls.get("server_name"):
         spec["sni"] = sni
     spec["skip_cert_verify"] = bool(tls.get("insecure", True))
+    # lift 的 trojan adapter 还没接 transport 层（VLESS 才有 TransportChain 入口）
     if o.get("transport"):
-        return None, f"transport={o['transport'].get('type', '?')} 未支持"
+        return None, f"trojan transport={o['transport'].get('type', '?')} 未支持"
     return {"protocol": "trojan", "trojan": spec}, None
 
 
@@ -101,7 +130,10 @@ def emit(nodes):
                 if isinstance(v, dict):
                     lines.append(f"      {k}:")
                     for k2, v2 in v.items():
-                        lines.append(f"        {k2}: {yaml_quote(v2)}")
+                        if isinstance(v2, bool):
+                            lines.append(f"        {k2}: {'true' if v2 else 'false'}")
+                        else:
+                            lines.append(f"        {k2}: {yaml_quote(v2)}")
                 elif isinstance(v, bool):
                     lines.append(f"      {k}: {'true' if v else 'false'}")
                 else:

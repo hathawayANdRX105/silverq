@@ -3,22 +3,101 @@
 use crate::batch::Measurement;
 use crate::node::Node;
 
-/// Apply a batch of measurements immediately.
-/// - Successful measurements update EWMA normally.
-/// - Timeout/failure results apply a large penalty (move node to back).
+/// 把一批测速结果写回节点池：成功的更新 EWMA，超时/失败的扣分后移。
+///
+/// 扣分只对曾经成功过的节点有意义。从未成功的节点 `ewma` 仍是 `INFINITY`，
+/// 本来就排在最后。真正需要扣分的是先活后死的节点：否则一个刚测出 50ms 的
+/// 节点挂掉后，仍会带着 50ms 的分数长期霸占队首。
 pub fn apply_batch(nodes: &mut [Node], measurements: &[Measurement], timeout_penalty: f64) {
     for m in measurements {
         if let Some(node) = nodes.iter_mut().find(|n| n.tag == m.tag) {
             if let Some(delay) = m.delay_ms {
                 node.update(delay);
-            } else {
-                // Timeout or failure: apply heavy penalty and mark as needing observation
-                if node.ewma.is_finite() {
-                    node.ewma = (node.ewma + timeout_penalty).min(9999.0);
-                } else {
-                    node.ewma = timeout_penalty;
-                }
+            } else if node.ewma.is_finite() {
+                // 曾经成功过：在原分数上累加扣分，让健康节点超过它。
+                // 封顶避免累积到 inf 破坏排序。
+                node.ewma = (node.ewma + timeout_penalty).min(9999.0);
             }
+            // 从未成功过（ewma 仍是 INFINITY）：保持不动。
+            //
+            // 早先这里会把它设成 timeout_penalty(3000)，等于把"从未连通过"的节点
+            // 提升到"真实延迟 3000ms+ 的活节点"之前 —— 死节点插到活节点前面。
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(tag: &str) -> Node {
+        Node::new(tag, "127.0.0.1", 443)
+    }
+
+    fn ok(tag: &str, ms: f64) -> Measurement {
+        Measurement {
+            tag: tag.into(),
+            delay_ms: Some(ms),
+        }
+    }
+
+    fn timeout(tag: &str) -> Measurement {
+        Measurement {
+            tag: tag.into(),
+            delay_ms: None,
+        }
+    }
+
+    /// 从未成功的节点保持 INFINITY，天然排最后 —— 扣分对它无意义。
+    #[test]
+    fn never_measured_node_stays_worst() {
+        let mut pool = vec![node("dead"), node("live")];
+        apply_batch(&mut pool, &[timeout("dead"), ok("live", 50.0)], 3000.0);
+
+        assert!(pool[0].score().is_infinite(), "从未成功过应保持 INFINITY");
+        assert_eq!(pool[1].score(), 50.0);
+    }
+
+    /// 关键场景：先活后死。扣分必须让它被健康节点超过，
+    /// 否则挂掉的节点会带着旧的好分数长期霸占队首。
+    #[test]
+    fn previously_healthy_node_is_penalized_after_failing() {
+        let mut pool = vec![node("was_fast"), node("steady")];
+
+        // 第一轮：was_fast 很快，steady 一般
+        apply_batch(
+            &mut pool,
+            &[ok("was_fast", 20.0), ok("steady", 200.0)],
+            3000.0,
+        );
+        assert!(pool[0].score() < pool[1].score(), "was_fast 起初应更优");
+
+        // was_fast 挂了：扣分后必须落到 steady 之后
+        apply_batch(
+            &mut pool,
+            &[timeout("was_fast"), ok("steady", 200.0)],
+            3000.0,
+        );
+        assert!(
+            pool[0].score() > pool[1].score(),
+            "挂掉的节点必须被扣到 steady 之后：was_fast={} steady={}",
+            pool[0].score(),
+            pool[1].score()
+        );
+    }
+
+    /// 扣分累积但要有上限，避免分数溢出成 NaN/inf 破坏排序。
+    #[test]
+    fn penalty_accumulates_but_is_capped() {
+        let mut pool = vec![node("flaky")];
+        apply_batch(&mut pool, &[ok("flaky", 100.0)], 3000.0);
+        for _ in 0..50 {
+            apply_batch(&mut pool, &[timeout("flaky")], 3000.0);
+        }
+        assert!(
+            pool[0].score().is_finite() && pool[0].score() <= 9999.0,
+            "分数必须有上限，实际 {}",
+            pool[0].score()
+        );
     }
 }

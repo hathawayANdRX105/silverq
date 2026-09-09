@@ -25,12 +25,7 @@ pub fn build_proxy(spec: &NodeSpec) -> Result<Arc<dyn ProxyAdapter>, String> {
             } else {
                 None
             };
-            let transport = build_transport(
-                spec,
-                v.sni.as_deref(),
-                v.reality.clone(),
-                v.fingerprint.clone(),
-            )?;
+            let transport = build_transport(spec, v)?;
             Box::new(VlessAdapter::new(
                 spec.tag.as_str(),
                 spec.server.as_str(),
@@ -100,44 +95,77 @@ pub fn build_proxy(spec: &NodeSpec) -> Result<Arc<dyn ProxyAdapter>, String> {
     Ok(Arc::from(proxy))
 }
 
-/// VLESS 的 transport chain：Reality 优先，否则普通 TLS。
+/// 组装 VLESS 的 transport chain。
+///
+/// **层序是硬约束**（见 meow `TransportChain` 文档：VLESS over WS over TLS）：
+/// 先 push TLS（贴 TCP），再 push ws/grpc（叠在 TLS 之上）。搞反了连不上。
+/// `tls_enabled=false` 时跳过 TLS 层，只上 ws/grpc（明文 + 传输层伪装的节点）。
 fn build_transport(
     spec: &NodeSpec,
-    sni: Option<&str>,
-    reality: Option<crate::nodespec::RealitySpec>,
-    fingerprint: Option<String>,
+    v: &crate::nodespec::VlessSpec,
 ) -> Result<TransportChain, String> {
+    use crate::nodespec::TransportSpec;
+
     let mut chain = TransportChain::empty();
-    let sni = sni.unwrap_or(spec.server.as_str()).to_string();
+    let sni = v.sni.clone().unwrap_or_else(|| spec.server.clone());
 
-    let mut tls = TlsConfig {
-        enabled: true,
-        sni: Some(sni),
-        alpn: Vec::new(),
-        skip_cert_verify: true,
-        client_cert: None,
-        fingerprint,
-        additional_roots: Vec::new(),
-        ech: None,
-        reality: None,
-    };
-
-    if let Some(r) = reality {
-        let mut rcfg = RealityConfig {
-            public_key: base64url_decode32(&r.public_key)?,
-            short_id: [0u8; 8],
-            support_x25519_mlkem768: false,
+    // 第一层：TLS（可选）
+    if v.tls {
+        let mut tls = TlsConfig {
+            enabled: true,
+            sni: Some(sni.clone()),
+            alpn: Vec::new(),
+            skip_cert_verify: true,
+            client_cert: None,
+            fingerprint: v.fingerprint.clone(),
+            additional_roots: Vec::new(),
+            ech: None,
+            reality: None,
         };
-        if let Some(sid) = r.short_id {
-            rcfg.short_id = hex_to_short_id(&sid)?;
+
+        if let Some(r) = v.reality.clone() {
+            let mut rcfg = RealityConfig {
+                public_key: base64url_decode32(&r.public_key)?,
+                short_id: [0u8; 8],
+                support_x25519_mlkem768: false,
+            };
+            if let Some(sid) = r.short_id {
+                rcfg.short_id = hex_to_short_id(&sid)?;
+            }
+            tls.reality = Some(rcfg);
+            tls.skip_cert_verify = false; // Reality 路径自己做认证
         }
-        tls.reality = Some(rcfg);
-        tls.skip_cert_verify = false; // Reality 路径自己做认证
+
+        let layer = meow_transport::tls::TlsLayer::new(&tls)
+            .map_err(|e| format!("{}: build TlsLayer failed: {e}", spec.tag))?;
+        chain.push(Box::new(layer));
     }
 
-    let layer = meow_transport::tls::TlsLayer::new(&tls)
-        .map_err(|e| format!("{}: build TlsLayer failed: {e}", spec.tag))?;
-    chain.push(Box::new(layer));
+    // 第二层：ws / grpc（可选），叠在 TLS 之上
+    match &v.transport {
+        None => {}
+        Some(TransportSpec::Ws { path, host }) => {
+            let cfg = meow_transport::ws::WsConfig {
+                path: path.clone(),
+                // Host 头缺省用 SNI：明文 ws 节点常靠 Host 分流
+                host_header: Some(host.clone().unwrap_or_else(|| sni.clone())),
+                ..Default::default()
+            };
+            let layer = meow_transport::ws::WsLayer::new(cfg)
+                .map_err(|e| format!("{}: build WsLayer failed: {e}", spec.tag))?;
+            chain.push(Box::new(layer));
+        }
+        Some(TransportSpec::Grpc { service_name }) => {
+            let cfg = meow_transport::grpc::GrpcConfig {
+                service_name: service_name.clone(),
+                // authority 用 SNI 而非 meow 默认的 "localhost"：
+                // 服务端按 :authority 分流时 localhost 会被拒
+                authority: sni.clone(),
+            };
+            chain.push(Box::new(meow_transport::grpc::GrpcLayer::new(cfg)));
+        }
+    }
+
     Ok(chain)
 }
 
@@ -202,6 +230,77 @@ fn hex_to_short_id(s: &str) -> Result<[u8; 8], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn vless_spec(tls: bool, transport: Option<crate::nodespec::TransportSpec>) -> NodeSpec {
+        NodeSpec {
+            tag: "T".into(),
+            protocol: crate::nodespec::Protocol::Vless,
+            server: "1.2.3.4".into(),
+            port: 443,
+            vless: Some(crate::nodespec::VlessSpec {
+                uuid: "b85798ef-9edc-46a4-9a87-8da4499d36d0".into(),
+                sni: Some("example.com".into()),
+                flow: None,
+                reality: None,
+                fingerprint: None,
+                tls,
+                transport,
+            }),
+            trojan: None,
+            shadowsocks: None,
+            hysteria2: None,
+        }
+    }
+
+    /// 层序是硬约束：TLS 必须贴 TCP、ws/grpc 叠在其上（meow TransportChain 文档：
+    /// VLESS over WS over TLS）。搞反了节点全连不上，而这种错不会编译失败。
+    /// 这里锁层数，顺序错位在真实节点上会表现为握手失败。
+    #[test]
+    fn transport_chain_layer_count() {
+        use crate::nodespec::TransportSpec;
+
+        // 纯 TLS：1 层
+        let spec = vless_spec(true, None);
+        let v = spec.vless.as_ref().unwrap();
+        assert_eq!(build_transport(&spec, v).unwrap().len(), 1);
+
+        // TLS + ws：2 层
+        let spec = vless_spec(
+            true,
+            Some(TransportSpec::Ws {
+                path: "/x".into(),
+                host: None,
+            }),
+        );
+        let v = spec.vless.as_ref().unwrap();
+        assert_eq!(build_transport(&spec, v).unwrap().len(), 2);
+
+        // 明文 ws（无 TLS）：1 层 —— 真实池里有这种节点
+        let spec = vless_spec(
+            false,
+            Some(TransportSpec::Ws {
+                path: "/x".into(),
+                host: Some("cdn.example.com".into()),
+            }),
+        );
+        let v = spec.vless.as_ref().unwrap();
+        assert_eq!(build_transport(&spec, v).unwrap().len(), 1);
+
+        // TLS + grpc：2 层
+        let spec = vless_spec(
+            true,
+            Some(TransportSpec::Grpc {
+                service_name: "update".into(),
+            }),
+        );
+        let v = spec.vless.as_ref().unwrap();
+        assert_eq!(build_transport(&spec, v).unwrap().len(), 2);
+
+        // 无 TLS 无 transport：0 层（裸 TCP）
+        let spec = vless_spec(false, None);
+        let v = spec.vless.as_ref().unwrap();
+        assert!(build_transport(&spec, v).unwrap().is_empty());
+    }
 
     #[test]
     fn uuid_parse() {

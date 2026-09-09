@@ -7,6 +7,7 @@ use crate::meow::Registry;
 use meow_common::Metadata;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -125,16 +126,28 @@ async fn handle_one(
             .filter_map(|tag| guard.get(tag).cloned())
             .collect()
     };
-
+    // 逐个 dial，**每个都带超时**。
+    //
+    // 没有这个超时的话，selection[0] 是死节点时 dial_tcp 会挂到内核 TCP 超时
+    // （可达数十秒），fallback 根本轮不到下一个候选 —— 实测表现为请求卡满
+    // 客户端超时后失败，而后排明明有活节点。超时取测速超时的 2 倍：
+    // 测速能过说明这个节点建连一般在测速超时内完成，留 2 倍余量给抖动。
+    let dial_timeout = Duration::from_millis(crate::config::timeout_ms() * 2);
     let mut conn = None;
     for adapter in &candidates {
-        match adapter.dial_tcp(&metadata).await {
-            Ok(c) => {
+        match tokio::time::timeout(dial_timeout, adapter.dial_tcp(&metadata)).await {
+            Ok(Ok(c)) => {
                 conn = Some(c);
                 break;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::debug!(tag = adapter.name(), "dial failed: {e}");
+            }
+            Err(_) => {
+                tracing::debug!(
+                    tag = adapter.name(),
+                    "dial 超时 {dial_timeout:?}，换下一个候选"
+                );
             }
         }
     }
