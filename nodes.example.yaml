@@ -1,6 +1,6 @@
-# lift 节点表示例
+# silverq 节点表示例
 # 用法: cargo run --features meow -- nodes.yaml
-# 每个节点 = 协议 + 凭证；lift 用 meow-rs 构建 adapter 并做协议感知测速。
+# 每个节点 = 协议 + 凭证；silverq 用 meow-rs 构建 adapter 并做协议感知测速。
 nodes:
   - tag: "WB-JP-01"
     protocol: vless

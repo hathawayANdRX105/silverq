@@ -1,9 +1,9 @@
 //! 子命令解析。
 //!
-//!   lift                    # = serve（默认 nodes.yaml）
-//!   lift serve [nodes.yaml]
-//!   lift reload [nodes.yaml]
-//!   lift select <tag|auto>
+//!   silverq                    # = serve（默认 nodes.yaml）
+//!   silverq serve [nodes.yaml]
+//!   silverq reload [nodes.yaml]
+//!   silverq select <tag|auto>
 use std::process;
 
 pub enum Cmd {
@@ -39,7 +39,7 @@ pub fn parse() -> Cmd {
         Some("status") => Cmd::Status,
         Some("select") => match args.get(1) {
             Some(tag) => Cmd::Select { tag: tag.clone() },
-            None => die("select: 用法: lift select <tag|auto>"),
+            None => die("select: 用法: silverq select <tag|auto>"),
         },
         Some(other) if other.starts_with("--") => die(&format!("未知选项: {other}")),
         Some(first) => {
@@ -59,7 +59,7 @@ pub fn parse() -> Cmd {
 }
 
 fn die(msg: &str) -> ! {
-    eprintln!("lift: {msg}");
+    eprintln!("silverq: {msg}");
     process::exit(2);
 }
 

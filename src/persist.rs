@@ -39,13 +39,13 @@ struct Score {
     samples: u32,
 }
 
-/// 存档路径（`LIFT_STATE` 可覆盖）。
+/// 存档路径（`SILVERQ_STATE` 可覆盖）。
 pub fn state_path() -> PathBuf {
-    std::env::var("LIFT_STATE")
+    std::env::var("SILVERQ_STATE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             PathBuf::from(
-                std::env::var("HOME").unwrap_or_default() + "/.local/state/lift/scores.json",
+                std::env::var("HOME").unwrap_or_default() + "/.local/state/silverq/scores.json",
             )
         })
 }
@@ -150,10 +150,10 @@ pub fn load_from(path: &std::path::Path, nodes: &mut [Node]) -> usize {
 mod tests {
     use super::*;
 
-    /// 每个测试独立路径。不碰 LIFT_STATE：并行测试共享 env 会互相覆盖。
+    /// 每个测试独立路径。不碰 SILVERQ_STATE：并行测试共享 env 会互相覆盖。
     fn tmp_state(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "lift-persist-{tag}-{}-{:?}.json",
+            "silverq-persist-{tag}-{}-{:?}.json",
             std::process::id(),
             std::thread::current().id()
         ))

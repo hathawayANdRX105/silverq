@@ -24,13 +24,13 @@
 //! - **A（优先）**：把依赖从 crates.io 换成 `git` 依赖整个 meow-rs 仓库，
 //!   直接复用上游 TUN + `socket_protect`。先确认 workspace 成员里 TUN crate 的名字和
 //!   公开 API 形态。
-//! - **B（兜底）**：lift 自己用 `tun` + `smoltcp` 实现（shoes 走的就是这条路，
+//! - **B（兜底）**：silverq 自己用 `tun` + `smoltcp` 实现（shoes 走的就是这条路，
 //!   见 `~/projects/shoes/src/tun/`：`tun_server.rs` / `tcp_stack_direct.rs` /
 //!   `udp_manager.rs`）。工作量比 A 大一个量级，且要自己处理回环防护。
 //!
 //! # 与现有数据面的关系
 //!
-//! 当前 lift 的数据面是 `inbound.rs`：SOCKS5（TCP + UDP ASSOCIATE）/ HTTP-CONNECT。
+//! 当前 silverq 的数据面是 `inbound.rs`：SOCKS5（TCP + UDP ASSOCIATE）/ HTTP-CONNECT。
 //! TUN 是**另一种** inbound（三层透明代理），不替换现有的，是并列新增。
 //! 接进来之后同样调 `ProxyAdapter::dial_tcp` / `dial_udp`，
 //! 复用现成的 EWMA 选择（`SharedSelection`），调度侧不用改。

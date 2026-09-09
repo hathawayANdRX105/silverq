@@ -25,23 +25,23 @@ fn env_parsed<T: std::str::FromStr>(key: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
-/// 探测 URL（`LIFT_PROBE_URL`）。仅 meow feature 下调用。
+/// 探测 URL（`SILVERQ_PROBE_URL`）。仅 meow feature 下调用。
 #[cfg_attr(not(feature = "meow"), allow(dead_code))]
 pub fn probe_url() -> String {
-    std::env::var("LIFT_PROBE_URL").unwrap_or_else(|_| DEFAULT_PROBE_URL.to_string())
+    std::env::var("SILVERQ_PROBE_URL").unwrap_or_else(|_| DEFAULT_PROBE_URL.to_string())
 }
 
-/// 调度轮间隔秒数（`LIFT_INTERVAL_SECS`）。
+/// 调度轮间隔秒数（`SILVERQ_INTERVAL_SECS`）。
 pub fn interval_secs() -> u64 {
-    env_parsed("LIFT_INTERVAL_SECS", DEFAULT_SLOW_INTERVAL_SECS)
+    env_parsed("SILVERQ_INTERVAL_SECS", DEFAULT_SLOW_INTERVAL_SECS)
 }
 
-/// 单节点测速超时毫秒（`LIFT_TIMEOUT_MS`）。
+/// 单节点测速超时毫秒（`SILVERQ_TIMEOUT_MS`）。
 pub fn timeout_ms() -> u64 {
-    env_parsed("LIFT_TIMEOUT_MS", DEFAULT_TIMEOUT_MS)
+    env_parsed("SILVERQ_TIMEOUT_MS", DEFAULT_TIMEOUT_MS)
 }
 
-/// 主组容量（`LIFT_CAPACITY`）。
+/// 主组容量（`SILVERQ_CAPACITY`）。
 pub fn active_capacity() -> usize {
-    env_parsed("LIFT_CAPACITY", DEFAULT_ACTIVE_CAPACITY)
+    env_parsed("SILVERQ_CAPACITY", DEFAULT_ACTIVE_CAPACITY)
 }

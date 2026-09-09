@@ -1,12 +1,12 @@
-//! lift — 稳定性优先的代理节点调度器（MVP）。
+//! silverq — 稳定性优先的代理节点调度器（MVP）。
 //!
 //! 子命令：
-//!   lift serve [nodes.yaml]     启动 daemon（调度 + 数据面 + ctl socket）
-//!   lift reload [nodes.yaml]    热加载节点表（存活节点继承 EWMA）
-//!   lift select <tag|auto>      手动钉住 / 取消钉住
-//!   lift status                 查看当前状态
+//!   silverq serve [nodes.yaml]     启动 daemon（调度 + 数据面 + ctl socket）
+//!   silverq reload [nodes.yaml]    热加载节点表（存活节点继承 EWMA）
+//!   silverq select <tag|auto>      手动钉住 / 取消钉住
+//!   silverq status                 查看当前状态
 //!
-//! 协议/传输/TLS/Reality/QUIC 全部复用 meow-rs；lift 只做调度与转发。
+//! 协议/传输/TLS/Reality/QUIC 全部复用 meow-rs；silverq 只做调度与转发。
 mod batch;
 mod config;
 mod decision;
@@ -158,7 +158,7 @@ async fn serve(nodes: String) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(feature = "meow")]
         {
             let listen =
-                std::env::var("LIFT_LISTEN").unwrap_or_else(|_| "127.0.0.1:17321".to_string());
+                std::env::var("SILVERQ_LISTEN").unwrap_or_else(|_| "127.0.0.1:17321".to_string());
             let inbound_sel = selection.clone();
             let inbound_reg = registry.clone();
             let inb2 = tokio::spawn(async move {
@@ -319,7 +319,7 @@ async fn apply_selection(selection: &[String], shared: &SharedSelection) {
     #[cfg(feature = "meow")]
     {
         use meow_proxy::group::selector_store::SelectorStore;
-        const GROUP: &str = "lift-active";
+        const GROUP: &str = "silverq-active";
 
         let Some(best) = selection.first() else {
             return;
@@ -328,9 +328,9 @@ async fn apply_selection(selection: &[String], shared: &SharedSelection) {
             Some(s) => s,
             None => {
                 let path = std::path::PathBuf::from(
-                    std::env::var("LIFT_SELECTOR_STORE").unwrap_or_else(|_| {
+                    std::env::var("SILVERQ_SELECTOR_STORE").unwrap_or_else(|_| {
                         format!(
-                            "{}/.local/state/lift-selector.json",
+                            "{}/.local/state/silverq-selector.json",
                             std::env::var("HOME").unwrap_or_default()
                         )
                     }),

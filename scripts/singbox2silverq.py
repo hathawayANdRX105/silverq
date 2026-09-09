@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""把 sing-box 的 nodes.json 转成 lift 的节点表 YAML。
+"""把 sing-box 的 nodes.json 转成 silverq 的节点表 YAML。
 
-用途：拿真实节点池跑 lift，验证四种协议的 adapter 构建与真实测速。
+用途：拿真实节点池跑 silverq，验证四种协议的 adapter 构建与真实测速。
 
 凭证只在本地文件间流动：读 nodes.json → 写 out.yaml，脚本不打印任何密钥。
 stdout 只输出结构化统计（各协议数量、跳过原因）。
 
     ./scripts/singbox2lift.py ~/.config/sing-box/nodes.json /tmp/real-nodes.yaml
 
-lift 当前支持 vless / trojan / shadowsocks / hysteria2；
+silverq 当前支持 vless / trojan / shadowsocks / hysteria2；
 vmess / http 等会被跳过并计入统计。
 """
 
@@ -18,7 +18,7 @@ from collections import Counter
 
 
 def conv_transport(o):
-    """sing-box transport -> lift transport spec。不支持的返回 (None, 原因)。"""
+    """sing-box transport -> silverq transport spec。不支持的返回 (None, 原因)。"""
     t = o.get("transport")
     if not t:
         return None, None
@@ -46,7 +46,7 @@ def conv_vless(o):
     spec = {"uuid": o["uuid"]}
     if sni := tls.get("server_name"):
         spec["sni"] = sni
-    # sing-box 的 flow 在顶层；lift 只认 xtls-rprx-vision
+    # sing-box 的 flow 在顶层；silverq 只认 xtls-rprx-vision
     if o.get("flow") == "xtls-rprx-vision":
         spec["flow"] = "xtls-rprx-vision"
     if reality := tls.get("reality"):
@@ -78,7 +78,7 @@ def conv_trojan(o):
     if sni := tls.get("server_name"):
         spec["sni"] = sni
     spec["skip_cert_verify"] = bool(tls.get("insecure", True))
-    # lift 的 trojan adapter 还没接 transport 层（VLESS 才有 TransportChain 入口）
+    # silverq 的 trojan adapter 还没接 transport 层（VLESS 才有 TransportChain 入口）
     if o.get("transport"):
         return None, f"trojan transport={o['transport'].get('type', '?')} 未支持"
     return {"protocol": "trojan", "trojan": spec}, None

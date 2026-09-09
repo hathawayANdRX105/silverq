@@ -1,9 +1,9 @@
-# lift
+# silverq
 
 稳定性优先的代理节点调度器（Rust）。
 
 **只干两件事：测速 + 切换**——把池子里最稳定、最快的节点选出来，并切到它上。
-协议/传输/TLS/Reality/QUIC **全部复用 meow-rs**，lift 零自研协议。
+协议/传输/TLS/Reality/QUIC **全部复用 meow-rs**，silverq 零自研协议。
 
 ## 工作原理
 
@@ -32,7 +32,7 @@ select_top(N)  纯 EWMA 取前 N（无迟滞轮次）
 - **分批并发**：节点池按当前排名分批测速，`buffer_unordered(concurrency)`，不阻塞在最慢节点。
 - **快慢分离**：测速（周期全池离线）与切换（只读已算好的 EWMA）完全解耦，卡顿隔离。
 - **超时扣分后移**：死/慢节点拿不到前排。
-- **切换=selector**：lift 自己就是 selector；meow 只负责连接。
+- **切换=selector**：silverq 自己就是 selector；meow 只负责连接。
 
 ## 使用
 
@@ -41,20 +41,20 @@ select_top(N)  纯 EWMA 取前 N（无迟滞轮次）
 cargo run --features meow -- serve nodes.yaml
 
 # 控制命令（另开终端，走 unix socket，不重启进程）
-lift status                # 当前池大小 / 选择 / 是否钉住
-lift reload [nodes.yaml]   # 热加载节点表：新增进池、删除出池、存活继承 EWMA
-lift select <tag>          # 手动钉住某节点（调度暂停覆盖）
-lift select auto           # 取消钉住，恢复自动
+silverq status                # 当前池大小 / 选择 / 是否钉住
+silverq reload [nodes.yaml]   # 热加载节点表：新增进池、删除出池、存活继承 EWMA
+silverq select <tag>          # 手动钉住某节点（调度暂停覆盖）
+silverq select auto           # 取消钉住，恢复自动
 ```
 
 环境变量：
 
 | 变量 | 默认 | 作用 |
 |------|------|------|
-| `LIFT_LISTEN` | `127.0.0.1:17321` | 数据面端口（SOCKS5 / HTTP-CONNECT） |
-| `LIFT_CTL_SOCK` | `~/.local/state/lift/ctl.sock` | 控制通道 socket |
-| `LIFT_SELECTOR_STORE` | `~/.local/state/lift-selector.json` | 外部 meow kernel 读的 selector store |
-| `LIFT_STATE` | `~/.local/state/lift/scores.json` | EWMA 分数存档 |
+| `SILVERQ_LISTEN` | `127.0.0.1:17321` | 数据面端口（SOCKS5 / HTTP-CONNECT） |
+| `SILVERQ_CTL_SOCK` | `~/.local/state/silverq/ctl.sock` | 控制通道 socket |
+| `SILVERQ_SELECTOR_STORE` | `~/.local/state/silverq-selector.json` | 外部 meow kernel 读的 selector store |
+| `SILVERQ_STATE` | `~/.local/state/silverq/scores.json` | EWMA 分数存档 |
 
 无 `meow` feature 时用 `NoopMeasurer` 空跑（自测调度逻辑）：`cargo run -- serve nodes.yaml`
 
@@ -78,13 +78,13 @@ lift select auto           # 取消钉住，恢复自动
 | `ctl.rs` | 控制通道（unix socket：热加载、手动钉住、状态查询） |
 | `persist.rs` | EWMA 分数持久化（原子写 + 6 小时过期判定） |
 | `config.rs` | 默认参数 + 环境变量覆盖（探测 URL / 间隔 / 超时 / 容量） |
-| `scripts/singbox2lift.py` | sing-box `nodes.json` → lift YAML（凭证只在本地文件间流动） |
+| `scripts/singbox2silverq.py` | sing-box `nodes.json` → silverq YAML（凭证只在本地文件间流动） |
 
 ## 已验证 / 已知范围
 
 ### 自动化测试（22 项，`cargo test --features meow`）
 
-17 单测 + 5 e2e。e2e 真起 `lift serve` 进程、用真 SOCKS5 / HTTP-CONNECT 客户端打流量，
+17 单测 + 5 e2e。e2e 真起 `silverq serve` 进程、用真 SOCKS5 / HTTP-CONNECT 客户端打流量，
 目标是本地 echo 服务、探测端点也在本地 —— **全程回环，不依赖外网**，CI 可稳定跑。
 
 | 覆盖 | 内容 |
@@ -98,16 +98,16 @@ lift select auto           # 取消钉住，恢复自动
 
 ### 真实节点池实测（本地，不进 CI）
 
-用 `scripts/singbox2lift.py` 从 sing-box 的 `nodes.json` 转出 **217 个节点**
+用 `scripts/singbox2silverq.py` 从 sing-box 的 `nodes.json` 转出 **217 个节点**
 （vless 161 / hysteria2 23 / shadowsocks 22 / trojan 11），实测结果：
 
 - 217/217 全部成功构建 meow adapter（四种协议 + ws/grpc transport 都真实跑过）
-- 经 lift + 真实代理节点出网：`http_code=204`，稳定 0.18~0.22s
+- 经 silverq + 真实代理节点出网：`http_code=204`，稳定 0.18~0.22s
 - 出口 IP 确认为代理落地 IP（直连被墙 → 证明没有静默走直连兜底）
 - UDP ASSOCIATE 经真实节点查 DNS：回包 tid 匹配、`ANCOUNT=2`
 
 对照 sing-box 同节点测速可知：池中大量节点（含 46 个 Vision+Reality）**本身已死** ——
-sing-box 测同样超时。这不是 lift 的问题，排查时容易误判成协议 bug。
+sing-box 测同样超时。这不是 silverq 的问题，排查时容易误判成协议 bug。
 
 ### 已知范围
 
@@ -120,7 +120,7 @@ sing-box 测同样超时。这不是 lift 的问题，排查时容易误判成�
   第一批数据转发过去、再等对端回应——不能盲等首字节，因为多数协议是客户端先说话
   （TLS ClientHello / HTTP 请求），盲等会把正常连接全判死。超时只作用于首次响应，
   之后进入无超时拷贝，避免误杀长连接。实测钉住黑洞节点从卡满 25s 降到 ~6s 失败。
-- **EWMA 已持久化**：每轮结束原子写盘（`LIFT_STATE`），重启自动恢复。
+- **EWMA 已持久化**：每轮结束原子写盘（`SILVERQ_STATE`），重启自动恢复。
   存档超过 6 小时视为陈旧、一律丢弃——几小时前的延迟不能拿来做当下决策。
   只存 `ewma` 与 `samples`，不存 `recent` 窗口（它只影响自适应 alpha 的头几次取值）。
 - **trojan 的 transport 无法接**：meow 的 `TrojanAdapter` 只持有 `Arc<TlsLayer>`，

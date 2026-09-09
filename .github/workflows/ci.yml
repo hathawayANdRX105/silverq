@@ -73,7 +73,7 @@ jobs:
       - name: unit tests
         run: cargo test --bins ${{ matrix.features }}
 
-      # e2e：真起 lift serve 进程，用真 SOCKS5 / HTTP-CONNECT 客户端打流量，
+      # e2e：真起 silverq serve 进程，用真 SOCKS5 / HTTP-CONNECT 客户端打流量，
       # 覆盖 TCP CONNECT、UDP ASSOCIATE、分片丢弃、BIND 拒绝、隧道无残留。
       # 全程走 127.0.0.1（本地 echo + 本地探测端点），不依赖外网，CI 可稳定跑。
       # 只在 meow 模式有意义：数据面在该 feature 下。

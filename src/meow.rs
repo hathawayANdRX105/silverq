@@ -1,6 +1,6 @@
 //! MeowMeasurer: 按节点 tag 查 adapter registry，委托 meow-rs 做协议感知测速。
 //!
-//! lift 只做调度；连接、握手、TLS/Reality/QUIC 全部由 meow 完成。
+//! silverq 只做调度；连接、握手、TLS/Reality/QUIC 全部由 meow 完成。
 #![cfg(feature = "meow")]
 
 use crate::batch::Measurer;
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-// 探测 URL 见 `config::probe_url()`（`LIFT_PROBE_URL` 可覆盖，供测试指向本地端点）。
+// 探测 URL 见 `config::probe_url()`（`SILVERQ_PROBE_URL` 可覆盖，供测试指向本地端点）。
 pub type Registry = Arc<RwLock<HashMap<String, Arc<dyn ProxyAdapter>>>>;
 
 /// 每个节点一个 meow 协议 adapter（由 factory 构建），按 tag 索引。
@@ -36,7 +36,7 @@ impl Measurer for MeowMeasurer {
         }?;
 
         // meow 协议感知探测：建立真实连接 + 握手 + HTTP GET，返回延迟 ms。
-        // 成功返回 Some(delay)；超时/失败返回 None（lift 按超时扣分后移）。
+        // 成功返回 Some(delay)；超时/失败返回 None（silverq 按超时扣分后移）。
         match meow_proxy::health::url_test(
             adapter.as_ref(),
             &crate::config::probe_url(),

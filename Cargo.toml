@@ -1,8 +1,8 @@
 [package]
-name = "lift"
+name = "silverq"
 version = "0.1.0"
 edition = "2021"
-description = "Stability-first proxy node scheduler (EWMA + batch concurrent testing + fast/slow path separation)"
+description = "silverq — stability-first proxy node scheduler (EWMA + batch concurrent testing + fast/slow path separation)"
 license = "MIT"
 authors = ["hathaway"]
 

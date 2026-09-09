@@ -1,6 +1,6 @@
 //! 数据面：最小 SOCKS5/HTTP-CONNECT 混合 inbound。
 //! 转发目标 = 调度循环维护的"当前 top-N 选择"，经 meow adapter 直连。
-//! lift 自己就是 selector；meow 只负责协议与连接。
+//! silverq 自己就是 selector；meow 只负责协议与连接。
 #![cfg(feature = "meow")]
 
 use crate::meow::Registry;
@@ -22,7 +22,7 @@ pub async fn run(
     let listener = TcpListener::bind(listener_addr).await?;
     tracing::info!(
         addr = listener_addr,
-        "lift inbound listening (SOCKS5/HTTP-CONNECT)"
+        "silverq inbound listening (SOCKS5/HTTP-CONNECT)"
     );
 
     loop {

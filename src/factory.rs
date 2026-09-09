@@ -1,5 +1,5 @@
 //! ProxyFactory: NodeSpec -> Arc<dyn Proxy>，复用 meow-rs 的 adapter。
-//! lift 不实现任何协议，只负责把节点规格喂给 meow。
+//! silverq 不实现任何协议，只负责把节点规格喂给 meow。
 #![cfg(feature = "meow")]
 
 use meow_common::adapter::ProxyAdapter;

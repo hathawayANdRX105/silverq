@@ -63,11 +63,11 @@ impl CtlState {
 
 /// ctl socket 路径。
 pub fn ctl_path() -> std::path::PathBuf {
-    std::env::var("LIFT_CTL_SOCK")
+    std::env::var("SILVERQ_CTL_SOCK")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             std::path::PathBuf::from(
-                std::env::var("HOME").unwrap_or_default() + "/.local/state/lift/ctl.sock",
+                std::env::var("HOME").unwrap_or_default() + "/.local/state/silverq/ctl.sock",
             )
         })
 }
@@ -79,7 +79,7 @@ pub async fn serve_ctl(state: Arc<CtlState>) -> std::io::Result<()> {
     }
     let _ = std::fs::remove_file(&path); // 清理陈旧 socket
     let listener = UnixListener::bind(&path)?;
-    tracing::info!(sock = %path.display(), "lift ctl socket listening");
+    tracing::info!(sock = %path.display(), "silverq ctl socket listening");
     loop {
         let (stream, _) = listener.accept().await?;
         let state = state.clone();

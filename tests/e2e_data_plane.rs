@@ -1,10 +1,10 @@
-//! 数据面 e2e：真实跑起 `lift serve`，用真 SOCKS5 / HTTP-CONNECT 客户端打流量。
+//! 数据面 e2e：真实跑起 `silverq serve`，用真 SOCKS5 / HTTP-CONNECT 客户端打流量。
 //!
 //! 全程**不依赖外网**：
 //! - 目标服务是测试自己起的本地 TCP echo / UDP echo / HTTP 端点
 //! - 节点用 `protocol: direct`（meow 的 DirectAdapter），所以"经代理"实际就是直连本地端点，
 //!   但走的是完整数据面链路：inbound 协议解析 → EWMA 选择 → `dial_tcp`/`dial_udp` → 双向中继
-//! - 探测 URL 用 `LIFT_PROBE_URL` 指到本地 HTTP 端点，调度间隔压到 1s
+//! - 探测 URL 用 `SILVERQ_PROBE_URL` 指到本地 HTTP 端点，调度间隔压到 1s
 //!
 //! 需要 `--features meow`（数据面在该 feature 下）。没有该 feature 时整个文件不编译内容。
 #![cfg(feature = "meow")]
@@ -47,7 +47,7 @@ fn spawn_udp_echo() -> SocketAddr {
     addr
 }
 
-/// 起一个只回 204 的极简 HTTP 服务，给 lift 当探测端点（替代 gstatic）。
+/// 起一个只回 204 的极简 HTTP 服务，给 silverq 当探测端点（替代 gstatic）。
 fn spawn_probe_endpoint() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -81,7 +81,7 @@ fn spawn_probe_endpoint() -> SocketAddr {
     addr
 }
 
-/// 起一个 lift daemon，进程退出时自动 kill。
+/// 起一个 silverq daemon，进程退出时自动 kill。
 struct Daemon {
     child: Child,
     socks: SocketAddr,
@@ -91,9 +91,9 @@ struct Daemon {
 impl Daemon {
     /// 通过 ctl socket 发一条命令，返回 daemon 应答。
     fn ctl(&self, cmd: &str) -> String {
-        let out = Command::new(env!("CARGO_BIN_EXE_lift"))
+        let out = Command::new(env!("CARGO_BIN_EXE_silverq"))
             .args(cmd.split_whitespace())
-            .env("LIFT_CTL_SOCK", self._dir.path().join("ctl.sock"))
+            .env("SILVERQ_CTL_SOCK", self._dir.path().join("ctl.sock"))
             .output()
             .expect("ctl 调用失败");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -118,7 +118,7 @@ mod tempdirlike {
     impl TempDir {
         pub fn new(tag: &str) -> Self {
             let p = std::env::temp_dir().join(format!(
-                "lift-e2e-{tag}-{}-{}",
+                "silverq-e2e-{tag}-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -184,7 +184,7 @@ fn spawn_blackhole() -> SocketAddr {
     addr
 }
 
-/// 启动 lift serve，等到它把 selection 写出来（即第一轮测速完成）为止。
+/// 启动 silverq serve，等到它把 selection 写出来（即第一轮测速完成）为止。
 fn start_daemon(probe: SocketAddr) -> Daemon {
     start_daemon_with(probe, None)
 }
@@ -218,16 +218,16 @@ fn start_daemon_in(
     let socks_port = free_port();
     let socks: SocketAddr = format!("127.0.0.1:{socks_port}").parse().unwrap();
 
-    let child = Command::new(env!("CARGO_BIN_EXE_lift"))
+    let child = Command::new(env!("CARGO_BIN_EXE_silverq"))
         .arg("serve")
         .arg(&nodes_path)
-        .env("LIFT_LISTEN", socks.to_string())
-        .env("LIFT_CTL_SOCK", dir.path().join("ctl.sock"))
-        .env("LIFT_SELECTOR_STORE", dir.path().join("selector.json"))
-        .env("LIFT_STATE", dir.path().join("scores.json"))
-        .env("LIFT_PROBE_URL", format!("http://{probe}/"))
-        .env("LIFT_INTERVAL_SECS", "1")
-        .env("LIFT_TIMEOUT_MS", "1500")
+        .env("SILVERQ_LISTEN", socks.to_string())
+        .env("SILVERQ_CTL_SOCK", dir.path().join("ctl.sock"))
+        .env("SILVERQ_SELECTOR_STORE", dir.path().join("selector.json"))
+        .env("SILVERQ_STATE", dir.path().join("scores.json"))
+        .env("SILVERQ_PROBE_URL", format!("http://{probe}/"))
+        .env("SILVERQ_INTERVAL_SECS", "1")
+        .env("SILVERQ_TIMEOUT_MS", "1500")
         .stdout(std::fs::File::create(dir.path().join("log")).unwrap())
         .stderr(std::process::Stdio::from(
             std::fs::OpenOptions::new()
@@ -236,7 +236,7 @@ fn start_daemon_in(
                 .unwrap(),
         ))
         .spawn()
-        .expect("启动 lift 失败");
+        .expect("启动 silverq 失败");
 
     let daemon = Daemon {
         child,
@@ -299,11 +299,11 @@ fn socks5_tcp_connect_relays_traffic() {
     let d = start_daemon(probe);
 
     let (mut s, _) = socks5_handshake(d.socks, 0x01, echo);
-    s.write_all(b"hello-lift").unwrap();
+    s.write_all(b"hello-silverq").unwrap();
 
     let mut buf = [0u8; 10];
     s.read_exact(&mut buf).unwrap();
-    assert_eq!(&buf, b"hello-lift", "TCP echo 应原样返回");
+    assert_eq!(&buf, b"hello-silverq", "TCP echo 应原样返回");
 }
 
 #[test]
@@ -536,7 +536,7 @@ fn pinned_blackhole_fails_within_first_response_timeout() {
     let elapsed = started.elapsed();
 
     assert!(res.is_err(), "黑洞节点不该返回数据");
-    // LIFT_TIMEOUT_MS=1500 -> 首响超时 4x = 6s。上限收到 9s：
+    // SILVERQ_TIMEOUT_MS=1500 -> 首响超时 4x = 6s。上限收到 9s：
     // 松到 12s 时，客户端自己的 10s 读超时会先触发，超时被去掉也测不出来
     // （变异检验发现过这个漏洞）。
     assert!(
