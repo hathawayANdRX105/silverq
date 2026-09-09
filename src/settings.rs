@@ -94,6 +94,29 @@ pub struct PathsSection {
     pub selector_store: String,
 }
 
+/// 展开 TOML 值里的前导 `~/`。shell 不会展开配置文件里的波浪号，
+/// 不处理的话 UnixListener::bind 会真的创建一个名叫 `~` 的目录。
+fn expand_home(p: String) -> String {
+    match p.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME") {
+            Ok(home) if !home.is_empty() => format!("{home}/{rest}"),
+            _ => p,
+        },
+        None => p,
+    }
+}
+
+impl PathsSection {
+    /// 展开所有路径里的 `~/` 后返回。
+    pub fn expanded(&self) -> Self {
+        Self {
+            state: expand_home(self.state.clone()),
+            ctl_sock: expand_home(self.ctl_sock.clone()),
+            selector_store: expand_home(self.selector_store.clone()),
+        }
+    }
+}
+
 impl Default for PathsSection {
     fn default() -> Self {
         let home = std::env::var("HOME").unwrap_or_default();
@@ -154,6 +177,10 @@ fn env_parsed_or<T: std::str::FromStr>(key: &str, v: T) -> T {
 
 impl Effective {
     pub fn from(fc: &FileConfig) -> Self {
+        let fc = FileConfig {
+            paths: fc.paths.expanded(),
+            ..fc.clone()
+        };
         Self {
             capacity: env_parsed_or("SILVERQ_CAPACITY", fc.scheduler.capacity),
             batch_size: env_parsed_or("SILVERQ_BATCH_SIZE", fc.scheduler.batch_size),

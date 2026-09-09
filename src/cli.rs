@@ -61,6 +61,18 @@ pub fn parse() -> Cmd {
             Some(tag) => Cmd::Select { tag: tag.clone() },
             None => die("select: 用法: silverq select <tag|auto>"),
         },
+        Some("--help") | Some("-h") => {
+            println!(
+                "silverq — 稳定性优先的代理节点调度器\n\n\
+                 用法:\n\
+                   silverq serve [nodes.yaml] [--config silverq.toml]  启动 daemon\n\
+                   silverq reload [nodes.yaml]      热加载节点表\n\
+                   silverq select <tag|auto>        手动钉住 / 解钉\n\
+                   silverq status                   查看当前状态\n\n\
+                 节点表格式见 nodes.example.yaml；调度配置见 silverq.example.toml"
+            );
+            std::process::exit(0);
+        }
         Some(other) if other.starts_with("--") => die(&format!("未知选项: {other}")),
         Some(first) => {
             // 无子命令：第一个参数视为 nodes.yaml（serve 简写）
