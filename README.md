@@ -54,6 +54,7 @@ lift select auto           # 取消钉住，恢复自动
 | `LIFT_LISTEN` | `127.0.0.1:17321` | 数据面端口（SOCKS5 / HTTP-CONNECT） |
 | `LIFT_CTL_SOCK` | `~/.local/state/lift/ctl.sock` | 控制通道 socket |
 | `LIFT_SELECTOR_STORE` | `~/.local/state/lift-selector.json` | 外部 meow kernel 读的 selector store |
+| `LIFT_STATE` | `~/.local/state/lift/scores.json` | EWMA 分数存档 |
 
 无 `meow` feature 时用 `NoopMeasurer` 空跑（自测调度逻辑）：`cargo run -- serve nodes.yaml`
 
@@ -75,6 +76,7 @@ lift select auto           # 取消钉住，恢复自动
 | `tun.rs` | **未实现占位**（`unimplemented!`），见文件内说明 |
 | `cli.rs` | 子命令解析（serve / reload / select / status） |
 | `ctl.rs` | 控制通道（unix socket：热加载、手动钉住、状态查询） |
+| `persist.rs` | EWMA 分数持久化（原子写 + 6 小时过期判定） |
 | `config.rs` | 默认参数 + 环境变量覆盖（探测 URL / 间隔 / 超时 / 容量） |
 | `scripts/singbox2lift.py` | sing-box `nodes.json` → lift YAML（凭证只在本地文件间流动） |
 
@@ -114,10 +116,17 @@ sing-box 测同样超时。这不是 lift 的问题，排查时容易误判成�
   或自行基于 `tun` + `smoltcp` 实现。两条路线与证据见该文件模块文档，CI 有 job 守着它没被误接。
 - **ws / grpc 已支持**（VLESS）：层序为 TLS 贴 TCP、ws/grpc 叠其上，明文 ws 节点
   （`tls: false`）也可接。trojan 的 transport 还没接（其 adapter 无 TransportChain 入口）。
-- **黑洞节点会拖慢请求**：节点 TCP 连得上、握手也"成功"、但之后不回数据时，
-  AEAD 类协议（shadowsocks）的 `dial_tcp` 不等服务端响应就返回 Ok，
-  所以 dial 超时管不到，请求会挂到客户端超时。实测钉住这类节点会卡满 25s。
-  要修需在建连后加首字节读超时，属架构级改动，尚未做。
+- **黑洞节点已处理**：建连后加了「首次响应超时」（测速超时 ×4）。顺序是先把客户端
+  第一批数据转发过去、再等对端回应——不能盲等首字节，因为多数协议是客户端先说话
+  （TLS ClientHello / HTTP 请求），盲等会把正常连接全判死。超时只作用于首次响应，
+  之后进入无超时拷贝，避免误杀长连接。实测钉住黑洞节点从卡满 25s 降到 ~6s 失败。
+- **EWMA 已持久化**：每轮结束原子写盘（`LIFT_STATE`），重启自动恢复。
+  存档超过 6 小时视为陈旧、一律丢弃——几小时前的延迟不能拿来做当下决策。
+  只存 `ewma` 与 `samples`，不存 `recent` 窗口（它只影响自适应 alpha 的头几次取值）。
+- **trojan 的 transport 无法接**：meow 的 `TrojanAdapter` 只持有 `Arc<TlsLayer>`，
+  `dial_tcp` 里硬编码 `TCP → tls_layer.connect → 写 header`，公开构造函数只有
+  `new` 和 `with_mux`，**没有插入 ws/grpc 层的位置**。要支持需上游给 trojan 加
+  TransportChain 入口。真实池里因此跳过 4 个 trojan+ws 节点。
 - **UDP 不做分片重组**。
 - SOCKS5 inbound **无认证**，默认只绑 `127.0.0.1`。改绑 `0.0.0.0` 等于开放代理。
 - EWMA 分数**进程重启后清零**（`reload` 不丢，只有重启丢）。

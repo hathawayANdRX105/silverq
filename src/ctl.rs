@@ -173,7 +173,13 @@ async fn do_select(state: &CtlState, arg: Option<&str>) -> Result<String, String
     let tag = arg.ok_or_else(|| "select: missing <tag|auto>".to_string())?;
     if tag == "auto" {
         state.pinned.store(false, Ordering::Relaxed);
-        return Ok("auto (unpinned)".into());
+        // 立刻按 EWMA 重算，别等下一轮测速（间隔可能 30s+）。
+        // 早先只清标志、不改 selection，导致解钉后 selection 仍是钉住的那
+        // 单个节点 —— 钉到死节点再 auto 的话，请求会继续全失败到下一轮。
+        let top =
+            crate::decision::select_top(&state.pool.read().await, crate::config::active_capacity());
+        *state.selection.write().await = top.clone();
+        return Ok(format!("auto (unpinned, {top:?})"));
     }
     // 校验 tag 存在（meow 模式查 registry；非 meow 查池）
     #[cfg(feature = "meow")]

@@ -105,6 +105,13 @@ impl Node {
         self.ewma
     }
 
+    /// 从存档恢复分数。`recent` 窗口不恢复（只影响自适应 alpha 的头几次取值，
+    /// 不影响排序），所以重启后 alpha 会先偏保守，几次测量后回归正常。
+    pub fn restore_score(&mut self, ewma: f64, samples: u32) {
+        self.ewma = ewma;
+        self.samples = samples;
+    }
+
     /// 从另一个 Node 接管 EWMA 状态（配置热加载时保留分数）。
     pub fn adopt_score(&mut self, other: &Node) {
         self.ewma = other.ewma;

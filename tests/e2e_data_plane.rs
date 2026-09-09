@@ -109,7 +109,11 @@ impl Drop for Daemon {
 
 /// 极简临时目录（不引 tempfile 依赖，测试用够了）。
 mod tempdirlike {
-    pub struct TempDir(pub std::path::PathBuf);
+    pub struct TempDir {
+        path: std::path::PathBuf,
+        /// 只有拥有者 drop 时才删目录
+        owned: bool,
+    }
 
     impl TempDir {
         pub fn new(tag: &str) -> Self {
@@ -122,16 +126,34 @@ mod tempdirlike {
                     .as_nanos()
             ));
             std::fs::create_dir_all(&p).unwrap();
-            Self(p)
+            Self {
+                path: p,
+                owned: true,
+            }
         }
         pub fn path(&self) -> &std::path::Path {
-            &self.0
+            &self.path
+        }
+    }
+
+    impl TempDir {
+        /// 复用同一目录但**不接管删除责任**（用于跨"重启"共享状态文件）。
+        ///
+        /// 之前这里克隆出的句柄也会在 drop 时删目录，把第一个 daemon 写出的
+        /// 状态文件连目录一起删掉，重启测试永远看不到存档。
+        pub fn reuse(&self) -> Self {
+            Self {
+                path: self.path.clone(),
+                owned: false,
+            }
         }
     }
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            if self.owned {
+                let _ = std::fs::remove_dir_all(&self.path);
+            }
         }
     }
 }
@@ -144,6 +166,24 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// 起一个黑洞 TCP 服务：accept 后既不回数据也不关闭。
+/// 模拟"TCP 连得上、握手看似成功、之后不响应"的节点 —— AEAD 协议上
+/// `dial_tcp` 会立刻返回 Ok，只有首次响应超时能识别。
+fn spawn_blackhole() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            match stream {
+                Ok(s) => held.push(s), // 持住：不回、不关
+                Err(_) => break,
+            }
+        }
+    });
+    addr
+}
+
 /// 启动 lift serve，等到它把 selection 写出来（即第一轮测速完成）为止。
 fn start_daemon(probe: SocketAddr) -> Daemon {
     start_daemon_with(probe, None)
@@ -152,7 +192,19 @@ fn start_daemon(probe: SocketAddr) -> Daemon {
 /// `extra_nodes_before`: 插在 direct 节点**之前**的节点 YAML 片段，
 /// 用来让某个坏节点排在候选队首，测 fallback。
 fn start_daemon_with(probe: SocketAddr, extra_nodes_before: Option<&str>) -> Daemon {
-    let dir = tempdirlike::TempDir::new("daemon");
+    start_daemon_in(
+        tempdirlike::TempDir::new("daemon"),
+        probe,
+        extra_nodes_before,
+    )
+}
+
+/// 在指定目录起 daemon。目录复用 = 模拟重启（状态文件、配置都留着）。
+fn start_daemon_in(
+    dir: tempdirlike::TempDir,
+    probe: SocketAddr,
+    extra_nodes_before: Option<&str>,
+) -> Daemon {
     let nodes_path = dir.path().join("nodes.yaml");
     let mut yaml = String::from("nodes:\n");
     if let Some(extra) = extra_nodes_before {
@@ -172,9 +224,17 @@ fn start_daemon_with(probe: SocketAddr, extra_nodes_before: Option<&str>) -> Dae
         .env("LIFT_LISTEN", socks.to_string())
         .env("LIFT_CTL_SOCK", dir.path().join("ctl.sock"))
         .env("LIFT_SELECTOR_STORE", dir.path().join("selector.json"))
+        .env("LIFT_STATE", dir.path().join("scores.json"))
         .env("LIFT_PROBE_URL", format!("http://{probe}/"))
         .env("LIFT_INTERVAL_SECS", "1")
         .env("LIFT_TIMEOUT_MS", "1500")
+        .stdout(std::fs::File::create(dir.path().join("log")).unwrap())
+        .stderr(std::process::Stdio::from(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(dir.path().join("log"))
+                .unwrap(),
+        ))
         .spawn()
         .expect("启动 lift 失败");
 
@@ -448,4 +508,109 @@ fn pinned_unreachable_node_fails_fast() {
         "必须快速失败，实际 {:?}",
         started.elapsed()
     );
+}
+
+/// 回归：钉住黑洞节点时必须在首次响应超时内失败，而不是挂到客户端超时。
+///
+/// AEAD 协议（shadowsocks）的 `dial_tcp` 不等服务端响应就返回 Ok，所以
+/// dial 超时管不到黑洞节点。实测修复前会卡满 25s。
+#[test]
+fn pinned_blackhole_fails_within_first_response_timeout() {
+    let probe = spawn_probe_endpoint();
+    let echo = spawn_tcp_echo();
+    let bh = spawn_blackhole();
+
+    let bad = format!(
+        "  - tag: \"blackhole\"\n    protocol: shadowsocks\n    server: \"{}\"\n    port: {}\n    shadowsocks:\n      password: \"0123456789abcdef\"\n      cipher: \"aes-128-gcm\"\n",
+        bh.ip(),
+        bh.port()
+    );
+    let d = start_daemon_with(probe, Some(&bad));
+    assert!(d.ctl("select blackhole").contains("pinned"));
+
+    let started = Instant::now();
+    let (mut s, _) = socks5_handshake(d.socks, 0x01, echo);
+    s.write_all(b"into-the-void").unwrap();
+    let mut buf = [0u8; 13];
+    let res = s.read_exact(&mut buf);
+    let elapsed = started.elapsed();
+
+    assert!(res.is_err(), "黑洞节点不该返回数据");
+    // LIFT_TIMEOUT_MS=1500 -> 首响超时 4x = 6s。上限收到 9s：
+    // 松到 12s 时，客户端自己的 10s 读超时会先触发，超时被去掉也测不出来
+    // （变异检验发现过这个漏洞）。
+    assert!(
+        elapsed < Duration::from_secs(9),
+        "必须在首响超时(~6s)内失败，实际 {elapsed:?}"
+    );
+}
+
+/// 回归：`select auto` 必须立即恢复 EWMA 排序，而不是等下一轮测速。
+///
+/// 早先 auto 只清 pinned 标志、不改 selection，于是"钉死节点 → auto"之后
+/// selection 仍是那个死节点，请求继续全失败直到下一轮（间隔可能 30s+）。
+#[test]
+fn select_auto_restores_ewma_selection_immediately() {
+    let probe = spawn_probe_endpoint();
+    let echo = spawn_tcp_echo();
+    let bh = spawn_blackhole();
+
+    let bad = format!(
+        "  - tag: \"blackhole\"\n    protocol: shadowsocks\n    server: \"{}\"\n    port: {}\n    shadowsocks:\n      password: \"0123456789abcdef\"\n      cipher: \"aes-128-gcm\"\n",
+        bh.ip(),
+        bh.port()
+    );
+    let d = start_daemon_with(probe, Some(&bad));
+
+    d.ctl("select blackhole");
+    let auto = d.ctl("select auto");
+    assert!(
+        auto.contains("direct-baseline"),
+        "auto 应立即给出 EWMA 顺序，实际: {auto}"
+    );
+
+    // 解钉后数据面立刻可用，不必等下一轮测速
+    let (mut s, _) = socks5_handshake(d.socks, 0x01, echo);
+    s.write_all(b"after-auto").unwrap();
+    let mut buf = [0u8; 10];
+    s.read_exact(&mut buf).expect("解钉后应立即可用");
+    assert_eq!(&buf, b"after-auto");
+}
+
+/// 回归：EWMA 分数必须跨进程重启保留，否则每次重启都要重新学习
+/// （真实池一轮约 90s，期间只能盲选）。
+#[test]
+fn ewma_scores_survive_restart() {
+    let probe = spawn_probe_endpoint();
+
+    let dir = tempdirlike::TempDir::new("restart");
+    let state = dir.path().join("scores.json");
+
+    // 第一次启动：跑几轮测速，让分数落盘
+    {
+        let d = start_daemon_in(dir.reuse(), probe, None);
+        // 等至少一轮结束（间隔 1s）后存盘
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(
+            d.ctl("status").contains("direct-baseline"),
+            "第一次启动应已选出节点"
+        );
+    } // daemon 在这里被 kill
+
+    assert!(state.exists(), "重启前应已写出状态文件: {state:?}");
+    let saved = std::fs::read_to_string(&state).unwrap();
+    assert!(
+        saved.contains("direct-baseline") && saved.contains("ewma"),
+        "状态文件应含节点分数，实际: {saved}"
+    );
+
+    // 第二次启动（同目录）：日志应显示恢复了分数
+    let d2 = start_daemon_in(dir.reuse(), probe, None);
+    std::thread::sleep(Duration::from_millis(500));
+    let log = std::fs::read_to_string(dir.path().join("log")).unwrap_or_default();
+    assert!(
+        log.contains("从存档恢复"),
+        "重启后应从存档恢复分数，日志: {log}"
+    );
+    drop(d2);
 }

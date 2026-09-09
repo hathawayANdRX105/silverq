@@ -13,6 +13,7 @@ mod decision;
 mod fast_path;
 mod node;
 mod nodespec;
+mod persist;
 
 #[cfg(feature = "meow")]
 mod factory;
@@ -105,6 +106,11 @@ async fn serve(nodes: String) -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|s| Node::new(s.tag.clone(), s.server.clone(), s.port))
         .collect();
+    let mut nodes_pool = nodes_pool;
+    let restored = persist::load_into(&mut nodes_pool);
+    if restored > 0 {
+        tracing::info!(restored, "从存档恢复 EWMA 分数");
+    }
     let pool: Arc<RwLock<Vec<Node>>> = Arc::new(RwLock::new(nodes_pool));
     let selection: SharedSelection = Arc::new(RwLock::new(Vec::new()));
     let pinned = Arc::new(AtomicBool::new(false));
@@ -286,12 +292,21 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
 
             if !pinned.load(Ordering::Relaxed) {
                 let new_selection = decision::select_top(&pool.read().await, capacity);
-                if new_selection != last_selection {
+                // 和**实际共享状态**比，不能和本地 last_selection 比：
+                // 钉住期间 ctl 会把 selection 改成单个节点，而 last_selection
+                // 还是旧值。解钉后若 EWMA 结果恰好等于 last_selection，
+                // 就永远不会重新发布，selection 会卡在钉住的那个节点上。
+                let current = selection.read().await.clone();
+                if new_selection != current {
                     apply_selection(&new_selection, &selection).await;
-                    last_selection = new_selection;
                 }
+                last_selection = new_selection;
             }
         }
+
+        // 每轮存盘。频率够低（一轮几十秒到几分钟），不必再加定时器；
+        // 进程被 kill -9 最多丢一轮的增量。
+        persist::save(&pool.read().await);
 
         tracing::info!(
             nodes = snapshot.len(),

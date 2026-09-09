@@ -166,9 +166,55 @@ async fn handle_one(
     };
     let _ = peer;
 
-    // 双向拷贝（meow 的 ProxyConn 就是 tokio AsyncRead/AsyncWrite）
+    relay(socket, conn, first_response_timeout()).await
+}
+
+/// 建连后等对端首次响应的超时。
+///
+/// 为什么需要：黑洞节点（TCP 连得上、握手"成功"、之后不回数据）在 AEAD 类协议
+/// 上 `dial_tcp` 会立刻返回 Ok —— dial 超时管不到，请求会挂到客户端超时（实测 25s）。
+fn first_response_timeout() -> Duration {
+    Duration::from_millis(crate::config::timeout_ms() * 4)
+}
+
+/// 双向中继，带"对端首次响应"超时。
+///
+/// **不能盲等首字节**：绝大多数协议是客户端先说话（TLS ClientHello、HTTP 请求），
+/// 服务端在收到请求前不会发任何数据。所以顺序必须是：
+/// 先把客户端第一批数据转发过去，**再**等对端回应——这样才能区分
+/// "黑洞节点不回"和"正常节点在等我们说话"。
+///
+/// 超时只作用于**首次**响应；之后进入无超时的常规双向拷贝，
+/// 免得长连接（SSH、WebSocket 长轮询）被误杀。
+async fn relay(
+    socket: TcpStream,
+    conn: Box<dyn meow_common::conn::ProxyConn>,
+    first_response: Duration,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (mut cr, mut cw) = tokio::io::split(socket);
     let (mut pr, mut pw) = tokio::io::split(conn);
+
+    // 1. 先转发客户端的第一批数据（不等就永远收不到响应）
+    let mut buf = vec![0u8; 16 * 1024];
+    let n = cr.read(&mut buf).await?;
+    if n == 0 {
+        return Ok(()); // 客户端直接关了
+    }
+    pw.write_all(&buf[..n]).await?;
+    pw.flush().await?;
+
+    // 2. 等对端首次响应；超时 = 黑洞，让调用方感知
+    let first = match tokio::time::timeout(first_response, pr.read(&mut buf)).await {
+        Ok(Ok(0)) => return Ok(()), // 对端正常关闭
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_) => {
+            return Err(format!("对端 {first_response:?} 内无响应（黑洞节点）").into());
+        }
+    };
+    cw.write_all(&buf[..first]).await?;
+
+    // 3. 首次响应已到，进入常规无超时双向拷贝
     let _ = tokio::join!(
         tokio::io::copy(&mut cr, &mut pw),
         tokio::io::copy(&mut pr, &mut cw)
