@@ -1,0 +1,70 @@
+name: Release
+
+# 打 v* tag 触发：构建优化二进制 → UPX 压缩 → 发 GitHub Release。
+# 版本号即 tag（v0.1.0 → 0.1.0，与 Cargo.toml version 保持一致）。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # 创建 Release 与上传产物
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: build & publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 校验 tag 与 Cargo.toml 版本一致
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          if [ "$TAG" != "$CARGO" ]; then
+            echo "::error::tag v$TAG 与 Cargo.toml version $CARGO 不一致"
+            exit 1
+          fi
+          echo "VERSION=$TAG" >> "$GITHUB_ENV"
+
+      - name: 构建（meow feature，release 优化见 Cargo.toml profile）
+        run: cargo build --release --features meow
+
+      - name: UPX 压缩
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq upx-ucl
+          upx --best --lzma target/release/silverq
+
+      - name: 冒烟（二进制可执行且 /version 正常）
+        run: |
+          ./target/release/silverq --help >/dev/null
+          ./target/release/silverq --version
+
+      - name: 打包
+        run: |
+          cd target/release
+          tar czf "silverq-${VERSION}-x86_64-linux.tar.gz" silverq
+          sha256sum "silverq-${VERSION}-x86_64-linux.tar.gz" > "silverq-${VERSION}-x86_64-linux.tar.gz.sha256"
+          mv "silverq-${VERSION}-x86_64-linux.tar.gz"* "$GITHUB_WORKSPACE/"
+
+      - name: 发布 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: silverq ${{ github.ref_name }}
+          body: |
+            clash 兼容调度器。产物为 UPX 压缩的 x86_64 linux 二进制。
+
+            ```bash
+            tar xzf silverq-*.tar.gz
+            ./silverq serve nodes.yaml --config silverq.toml
+            ```
+          files: |
+            silverq-${{ env.VERSION }}-x86_64-linux.tar.gz
+            silverq-${{ env.VERSION }}-x86_64-linux.tar.gz.sha256
+          fail_on_unmatched_files: true

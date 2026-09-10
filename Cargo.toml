@@ -44,3 +44,12 @@ meow = ["meow-proxy", "meow-common", "meow-transport"]
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[profile.release]
+# 代理是长跑吞吐型负载：保 opt-level 3（"z" 省几 MB 但热路径变慢不划算）。
+# panic 不用 abort：任务级 panic 隔离（report_task_exit 依赖 JoinHandle 捕获）
+# 比省几 MB 展开表更重要，abort 会让单个任务 panic 直接带走整个 daemon。
+lto = "fat"
+codegen-units = 1
+strip = true
+opt-level = 3

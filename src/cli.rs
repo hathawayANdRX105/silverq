@@ -61,6 +61,10 @@ pub fn parse() -> Cmd {
             Some(tag) => Cmd::Select { tag: tag.clone() },
             None => die("select: 用法: silverq select <tag|auto>"),
         },
+        Some("--version") | Some("-V") => {
+            println!("silverq {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
         Some("--help") | Some("-h") => {
             println!(
                 "silverq — 稳定性优先的代理节点调度器\n\n\
