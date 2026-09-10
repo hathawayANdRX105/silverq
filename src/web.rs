@@ -28,6 +28,9 @@ struct NodeJson<'a> {
     /// EWMA 分数（毫秒）；null = 从未测通
     ewma: Option<u64>,
     samples: u32,
+    /// 是否测过（无论成败）。用来把「测了但全失败」和「还没轮到」分开：
+    /// samples 只在成功时累加，死节点池里 samples==0 的绝大多数其实测过了。
+    probed: bool,
     /// 是否在当前 selection 里
     active: bool,
     /// 是否是当前首选
@@ -80,6 +83,7 @@ async fn status_json(state: &CtlState) -> String {
                 None
             },
             samples: n.samples,
+            probed: n.last_measured.is_some(),
             active: selection.contains(&n.tag),
             primary: selection.first().map(|s| s == &n.tag).unwrap_or(false),
         })

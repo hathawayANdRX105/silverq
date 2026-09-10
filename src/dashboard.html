@@ -41,6 +41,7 @@
   <div class="card"><div class="k">Primary</div><div class="v ok" id="primary">—</div></div>
   <div class="card"><div class="k">候选</div><div class="v acc" id="selcount">—</div></div>
   <div class="card"><div class="k">节点池</div><div class="v" id="poolsize">—</div></div>
+  <div class="card"><div class="k">健康度</div><div class="v" id="health">—</div></div>
   <div class="card"><div class="k">模式</div><div class="v" id="mode">—</div></div>
 </div>
 <table>
@@ -58,6 +59,13 @@ async function refresh() {
     $('primary').textContent = d.selection[0] || '—';
     $('selcount').textContent = d.selection.length;
     $('poolsize').textContent = d.nodes.length;
+    // 可用 / 不可用 / 待测 三分。池子里死节点占多数是常态，
+    // 必须一眼看出"没测通"是节点死了而不是调度漏测。
+    const dead = d.nodes.filter(n => n.ewma === null && n.probed).length;
+    const todo = d.nodes.filter(n => n.ewma === null && !n.probed).length;
+    $('health').textContent =
+      `${alive.filter(n => n.ewma <= 9000).length} 可用 / ${dead} 不可用`
+      + (todo ? ` / ${todo} 待测` : '');
     $('mode').innerHTML = d.pinned
       ? '<span class="badge b-dead">已钉住</span>'
       : '<span class="badge b-ok">自动</span>';
@@ -65,7 +73,13 @@ async function refresh() {
     const maxEwma = Math.max(...alive.map(n => n.ewma), 1);
     $('rows').innerHTML = d.nodes.map((n, i) => {
       let badge, ms;
-      if (n.ewma === null) { badge = '<span class="badge b-unmeasured">未测通</span>'; ms = '—'; }
+      if (n.ewma === null) {
+        // samples 只在成功时累加，所以 samples==0 不等于「没测」。
+        // 用 probed 分开：测过不通 = 节点自己死了；没测过 = 还没轮到。
+        badge = n.probed ? '<span class="badge b-dead">不可用</span>'
+                         : '<span class="badge b-unmeasured">待测</span>';
+        ms = '—';
+      }
       else if (n.ewma > 9000) { badge = '<span class="badge b-dead">罚分观察</span>'; ms = n.ewma + 'ms'; }
       else {
         badge = n.primary ? '<span class="badge b-primary">首选</span>'

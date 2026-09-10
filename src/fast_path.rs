@@ -11,6 +11,11 @@ use crate::node::Node;
 pub fn apply_batch(nodes: &mut [Node], measurements: &[Measurement], timeout_penalty: f64) {
     for m in measurements {
         if let Some(node) = nodes.iter_mut().find(|n| n.tag == m.tag) {
+            // 记录"测过了"，无论成败。samples 只在成功时才 +1，所以
+            // samples==0 无法区分「还没轮到」和「测了但全失败」——
+            // 死节点池里后者是绝大多数，面板上必须分开显示。
+            node.last_measured = Some(std::time::Instant::now());
+
             if let Some(delay) = m.delay_ms {
                 node.update(delay);
             } else if node.ewma.is_finite() {
@@ -18,7 +23,7 @@ pub fn apply_batch(nodes: &mut [Node], measurements: &[Measurement], timeout_pen
                 // 封顶避免累积到 inf 破坏排序。
                 node.ewma = (node.ewma + timeout_penalty).min(9999.0);
             }
-            // 从未成功过（ewma 仍是 INFINITY）：保持不动。
+            // 从未成功过（ewma 仍是 INFINITY）：分数保持不动。
             //
             // 早先这里会把它设成 timeout_penalty(3000)，等于把"从未连通过"的节点
             // 提升到"真实延迟 3000ms+ 的活节点"之前 —— 死节点插到活节点前面。
@@ -83,6 +88,32 @@ mod tests {
             "挂掉的节点必须被扣到 steady 之后：was_fast={} steady={}",
             pool[0].score(),
             pool[1].score()
+        );
+    }
+
+    /// 失败的测速也必须记录"测过了"。
+    ///
+    /// `samples` 只在成功时累加，所以 `samples == 0` 无法区分「还没轮到」和
+    /// 「测了但一次没通」。死节点占多数的池子里后者是绝大多数，面板若不分开
+    /// 就会显示成 207 个"待测"，让人误判成调度漏测了节点（真实发生过）。
+    #[test]
+    fn failed_probe_still_marks_node_as_measured() {
+        let mut nodes = vec![node("dead"), node("untouched")];
+        assert!(nodes[0].last_measured.is_none());
+
+        // 只给 "dead" 一个失败结果，"untouched" 不在这批里
+        apply_batch(&mut nodes, &[timeout("dead")], 3000.0);
+
+        assert!(
+            nodes[0].last_measured.is_some(),
+            "失败的测速必须记录 last_measured，否则前端分不出「不可用」和「待测」"
+        );
+        assert_eq!(nodes[0].samples, 0, "失败不该增加成功样本数");
+        assert!(!nodes[0].ewma.is_finite(), "从未成功过应保持 INFINITY");
+
+        assert!(
+            nodes[1].last_measured.is_none(),
+            "没测的节点不该被标记为测过"
         );
     }
 
