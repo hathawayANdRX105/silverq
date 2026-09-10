@@ -199,8 +199,16 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             let inbound_sel = selection.clone();
             let inbound_reg = registry.clone();
             let inb2 = tokio::spawn(async move {
-                if let Err(e) =
-                    inbound::run(&listen, inbound_reg, inbound_sel, eff.fallback_attempts).await
+                if let Err(e) = inbound::run(
+                    &listen,
+                    inbound_reg,
+                    inbound_sel,
+                    inbound::DialTuning {
+                        timeout_ms: eff.timeout_ms,
+                        fallback_attempts: eff.fallback_attempts,
+                    },
+                )
+                .await
                 {
                     tracing::error!("inbound exited: {e}");
                 }
@@ -321,7 +329,7 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
         // 详见 decision::measurement_order 的文档（含为什么必须交错）。
         let batches = {
             let guard = pool.read().await;
-            decision::measurement_order(&guard, batch_size)
+            decision::measurement_order(&guard, batch_size, timeout_penalty)
         };
 
         for chunk in batches {
@@ -330,7 +338,7 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
 
             {
                 let mut guard = pool.write().await;
-                fast_path::apply_batch(&mut guard, &results, timeout_penalty);
+                fast_path::apply_batch(&mut guard, &results);
             }
 
             // 切换（pinned 时暂停）。
@@ -347,7 +355,7 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
                 let target = pin_target.lock().clone();
                 let desired = match (&target, pinned.load(Ordering::Relaxed)) {
                     (Some(tag), true) => vec![tag.clone()],
-                    _ => decision::select_top(&pool.read().await, capacity),
+                    _ => decision::select_top(&pool.read().await, capacity, timeout_penalty),
                 };
                 let mut sel_guard = selection.write().await;
                 if *sel_guard != desired {

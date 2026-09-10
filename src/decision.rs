@@ -6,9 +6,13 @@ use crate::node::Node;
 /// Select the top N nodes by EWMA score (lower is better).
 /// Used to determine the active proxy group.
 /// No hysteresis or round-based switching — pure score driven.
-pub fn select_top(nodes: &[Node], capacity: usize) -> Vec<String> {
+pub fn select_top(nodes: &[Node], capacity: usize, penalty_ms: f64) -> Vec<String> {
     let mut ranked: Vec<_> = nodes.iter().collect();
-    ranked.sort_by(|a, b| a.score().partial_cmp(&b.score()).unwrap());
+    ranked.sort_by(|a, b| {
+        a.score_with(penalty_ms)
+            .partial_cmp(&b.score_with(penalty_ms))
+            .unwrap()
+    });
     ranked
         .into_iter()
         .take(capacity)
@@ -22,10 +26,14 @@ pub fn select_top(nodes: &[Node], capacity: usize) -> Vec<String> {
 /// 为什么要交错：初始时所有节点分数都是 `INFINITY`，纯按分数排序等于配置顺序，
 /// 活节点若排在池子后部会很久测不到。实测真实池 217 节点时，50s 内测了 99 个
 /// 全失败，而同时 sing-box 已测出 7 个活节点 —— 它们都排在后面还没轮到。
-pub fn measurement_order(nodes: &[Node], batch_size: usize) -> Vec<Vec<Node>> {
+pub fn measurement_order(nodes: &[Node], batch_size: usize, penalty_ms: f64) -> Vec<Vec<Node>> {
     let (mut known, unmeasured): (Vec<Node>, Vec<Node>) =
         nodes.iter().cloned().partition(|n| n.samples > 0);
-    known.sort_by(|a, b| a.score().partial_cmp(&b.score()).unwrap());
+    known.sort_by(|a, b| {
+        a.score_with(penalty_ms)
+            .partial_cmp(&b.score_with(penalty_ms))
+            .unwrap()
+    });
 
     let half = (batch_size / 2).max(1);
     let mut known = known.into_iter();
@@ -58,6 +66,7 @@ pub fn measurement_order(nodes: &[Node], batch_size: usize) -> Vec<Vec<Node>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node::DEFAULT_FAILURE_PENALTY_MS;
 
     fn measured(tag: &str, ms: f64) -> Node {
         let mut n = Node::new(tag, "1.1.1.1", 443);
@@ -73,10 +82,17 @@ mod tests {
             Node::new("never", "2.2.2.2", 443),
             measured("mid", 200.0),
         ];
-        assert_eq!(select_top(&pool, 2), vec!["fast", "mid"]);
-        assert_eq!(select_top(&pool, 10).len(), 4, "capacity 超池大小时取全部");
+        assert_eq!(
+            select_top(&pool, 2, DEFAULT_FAILURE_PENALTY_MS),
+            vec!["fast", "mid"]
+        );
+        assert_eq!(
+            select_top(&pool, 10, DEFAULT_FAILURE_PENALTY_MS).len(),
+            4,
+            "capacity 超池大小时取全部"
+        );
         // 没测过的排最后
-        assert_eq!(select_top(&pool, 4)[3], "never");
+        assert_eq!(select_top(&pool, 4, DEFAULT_FAILURE_PENALTY_MS)[3], "never");
     }
 
     /// 交错的核心保证：未测节点不会被挤到最后一批，第一批就必须包含它们。
@@ -91,7 +107,7 @@ mod tests {
             pool.push(Node::new(format!("u{i}"), "2.2.2.2", 443));
         }
 
-        let batches = measurement_order(&pool, 4);
+        let batches = measurement_order(&pool, 4, DEFAULT_FAILURE_PENALTY_MS);
         let first: Vec<&str> = batches[0].iter().map(|n| n.tag.as_str()).collect();
 
         assert!(
@@ -113,7 +129,7 @@ mod tests {
             pool.push(Node::new(format!("u{i}"), "2.2.2.2", 443));
         }
 
-        let batches = measurement_order(&pool, 3);
+        let batches = measurement_order(&pool, 3, DEFAULT_FAILURE_PENALTY_MS);
         let mut seen: Vec<String> = batches
             .iter()
             .flat_map(|b| b.iter().map(|n| n.tag.clone()))
@@ -128,13 +144,13 @@ mod tests {
         let all_new: Vec<Node> = (0..7)
             .map(|i| Node::new(format!("u{i}"), "1.1.1.1", 443))
             .collect();
-        let b = measurement_order(&all_new, 3);
+        let b = measurement_order(&all_new, 3, DEFAULT_FAILURE_PENALTY_MS);
         assert_eq!(b.iter().map(|x| x.len()).sum::<usize>(), 7);
 
         let all_known: Vec<Node> = (0..5)
             .map(|i| measured(&format!("k{i}"), i as f64 * 10.0 + 1.0))
             .collect();
-        let b = measurement_order(&all_known, 2);
+        let b = measurement_order(&all_known, 2, DEFAULT_FAILURE_PENALTY_MS);
         assert_eq!(b.iter().map(|x| x.len()).sum::<usize>(), 5);
     }
 }

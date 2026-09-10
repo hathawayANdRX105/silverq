@@ -15,11 +15,41 @@ use tokio::net::{TcpListener, TcpStream};
 /// 共享选择状态：调度循环写，inbound 每连接读。
 pub type SharedSelection = Arc<tokio::sync::RwLock<Vec<String>>>;
 
+/// 数据面的拨号调参。
+///
+/// `timeout_ms` 必须从 `settings::Effective` 传进来，不能再读
+/// `config::timeout_ms()` —— 后者只看 env，会把 silverq.toml 里的值悄悄丢掉，
+/// 结果测速用 2500 而数据面按默认 2000 派生超时（实测存在过的失联）。
+#[derive(Clone, Copy)]
+pub struct DialTuning {
+    /// 测速超时（毫秒）。dial 与首响超时都由它派生。
+    pub timeout_ms: u64,
+    /// 按 EWMA 顺序最多试几个候选
+    pub fallback_attempts: usize,
+}
+
+impl DialTuning {
+    /// dial 单个候选的超时：测速超时的 2 倍。
+    /// 测速能过说明建连一般在测速超时内完成，留 2 倍余量给抖动。
+    fn dial(&self) -> Duration {
+        Duration::from_millis(self.timeout_ms * 2)
+    }
+
+    /// 建连后等对端首次响应的超时：测速超时的 4 倍。
+    ///
+    /// 为什么需要：黑洞节点（TCP 连得上、握手"成功"、之后不回数据）在 AEAD 类
+    /// 协议上 `dial_tcp` 会立刻返回 Ok —— dial 超时管不到，请求会挂到客户端
+    /// 超时（实测 25s）。
+    fn first_response(&self) -> Duration {
+        Duration::from_millis(self.timeout_ms * 4)
+    }
+}
+
 pub async fn run(
     listener_addr: &str,
     registry: Registry,
     selection: SharedSelection,
-    fallback_attempts: usize,
+    tuning: DialTuning,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(listener_addr).await?;
     tracing::info!(
@@ -32,8 +62,7 @@ pub async fn run(
         let registry = registry.clone();
         let selection = selection.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_one(socket, peer, &registry, &selection, fallback_attempts).await
-            {
+            if let Err(e) = handle_one(socket, peer, &registry, &selection, tuning).await {
                 tracing::debug!(peer = %peer, "{e}");
             }
         });
@@ -65,7 +94,7 @@ async fn handle_one(
     peer: SocketAddr,
     registry: &Registry,
     selection: &SharedSelection,
-    fallback_attempts: usize,
+    tuning: DialTuning,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut peek = [0u8; 1];
     socket
@@ -91,7 +120,7 @@ async fn handle_one(
     // UDP ASSOCIATE：分配中继 socket，回其地址，然后在 TCP 存活期间跑中继循环。
     // 注意：客户端常填 0.0.0.0:0（自己也不知道源地址），所以不能用 host 空判断拦。
     if target.cmd == Cmd::UdpAssociate {
-        return handle_udp_associate(socket, registry, selection, fallback_attempts).await;
+        return handle_udp_associate(socket, registry, selection, tuning).await;
     }
 
     if target.host.is_empty() {
@@ -126,7 +155,7 @@ async fn handle_one(
     // 避免 guard 跨 await
     let candidates: Vec<_> = {
         let guard = registry.read();
-        pick_candidates(&order, &guard, fallback_attempts)
+        pick_candidates(&order, &guard, tuning.fallback_attempts)
     };
     // 逐个 dial，**每个都带超时**。
     //
@@ -138,7 +167,7 @@ async fn handle_one(
     // SILVERQ_FALLBACK_ATTEMPTS 可覆盖）。按 EWMA 顺序最多试 N 个候选：
     // 池子普遍半死时，大值能救回更多请求；但每个死候选都要烧一个 dial 超时，
     // 单请求最坏延迟随之上升。
-    let dial_timeout = Duration::from_millis(crate::config::timeout_ms() * 2);
+    let dial_timeout = tuning.dial();
     let mut conn = None;
     for adapter in &candidates {
         match tokio::time::timeout(dial_timeout, adapter.dial_tcp(&metadata)).await {
@@ -173,15 +202,7 @@ async fn handle_one(
     };
     let _ = peer;
 
-    relay(socket, conn, first_response_timeout()).await
-}
-
-/// 建连后等对端首次响应的超时。
-///
-/// 为什么需要：黑洞节点（TCP 连得上、握手"成功"、之后不回数据）在 AEAD 类协议
-/// 上 `dial_tcp` 会立刻返回 Ok —— dial 超时管不到，请求会挂到客户端超时（实测 25s）。
-fn first_response_timeout() -> Duration {
-    Duration::from_millis(crate::config::timeout_ms() * 4)
+    relay(socket, conn, tuning.first_response()).await
 }
 
 /// 双向中继，带"对端首次响应"超时。
@@ -433,7 +454,7 @@ async fn handle_udp_associate(
     mut socket: TcpStream,
     registry: &Registry,
     selection: &SharedSelection,
-    fallback_attempts: usize,
+    tuning: DialTuning,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let control_local = socket.local_addr()?;
     let (relay, relay_addr) = match crate::udp::bind_relay(control_local).await {
@@ -470,7 +491,7 @@ async fn handle_udp_associate(
         relay,
         registry.clone(),
         selection.clone(),
-        fallback_attempts,
+        tuning.fallback_attempts,
         shutdown_rx,
     ));
 
@@ -490,6 +511,41 @@ async fn handle_udp_associate(
 
 #[cfg(test)]
 mod tests {
+    /// dial / 首响超时必须由**配置传入的** timeout_ms 派生。
+    ///
+    /// 回归一个真 bug：这两处曾读 `config::timeout_ms()`，那个函数只看
+    /// SILVERQ_TIMEOUT_MS 环境变量，把 silverq.toml 里的值悄悄丢掉 ——
+    /// 测速用 2500 而数据面按默认 2000 派生，配置在数据面这条路径上是死的。
+    /// 现在 `config::timeout_ms()` 已删除，这条测试锁住派生关系。
+    #[test]
+    fn dial_timeouts_derive_from_configured_timeout() {
+        let t = super::DialTuning {
+            timeout_ms: 2500,
+            fallback_attempts: 3,
+        };
+        assert_eq!(
+            t.dial(),
+            std::time::Duration::from_millis(5000),
+            "dial = 2x"
+        );
+        assert_eq!(
+            t.first_response(),
+            std::time::Duration::from_millis(10_000),
+            "首响 = 4x"
+        );
+
+        // 换个值必须跟着变（若还硬编码 config 默认 2000，这里会失败）
+        let t2 = super::DialTuning {
+            timeout_ms: 4000,
+            fallback_attempts: 1,
+        };
+        assert_eq!(t2.dial(), std::time::Duration::from_millis(8000));
+        assert_eq!(
+            t2.first_response(),
+            std::time::Duration::from_millis(16_000)
+        );
+    }
+
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;

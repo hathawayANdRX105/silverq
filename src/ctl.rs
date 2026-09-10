@@ -178,7 +178,11 @@ async fn do_reload(state: &CtlState, path_arg: Option<&str>) -> Result<String, S
 
     *state.nodes_path.lock() = path.clone();
     if !state.pinned.load(Ordering::Relaxed) {
-        let top = crate::decision::select_top(&pool, crate::config::active_capacity());
+        let top = crate::decision::select_top(
+            &pool,
+            crate::config::active_capacity(),
+            crate::node::DEFAULT_FAILURE_PENALTY_MS,
+        );
         *state.selection.write().await = top.clone();
         return Ok(format!("reloaded {path} ({top:?})"));
     }
@@ -192,8 +196,11 @@ async fn do_select(state: &CtlState, arg: Option<&str>) -> Result<String, String
         // 立刻按 EWMA 重算，别等下一轮测速（间隔可能 30s+）。
         // 早先只清标志、不改 selection，导致解钉后 selection 仍是钉住的那
         // 单个节点 —— 钉到死节点再 auto 的话，请求会继续全失败到下一轮。
-        let top =
-            crate::decision::select_top(&state.pool.read().await, crate::config::active_capacity());
+        let top = crate::decision::select_top(
+            &state.pool.read().await,
+            crate::config::active_capacity(),
+            crate::node::DEFAULT_FAILURE_PENALTY_MS,
+        );
         *state.selection.write().await = top.clone();
         return Ok(format!("auto (unpinned, {top:?})"));
     }

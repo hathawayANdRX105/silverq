@@ -25,8 +25,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// 取 6 小时：足够覆盖"重启/升级"这类场景，又不会拿隔夜的数据做决策。
 const MAX_AGE_SECS: u64 = 6 * 3600;
 
+/// 存档格式版本。
+///
+/// v1 的 `ewma` 掺了失败罚分（`ewma += 3000`），不是纯实测延迟；
+/// 现在 `ewma` 只由成功测速写入，罚分单独记在 `consecutive_failures`。
+/// 读到非当前版本一律丢弃重测 —— 把 v1 的 7512ms 当真实延迟恢复，
+/// 会让一个 1.5s 的活节点长期排在后面。
+const FORMAT_VERSION: u32 = 2;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Snapshot {
+    /// 格式版本。缺失 = v1（罚分污染 ewma 的旧格式），丢弃。
+    #[serde(default)]
+    version: u32,
     /// Unix 秒。用于判断存档是否过期。
     saved_at: u64,
     /// tag -> 分数
@@ -68,6 +79,7 @@ pub fn save(nodes: &[Node]) {
 /// （曾因此必现失败），所以隔离靠参数，不靠 env。
 pub fn save_to(path: &std::path::Path, nodes: &[Node]) {
     let snapshot = Snapshot {
+        version: FORMAT_VERSION,
         saved_at: now_secs(),
         scores: nodes
             .iter()
@@ -128,6 +140,15 @@ pub fn load_from(path: &std::path::Path, nodes: &mut [Node]) -> usize {
             return 0;
         }
     };
+
+    if snapshot.version != FORMAT_VERSION {
+        tracing::info!(
+            found = snapshot.version,
+            expected = FORMAT_VERSION,
+            "存档格式版本不符（旧格式的 ewma 掺了罚分），丢弃重测"
+        );
+        return 0;
+    }
 
     let age = now_secs().saturating_sub(snapshot.saved_at);
     if age > MAX_AGE_SECS {
@@ -206,12 +227,48 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// 旧格式存档必须整体丢弃，不能把掺了罚分的 ewma 当纯延迟恢复。
+    ///
+    /// v1 里失败会 `ewma += 3000`（封顶 9999），所以一个真实延迟 1512ms 的
+    /// 活节点在存档里可能是 7512ms。照原样恢复会让它长期排在后面 ——
+    /// 宁可从零重测。
+    #[test]
+    fn snapshot_from_old_format_is_rejected() {
+        let path = tmp_state("oldfmt");
+
+        // v1 存档：无 version 字段（serde default = 0），ewma 是被罚分污染的值
+        let v1 = serde_json::json!({
+            "saved_at": now_secs(),
+            "scores": { "a": { "ewma": 7512.0, "samples": 85 } }
+        });
+        std::fs::write(&path, serde_json::to_vec(&v1).unwrap()).unwrap();
+
+        let mut pool = vec![Node::new("a", "1.1.1.1", 443)];
+        assert_eq!(
+            load_from(&path, &mut pool),
+            0,
+            "旧格式存档必须被拒，否则 7512ms 会被当成真实延迟"
+        );
+        assert!(pool[0].score().is_infinite());
+
+        // 当前格式则正常恢复
+        let mut fresh = vec![Node::new("a", "1.1.1.1", 443)];
+        fresh[0].update(1512.0);
+        save_to(&path, &fresh);
+        let mut pool2 = vec![Node::new("a", "1.1.1.1", 443)];
+        assert_eq!(load_from(&path, &mut pool2), 1, "当前格式应能恢复");
+        assert_eq!(pool2[0].ewma, 1512.0);
+
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn stale_snapshot_is_rejected() {
         let path = tmp_state("stale");
 
         // 手写一个 7 小时前的存档
         let old = Snapshot {
+            version: FORMAT_VERSION,
             saved_at: now_secs() - (7 * 3600),
             scores: HashMap::from([(
                 "a".to_string(),

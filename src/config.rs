@@ -32,12 +32,6 @@ pub fn probe_url() -> String {
     std::env::var("SILVERQ_PROBE_URL").unwrap_or_else(|_| DEFAULT_PROBE_URL.to_string())
 }
 
-/// 单节点测速超时毫秒（`SILVERQ_TIMEOUT_MS`）。
-#[cfg_attr(not(feature = "meow"), allow(dead_code))] // inbound 仅 meow 模式编译
-pub fn timeout_ms() -> u64 {
-    env_parsed("SILVERQ_TIMEOUT_MS", DEFAULT_TIMEOUT_MS)
-}
-
 /// 主组容量（`SILVERQ_CAPACITY`）。
 pub fn active_capacity() -> usize {
     env_parsed("SILVERQ_CAPACITY", DEFAULT_ACTIVE_CAPACITY)

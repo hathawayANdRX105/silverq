@@ -63,8 +63,12 @@ async function refresh() {
     // 必须一眼看出"没测通"是节点死了而不是调度漏测。
     const dead = d.nodes.filter(n => n.ewma === null && n.probed).length;
     const todo = d.nodes.filter(n => n.ewma === null && !n.probed).length;
+    // ewma 现在是纯实测延迟，不含罚分，所以"可用"就是测通过的。
+    // 其中正在失败的单独标出：它们延迟仍是真的，只是当前被降权。
+    const flaky = alive.filter(n => n.failures > 0).length;
     $('health').textContent =
-      `${alive.filter(n => n.ewma <= 9000).length} 可用 / ${dead} 不可用`
+      `${alive.length} 可用 / ${dead} 不可用`
+      + (flaky ? ` (${flaky} 失败中)` : '')
       + (todo ? ` / ${todo} 待测` : '');
     $('mode').innerHTML = d.pinned
       ? '<span class="badge b-dead">已钉住</span>'
@@ -80,14 +84,17 @@ async function refresh() {
                          : '<span class="badge b-unmeasured">待测</span>';
         ms = '—';
       }
-      else if (n.ewma > 9000) { badge = '<span class="badge b-dead">罚分观察</span>'; ms = n.ewma + 'ms'; }
       else {
-        badge = n.primary ? '<span class="badge b-primary">首选</span>'
-              : n.active ? '<span class="badge b-active">候选</span>'
-              : '<span class="badge b-ok">正常</span>';
+        // ms 始终是纯实测延迟。连续失败中的节点额外标注失败次数 ——
+        // 早先罚分累加进 ewma，这里会显示 7512ms，看着像 2500ms 超时失效。
         ms = n.ewma + 'ms';
+        badge = n.failures > 0
+          ? `<span class="badge b-dead">失败 ${n.failures} 次</span>`
+          : n.primary ? '<span class="badge b-primary">首选</span>'
+          : n.active ? '<span class="badge b-active">候选</span>'
+          : '<span class="badge b-ok">正常</span>';
       }
-      const bar = n.ewma !== null && n.ewma <= 9000
+      const bar = n.ewma !== null
         ? `<div class="bar"><i style="width:${Math.max(4, 100 - n.ewma / maxEwma * 100).toFixed(0)}%"></i></div>` : '';
       const btn = n.primary
         ? ''

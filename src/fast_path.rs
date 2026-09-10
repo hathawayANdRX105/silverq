@@ -8,7 +8,7 @@ use crate::node::Node;
 /// 扣分只对曾经成功过的节点有意义。从未成功的节点 `ewma` 仍是 `INFINITY`，
 /// 本来就排在最后。真正需要扣分的是先活后死的节点：否则一个刚测出 50ms 的
 /// 节点挂掉后，仍会带着 50ms 的分数长期霸占队首。
-pub fn apply_batch(nodes: &mut [Node], measurements: &[Measurement], timeout_penalty: f64) {
+pub fn apply_batch(nodes: &mut [Node], measurements: &[Measurement]) {
     for m in measurements {
         if let Some(node) = nodes.iter_mut().find(|n| n.tag == m.tag) {
             // 记录"测过了"，无论成败。samples 只在成功时才 +1，所以
@@ -18,15 +18,15 @@ pub fn apply_batch(nodes: &mut [Node], measurements: &[Measurement], timeout_pen
 
             if let Some(delay) = m.delay_ms {
                 node.update(delay);
-            } else if node.ewma.is_finite() {
-                // 曾经成功过：在原分数上累加扣分，让健康节点超过它。
-                // 封顶避免累积到 inf 破坏排序。
-                node.ewma = (node.ewma + timeout_penalty).min(9999.0);
+            } else {
+                // 失败只累计次数，罚分在 Node::score() 里现算。
+                //
+                // 早先是 `ewma += timeout_penalty`，把罚分混进延迟字段：
+                // 面板显示 7512ms 像是 2500ms 超时失效（实为 1512ms + 两次罚分），
+                // 且罚分是加法、恢复靠 alpha 混合（≤0.65），涨得比恢复快 ——
+                // 偶尔失败的活节点被永久压住甚至撞 9999 封顶，与真死节点无法区分。
+                node.penalize();
             }
-            // 从未成功过（ewma 仍是 INFINITY）：分数保持不动。
-            //
-            // 早先这里会把它设成 timeout_penalty(3000)，等于把"从未连通过"的节点
-            // 提升到"真实延迟 3000ms+ 的活节点"之前 —— 死节点插到活节点前面。
         }
     }
 }
@@ -57,7 +57,7 @@ mod tests {
     #[test]
     fn never_measured_node_stays_worst() {
         let mut pool = vec![node("dead"), node("live")];
-        apply_batch(&mut pool, &[timeout("dead"), ok("live", 50.0)], 3000.0);
+        apply_batch(&mut pool, &[timeout("dead"), ok("live", 50.0)]);
 
         assert!(pool[0].score().is_infinite(), "从未成功过应保持 INFINITY");
         assert_eq!(pool[1].score(), 50.0);
@@ -70,19 +70,11 @@ mod tests {
         let mut pool = vec![node("was_fast"), node("steady")];
 
         // 第一轮：was_fast 很快，steady 一般
-        apply_batch(
-            &mut pool,
-            &[ok("was_fast", 20.0), ok("steady", 200.0)],
-            3000.0,
-        );
+        apply_batch(&mut pool, &[ok("was_fast", 20.0), ok("steady", 200.0)]);
         assert!(pool[0].score() < pool[1].score(), "was_fast 起初应更优");
 
         // was_fast 挂了：扣分后必须落到 steady 之后
-        apply_batch(
-            &mut pool,
-            &[timeout("was_fast"), ok("steady", 200.0)],
-            3000.0,
-        );
+        apply_batch(&mut pool, &[timeout("was_fast"), ok("steady", 200.0)]);
         assert!(
             pool[0].score() > pool[1].score(),
             "挂掉的节点必须被扣到 steady 之后：was_fast={} steady={}",
@@ -102,7 +94,7 @@ mod tests {
         assert!(nodes[0].last_measured.is_none());
 
         // 只给 "dead" 一个失败结果，"untouched" 不在这批里
-        apply_batch(&mut nodes, &[timeout("dead")], 3000.0);
+        apply_batch(&mut nodes, &[timeout("dead")]);
 
         assert!(
             nodes[0].last_measured.is_some(),
@@ -117,18 +109,42 @@ mod tests {
         );
     }
 
-    /// 扣分累积但要有上限，避免分数溢出成 NaN/inf 破坏排序。
+    /// 罚分绝不污染实测延迟，且一次成功即完全恢复。
+    ///
+    /// 回归一个真 bug：早先失败时 `ewma += 3000` 并封顶 9999，导致
+    /// 1) 面板显示 7512ms 像是 2500ms 超时失效（实为 1512ms 真延迟 + 两次罚分）；
+    /// 2) 罚分是加法、恢复靠 alpha 混合（≤0.65），涨得比恢复快 ——
+    ///    偶尔失败的活节点被永久压住，撞 9999 封顶后与真死节点无法区分
+    ///    （线上实测 samples=77 的活节点显示 9999）。
     #[test]
-    fn penalty_accumulates_but_is_capped() {
+    fn penalty_never_pollutes_measured_latency_and_recovers_instantly() {
         let mut pool = vec![node("flaky")];
-        apply_batch(&mut pool, &[ok("flaky", 100.0)], 3000.0);
+        apply_batch(&mut pool, &[ok("flaky", 100.0)]);
+        assert_eq!(pool[0].ewma, 100.0);
+
+        // 连续失败很多次
         for _ in 0..50 {
-            apply_batch(&mut pool, &[timeout("flaky")], 3000.0);
+            apply_batch(&mut pool, &[timeout("flaky")]);
         }
+        assert_eq!(
+            pool[0].ewma, 100.0,
+            "实测延迟字段绝不能被罚分污染（面板就是读它）"
+        );
         assert!(
-            pool[0].score().is_finite() && pool[0].score() <= 9999.0,
-            "分数必须有上限，实际 {}",
+            pool[0].score() > 100.0,
+            "排序分数必须体现失败：score={}",
             pool[0].score()
         );
+
+        // 一次成功立刻完全恢复 —— 不需要多轮把膨胀分数洗回来
+        apply_batch(&mut pool, &[ok("flaky", 100.0)]);
+        assert_eq!(
+            pool[0].score(),
+            pool[0].ewma,
+            "一次成功后排序分数必须等于实测延迟，score={} ewma={}",
+            pool[0].score(),
+            pool[0].ewma
+        );
+        assert_eq!(pool[0].consecutive_failures, 0);
     }
 }

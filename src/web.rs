@@ -25,8 +25,11 @@ const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 #[derive(Debug, Serialize)]
 struct NodeJson<'a> {
     tag: &'a str,
-    /// EWMA 分数（毫秒）；null = 从未测通
+    /// 实测延迟 EWMA（毫秒）；null = 从未测通。
+    /// **纯延迟，不含失败罚分** —— 罚分单独在 `failures` 里。
     ewma: Option<u64>,
+    /// 连续失败次数。>0 表示这个节点当前在被降权观察。
+    failures: u32,
     samples: u32,
     /// 是否测过（无论成败）。用来把「测了但全失败」和「还没轮到」分开：
     /// samples 只在成功时累加，死节点池里 samples==0 的绝大多数其实测过了。
@@ -83,6 +86,7 @@ async fn status_json(state: &CtlState) -> String {
                 None
             },
             samples: n.samples,
+            failures: n.consecutive_failures,
             probed: n.last_measured.is_some(),
             active: selection.contains(&n.tag),
             primary: selection.first().map(|s| s == &n.tag).unwrap_or(false),
