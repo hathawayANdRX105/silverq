@@ -22,6 +22,8 @@ probe_url = "https://www.gstatic.com/generate_204"
 [data_plane]
 # 监听地址（SOCKS5 / HTTP-CONNECT 混合）
 listen = "127.0.0.1:17321"
+# Web 面板（无认证，只绑回环）。9090 是 clash_api 惯例端口，故默认 9095 避冲突
+web_listen = "127.0.0.1:9095"
 # fallback 尝试上限：按 EWMA 顺序最多试几个候选。
 # 3 = 队首 + 两个次优；1 = 只用队首不 fallback。
 # 池子普遍半死时可调大，但每个死候选都要烧一个 dial 超时（timeout_ms × 2），

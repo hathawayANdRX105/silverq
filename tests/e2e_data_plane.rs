@@ -631,3 +631,56 @@ fn ewma_scores_survive_restart() {
     );
     drop(d2);
 }
+
+/// 回归：`select <tag>` 必须让 selection 只剩该节点，且**保持住**。
+///
+/// 这条覆盖一个曾经完全坏掉的功能：CtlState 早先自己 new 了独立的
+/// `AtomicBool` / `Mutex`，与调度循环用的不是同一个对象 —— ctl 置位调度循环
+/// 看不到，于是下一批测速立刻把钉住的节点覆盖回 EWMA 的 N 个候选。
+/// 当时表现为「有时生效有时不生效」（实测 4/10 被覆盖），一路加锁都无效，
+/// 因为竞争的双方根本不是同一份状态。
+///
+/// 循环多轮是必要的：单次通过可能只是撞上了批间隙。
+#[test]
+fn pin_survives_scheduler_batches() {
+    let probe = spawn_probe_endpoint();
+    let echo = spawn_tcp_echo();
+
+    // 多个节点，保证 EWMA 会选出多候选（钉住必须把它压成 1 个）
+    let extra = concat!(
+        "  - tag: \"direct-b\"\n    protocol: direct\n    server: \"-\"\n    port: 0\n",
+        "  - tag: \"direct-c\"\n    protocol: direct\n    server: \"-\"\n    port: 0\n",
+    );
+    let d = start_daemon_with(probe, Some(extra));
+    std::thread::sleep(Duration::from_secs(2));
+
+    // interval=1s，跑 4 轮，每轮都确认钉住没被批发布覆盖
+    for round in 1..=4 {
+        d.ctl("select auto");
+        let reply = d.ctl("select direct-b");
+        assert!(reply.contains("pinned"), "第{round}轮钉住失败: {reply}");
+
+        std::thread::sleep(Duration::from_millis(1200)); // 跨过至少一批
+        let status = d.ctl("status");
+        assert!(
+            status.contains("pinned=true"),
+            "第{round}轮 pinned 标志丢失: {status}"
+        );
+        assert!(
+            status.contains("selection=[\"direct-b\"]"),
+            "第{round}轮 selection 被批发布覆盖: {status}"
+        );
+    }
+
+    // 解钉后应恢复多候选，且数据面仍可用
+    d.ctl("select auto");
+    std::thread::sleep(Duration::from_millis(1200));
+    let status = d.ctl("status");
+    assert!(status.contains("pinned=false"), "解钉失败: {status}");
+
+    let (mut s, _) = socks5_handshake(d.socks, 0x01, echo);
+    s.write_all(b"after-pin").unwrap();
+    let mut buf = [0u8; 9];
+    s.read_exact(&mut buf).expect("解钉后数据面应可用");
+    assert_eq!(&buf, b"after-pin");
+}

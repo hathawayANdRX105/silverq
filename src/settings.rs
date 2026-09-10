@@ -65,6 +65,9 @@ impl Default for SchedulerSection {
 pub struct DataPlaneSection {
     /// 监听地址（SOCKS5 / HTTP-CONNECT 混合）
     pub listen: String,
+    /// Web 面板监听地址。None = 默认 127.0.0.1:9090。
+    /// 注意：面板的 select 端点无认证，只应绑回环。
+    pub web_listen: Option<String>,
     /// **fallback 尝试上限**：按 EWMA 顺序最多试几个候选。
     ///
     /// 3 = 队首 + 两个次优。设 1 表示只用队首、不 fallback；
@@ -77,6 +80,7 @@ impl Default for DataPlaneSection {
     fn default() -> Self {
         Self {
             listen: crate::config::DEFAULT_LISTEN.to_string(),
+            web_listen: None,
             fallback_attempts: 3,
         }
     }
@@ -158,6 +162,8 @@ pub struct Effective {
     #[cfg_attr(not(feature = "meow"), allow(dead_code))] // meow 模式才发探测请求
     pub probe_url: String,
     pub listen: String,
+    #[cfg_attr(not(feature = "meow"), allow(dead_code))] // web 面板仅 meow 模式
+    pub web_listen: String,
     pub fallback_attempts: usize,
     pub state: String,
     pub ctl_sock: String,
@@ -190,6 +196,12 @@ impl Effective {
             timeout_penalty: env_parsed_or("SILVERQ_TIMEOUT_PENALTY", fc.scheduler.timeout_penalty),
             probe_url: env_or("SILVERQ_PROBE_URL", fc.scheduler.probe_url.clone()),
             listen: env_or("SILVERQ_LISTEN", fc.data_plane.listen.clone()),
+            web_listen: std::env::var("SILVERQ_WEB_LISTEN").unwrap_or_else(|_| {
+                fc.data_plane
+                    .web_listen
+                    .clone()
+                    .unwrap_or_else(|| "127.0.0.1:9095".into())
+            }),
             fallback_attempts: env_parsed_or(
                 "SILVERQ_FALLBACK_ATTEMPTS",
                 fc.data_plane.fallback_attempts,

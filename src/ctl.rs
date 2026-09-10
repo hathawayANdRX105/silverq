@@ -25,8 +25,18 @@ pub struct CtlState {
     pub selection: Arc<RwLock<Vec<String>>>,
     /// 当前节点表路径（reload 默认重读它）
     pub nodes_path: Mutex<String>,
-    /// 手动钉住：true 时调度循环不覆盖 selection
-    pub pinned: AtomicBool,
+    /// 手动钉住：true 时调度循环不覆盖 selection。
+    /// **必须与调度循环共享同一个 Arc** —— 早先这里是独立的 AtomicBool，
+    /// ctl 置位调度循环根本看不到，钉住功能实际是坏的（加锁怎么改都没用，
+    /// 因为两边操作的是不同对象）。
+    pub pinned: Arc<AtomicBool>,
+    /// 钉住目标 tag。
+    ///
+    /// **selection 的唯一写者是调度循环**：ctl/web 只在这里登记意图，
+    /// 由调度循环在自己的临界区里应用。早先 ctl 直接写 selection，
+    /// 与批发布形成双写者竞争，实测 4/10 概率被旧 EWMA 结果覆盖 ——
+    /// 加锁只能缩小窗口，改成单写者才根治。
+    pub pin_target: Arc<Mutex<Option<String>>>,
 }
 
 impl CtlState {
@@ -36,13 +46,16 @@ impl CtlState {
         pool: Arc<RwLock<Vec<Node>>>,
         selection: Arc<RwLock<Vec<String>>>,
         nodes_path: String,
+        pinned: Arc<AtomicBool>,
+        pin_target: Arc<Mutex<Option<String>>>,
     ) -> Self {
         Self {
             registry,
             pool,
             selection,
             nodes_path: Mutex::new(nodes_path),
-            pinned: AtomicBool::new(false),
+            pinned,
+            pin_target,
         }
     }
 
@@ -51,12 +64,15 @@ impl CtlState {
         pool: Arc<RwLock<Vec<Node>>>,
         selection: Arc<RwLock<Vec<String>>>,
         nodes_path: String,
+        pinned: Arc<AtomicBool>,
+        pin_target: Arc<Mutex<Option<String>>>,
     ) -> Self {
         Self {
             pool,
             selection,
             nodes_path: Mutex::new(nodes_path),
-            pinned: AtomicBool::new(false),
+            pinned,
+            pin_target,
         }
     }
 }
@@ -171,6 +187,7 @@ async fn do_reload(state: &CtlState, path_arg: Option<&str>) -> Result<String, S
 async fn do_select(state: &CtlState, arg: Option<&str>) -> Result<String, String> {
     let tag = arg.ok_or_else(|| "select: missing <tag|auto>".to_string())?;
     if tag == "auto" {
+        *state.pin_target.lock() = None;
         state.pinned.store(false, Ordering::Relaxed);
         // 立刻按 EWMA 重算，别等下一轮测速（间隔可能 30s+）。
         // 早先只清标志、不改 selection，导致解钉后 selection 仍是钉住的那
@@ -188,11 +205,22 @@ async fn do_select(state: &CtlState, arg: Option<&str>) -> Result<String, String
     if !exists {
         return Err(format!("unknown node: {tag}"));
     }
-    // 先置 pinned 再写 selection：pinned=true 后调度循环不会覆盖 selection。
-    // 反过来的话，两步之间夹进一次批发布，钉住的节点会被 EWMA 排序顶掉。
+    // 只登记意图：selection 由调度循环唯一写入（见 pin_target 文档）。
+    // 为了让 CLI/面板立刻看到结果，这里也同步写一次 selection ——
+    // 调度循环发现 pin_target 与 selection 一致时不会再改动它。
+    *state.pin_target.lock() = Some(tag.to_string());
     state.pinned.store(true, Ordering::Relaxed);
     *state.selection.write().await = vec![tag.to_string()];
     Ok(format!("pinned {tag}"))
+}
+
+/// web 面板的 select 入口：复用 ctl 的校验与 pinned 语义。
+#[cfg(feature = "meow")] // 仅 web 面板调用，web 模块挂 meow feature
+pub async fn do_select_public(state: &CtlState, tag: &str) -> String {
+    match do_select(state, Some(tag)).await {
+        Ok(m) => format!("{{\"ok\":true,\"msg\":\"{m}\"}}"),
+        Err(e) => format!("{{\"ok\":false,\"msg\":\"{e}\"}}"),
+    }
 }
 
 async fn do_status(state: &CtlState) -> String {

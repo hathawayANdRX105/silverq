@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>silverq</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --fg:#d7dae0; --dim:#8b93a1; --ok:#4caf7d; --warn:#e0a84c; --bad:#e06c60; --acc:#5b9bd5; }
+  * { box-sizing:border-box; }
+  body { background:var(--bg); color:var(--fg); font:14px/1.5 system-ui,sans-serif; margin:0; padding:24px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .sub { color:var(--dim); font-size:12px; margin-bottom:16px; }
+  .cards { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
+  .card { background:var(--card); border-radius:8px; padding:12px 16px; min-width:180px; }
+  .card .k { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
+  .card .v { font-size:20px; margin-top:2px; }
+  .v.ok { color:var(--ok); } .v.bad { color:var(--bad); } .v.acc { color:var(--acc); }
+  table { width:100%; border-collapse:collapse; background:var(--card); border-radius:8px; overflow:hidden; }
+  th,td { padding:7px 12px; text-align:left; font-size:13px; }
+  th { color:var(--dim); font-weight:500; border-bottom:1px solid #232833; position:sticky; top:0; background:var(--card); }
+  tr:hover td { background:#1c2029; }
+  td.tag { font-family:ui-monospace,monospace; }
+  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; }
+  .b-primary { background:var(--ok); color:#000; }
+  .b-active { background:#2a3b4d; color:var(--acc); }
+  .b-dead { background:#3a2528; color:var(--bad); }
+  .b-unmeasured { background:#2e2e38; color:var(--dim); }
+  .b-ok { background:#1f3328; color:var(--ok); }
+  button { background:#2a3b4d; color:var(--acc); border:0; border-radius:4px; padding:3px 10px; cursor:pointer; font-size:12px; }
+  button:hover { background:#36506b; }
+  button.pin { background:#4a3b20; color:var(--warn); }
+  .bar { height:3px; background:#232833; border-radius:2px; margin-top:3px; width:120px; }
+  .bar i { display:block; height:100%; background:var(--acc); border-radius:2px; }
+  #err { color:var(--bad); font-size:12px; margin:8px 0; min-height:16px; }
+</style>
+</head>
+<body>
+<h1>silverq</h1>
+<div class="sub">stability-first proxy scheduler · engine: meow-rs</div>
+<div id="err"></div>
+<div class="cards">
+  <div class="card"><div class="k">Primary</div><div class="v ok" id="primary">—</div></div>
+  <div class="card"><div class="k">候选</div><div class="v acc" id="selcount">—</div></div>
+  <div class="card"><div class="k">节点池</div><div class="v" id="poolsize">—</div></div>
+  <div class="card"><div class="k">模式</div><div class="v" id="mode">—</div></div>
+</div>
+<table>
+  <thead><tr><th>#</th><th>节点</th><th>EWMA</th><th>样本</th><th>状态</th><th>操作</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<script>
+const $ = id => document.getElementById(id);
+async function refresh() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    $('err').textContent = '';
+    const alive = d.nodes.filter(n => n.ewma !== null);
+    $('primary').textContent = d.selection[0] || '—';
+    $('selcount').textContent = d.selection.length;
+    $('poolsize').textContent = d.nodes.length;
+    $('mode').innerHTML = d.pinned
+      ? '<span class="badge b-dead">已钉住</span>'
+      : '<span class="badge b-ok">自动</span>';
+
+    const maxEwma = Math.max(...alive.map(n => n.ewma), 1);
+    $('rows').innerHTML = d.nodes.map((n, i) => {
+      let badge, ms;
+      if (n.ewma === null) { badge = '<span class="badge b-unmeasured">未测通</span>'; ms = '—'; }
+      else if (n.ewma > 9000) { badge = '<span class="badge b-dead">罚分观察</span>'; ms = n.ewma + 'ms'; }
+      else {
+        badge = n.primary ? '<span class="badge b-primary">首选</span>'
+              : n.active ? '<span class="badge b-active">候选</span>'
+              : '<span class="badge b-ok">正常</span>';
+        ms = n.ewma + 'ms';
+      }
+      const bar = n.ewma !== null && n.ewma <= 9000
+        ? `<div class="bar"><i style="width:${Math.max(4, 100 - n.ewma / maxEwma * 100).toFixed(0)}%"></i></div>` : '';
+      const btn = n.primary
+        ? ''
+        : `<button onclick="pick('${n.tag.replace(/'/g,"")}')" class="${n.active ? '' : 'pin'}">${n.active ? '移到首选' : '钉住'}</button>`;
+      return `<tr><td class="tag">${i+1}</td><td class="tag">${n.tag}</td><td>${ms}${bar}</td><td>${n.samples}</td><td>${badge}</td><td>${btn}</td></tr>`;
+    }).join('');
+  } catch (e) { $('err').textContent = '刷新失败: ' + e; }
+}
+async function pick(tag) {
+  try {
+    const r = await fetch('/api/select', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({tag}) });
+    const d = await r.json();
+    if (!d.ok) $('err').textContent = d.msg;
+    refresh();
+  } catch (e) { $('err').textContent = '操作失败: ' + e; }
+}
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

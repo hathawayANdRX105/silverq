@@ -27,6 +27,8 @@ mod meow;
 mod tun;
 #[cfg(feature = "meow")]
 mod udp;
+#[cfg(feature = "meow")]
+mod web;
 
 #[cfg(unix)]
 mod cli;
@@ -130,6 +132,8 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
     let pool: Arc<RwLock<Vec<Node>>> = Arc::new(RwLock::new(nodes_pool));
     let selection: SharedSelection = Arc::new(RwLock::new(Vec::new()));
     let pinned = Arc::new(AtomicBool::new(false));
+    let pin_target: Arc<parking_lot::Mutex<Option<String>>> =
+        Arc::new(parking_lot::Mutex::new(None));
 
     // 4. 调度循环（测速 + EWMA + 切换），pinned 时暂停覆盖
     let handles = SchedulerHandles {
@@ -137,6 +141,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
         pool: pool.clone(),
         selection: selection.clone(),
         pinned: pinned.clone(),
+        pin_target: pin_target.clone(),
         selector_store: eff.selector_store.clone(),
     };
     let sched_cfg = SchedulerConfig {
@@ -158,20 +163,35 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             pool.clone(),
             selection.clone(),
             nodes.clone(),
+            pinned.clone(),
+            pin_target.clone(),
         ));
         #[cfg(not(feature = "meow"))]
         let ctl_state = Arc::new(ctl::CtlState::new(
             pool.clone(),
             selection.clone(),
             nodes.clone(),
+            pinned.clone(),
+            pin_target.clone(),
         ));
         let ctl_sock = std::path::PathBuf::from(eff.ctl_sock.clone());
+        #[cfg(feature = "meow")]
+        let web_state = ctl_state.clone();
         let inb = tokio::spawn(async move {
             if let Err(e) = ctl::serve_ctl(ctl_state, ctl_sock).await {
                 tracing::error!("ctl socket exited: {e}");
             }
         });
-
+        // Web 面板（默认 127.0.0.1:9095；SILVERQ_WEB_LISTEN / TOML [data_plane].web_listen 覆盖）
+        #[cfg(feature = "meow")]
+        {
+            let web_addr = eff.web_listen.clone();
+            tokio::spawn(async move {
+                if let Err(e) = web::run(&web_addr, web_state).await {
+                    tracing::error!("web dashboard exited: {e}");
+                }
+            });
+        }
         // 6. 数据面 inbound（feature meow）
         #[cfg(feature = "meow")]
         {
@@ -185,7 +205,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
                     tracing::error!("inbound exited: {e}");
                 }
             });
-            // 三个任务都是常驻的；任一退出都说明出事了。JoinError 必须报出来，
+            // 常驻任务任一退出都说明出事了。JoinError 必须报出来，
             // 否则 panic 被静默吞掉，进程看起来还活着但实际已经瘸了。
             let (ctl_res, inbound_res, sched_res) = tokio::join!(inb, inb2, sched);
             report_task_exit("ctl", ctl_res);
@@ -236,7 +256,9 @@ struct SchedulerHandles {
     selection: SharedSelection,
     /// true 时跳过切换（手动钉住中），但测速继续
     pinned: Arc<AtomicBool>,
-    /// SelectorStore 路径（apply_selection 用）
+    /// 钉住目标：Some 时调度循环把 selection 强制设为它（单写者）
+    pin_target: Arc<parking_lot::Mutex<Option<String>>>,
+    /// SelectorStore 路径（publish_selector_store 用）
     selector_store: String,
 }
 
@@ -261,6 +283,7 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
         pool,
         selection,
         pinned,
+        pin_target,
         selector_store,
     } = h;
     let SchedulerConfig {
@@ -310,13 +333,29 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
                 fast_path::apply_batch(&mut guard, &results, timeout_penalty);
             }
 
-            if !pinned.load(Ordering::Relaxed) {
-                let new_selection = decision::select_top(&pool.read().await, capacity);
-                let current = selection.read().await.clone();
-                if new_selection != current {
-                    apply_selection(&new_selection, &selection, &selector_store).await;
+            // 切换（pinned 时暂停）。
+            //
+            // 「算 selection」和「写 selection」必须在**同一个写锁临界区**内：
+            // ctl/web 的 select 是「置 pinned → 写 selection」两步，如果这里先在
+            // 读锁里算完、再去拿写锁，中间那个窗口足够让 select 插进来，
+            // 随后本批的旧结果就把刚钉住的节点覆盖掉。
+            // 实测：先缩小窗口（写锁内复查 pinned）仍有 2/5 概率被盖回 10 个候选；
+            // 只有把计算也纳入临界区才彻底消除。
+            {
+                // selection 的唯一写者。pinned 时强制为 pin_target，
+                // 否则按 EWMA 选前 N。单写者消除了与 ctl/web 的双写竞争。
+                let target = pin_target.lock().clone();
+                let desired = match (&target, pinned.load(Ordering::Relaxed)) {
+                    (Some(tag), true) => vec![tag.clone()],
+                    _ => decision::select_top(&pool.read().await, capacity),
+                };
+                let mut sel_guard = selection.write().await;
+                if *sel_guard != desired {
+                    *sel_guard = desired.clone();
+                    drop(sel_guard);
+                    publish_selector_store(&desired, &selector_store);
                 }
-                last_selection = new_selection;
+                last_selection = desired;
             }
 
             persist::save(&pool.read().await);
@@ -335,10 +374,12 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
 /// ——那会每批读一次盘、建一个新 Arc。meow 的 store 自带进程级全局槽，
 /// 首次 open 后用 `global()` 复用；`store.set` 内部对同值写入是 no-op，
 /// 所以 best 没变时不落盘。
-#[cfg_attr(not(feature = "meow"), allow(unused_variables))] // 非 meow 分支不用 store
-async fn apply_selection(selection: &[String], shared: &SharedSelection, selector_store: &str) {
-    *shared.write().await = selection.to_vec();
-
+/// 只写 meow SelectorStore（外部 kernel 读），不碰共享 selection。
+///
+/// 与写共享 selection 分开，是因为写 selection 必须在 pinned 复查的同一个
+/// 临界区里完成（见 schedule_loop），而 store 写入不需要持锁。
+#[cfg_attr(not(feature = "meow"), allow(unused_variables))]
+fn publish_selector_store(selection: &[String], selector_store: &str) {
     #[cfg(feature = "meow")]
     {
         use meow_proxy::group::selector_store::SelectorStore;

@@ -109,7 +109,30 @@ silverq select auto           # 取消钉住，恢复自动
 对照 sing-box 同节点测速可知：池中大量节点（含 46 个 Vision+Reality）**本身已死** ——
 sing-box 测同样超时。这不是 silverq 的问题，排查时容易误判成协议 bug。
 
-### 已知范围
+### Web 面板
+
+`serve` 时自动起一个只读面板 + 手动切换入口，默认 `127.0.0.1:9095`
+（9090 是 clash_api 惯例端口，本机常被 sing-box 占用，故避开）。
+
+    http://127.0.0.1:9095/
+
+| 端点 | 说明 |
+| --- | --- |
+| `GET /` | 单页面板（内嵌，无前端依赖），3 秒轮询 |
+| `GET /api/status` | JSON：节点表、EWMA、样本数、当前 selection、pinned |
+| `GET /api/health` | 存活探针 |
+| `POST /api/select` | `{"tag":"节点名"}` 钉住，`{"tag":"auto"}` 恢复自动 |
+
+**无认证**，只绑回环地址；不要改成 `0.0.0.0`。改端口：
+
+```toml
+[data_plane]
+web_listen = "127.0.0.1:9095"
+```
+
+或 `SILVERQ_WEB_LISTEN=127.0.0.1:9096`。
+
+## 已知范围
 
 - **TUN 未实现**：`src/tun.rs` 是显式占位（`unimplemented!` / `todo!`），不接线。
   meow-rs 上游有 TUN 但**未发布到 crates.io**；要做需改 git 依赖复用上游，
