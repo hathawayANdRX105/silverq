@@ -20,7 +20,6 @@ pub type Registry = Arc<RwLock<HashMap<String, Arc<dyn ProxyAdapter>>>>;
 pub struct MeowMeasurer {
     registry: Registry,
     probe_url: String,
-    timeout_ms: u64,
 }
 
 impl MeowMeasurer {
@@ -29,16 +28,16 @@ impl MeowMeasurer {
         Self {
             registry,
             probe_url: crate::config::probe_url(),
-            timeout_ms: crate::config::DEFAULT_TIMEOUT_MS,
         }
     }
 
-    /// 生产入口：探测 URL 与超时来自 silverq.toml / env。
-    pub fn with_probe(registry: Registry, probe_url: String, timeout_ms: u64) -> Self {
+    /// 生产入口：探测 URL 来自 silverq.toml / env。
+    /// 超时不存副本 —— 每次测速由 batch 传参，配置面板热改即时生效
+    /// （早先存副本再 min() 合并，热改调大超时会被旧副本盖住）。
+    pub fn with_probe(registry: Registry, probe_url: String) -> Self {
         Self {
             registry,
             probe_url,
-            timeout_ms,
         }
     }
 }
@@ -57,7 +56,7 @@ impl Measurer for MeowMeasurer {
             adapter.as_ref(),
             &self.probe_url,
             Some("200,204"),
-            Duration::from_millis(self.timeout_ms.min(timeout_ms)),
+            Duration::from_millis(timeout_ms),
         )
         .await
         {

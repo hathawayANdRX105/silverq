@@ -42,6 +42,19 @@ pub struct Node {
     pub last_measured: Option<Instant>,
     /// Rolling window of recent delay measurements (for adaptive alpha)
     recent: VecDeque<f64>,
+    /// 延迟历史（面板画图用）：`(unix 秒, 实测延迟 ms)`，只记成功。
+    /// 环形缓冲，超长丢最旧。不持久化 —— 重启后图表从零开始攒，可接受。
+    pub history: VecDeque<(u64, f64)>,
+}
+
+/// 每节点保留的延迟历史点数。
+pub const HISTORY_CAP: usize = 48;
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl Node {
@@ -55,6 +68,7 @@ impl Node {
             samples: 0,
             last_measured: None,
             recent: VecDeque::with_capacity(EWMA_WINDOW),
+            history: VecDeque::with_capacity(HISTORY_CAP),
         }
     }
 
@@ -63,6 +77,7 @@ impl Node {
     /// No external alpha is required.
     pub fn update(&mut self, delay_ms: f64) {
         self.consecutive_failures = 0;
+        self.push_history(delay_ms);
 
         if self.samples == 0 {
             self.ewma = delay_ms;
@@ -104,6 +119,13 @@ impl Node {
 
         self.samples += 1;
         self.last_measured = Some(Instant::now());
+    }
+
+    fn push_history(&mut self, delay_ms: f64) {
+        if self.history.len() >= HISTORY_CAP {
+            self.history.pop_front();
+        }
+        self.history.push_back((unix_now(), delay_ms));
     }
 
     /// Compute mean and standard deviation of the recent window.
@@ -158,5 +180,6 @@ impl Node {
         self.samples = other.samples;
         self.last_measured = other.last_measured;
         self.recent = other.recent.clone();
+        self.history = other.history.clone();
     }
 }

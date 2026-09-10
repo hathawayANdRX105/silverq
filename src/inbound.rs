@@ -29,6 +29,19 @@ pub struct DialTuning {
 }
 
 impl DialTuning {
+    /// 从共享调参取当前快照。每连接取一次：配置面板热改对新建连接即时生效。
+    pub fn snapshot(tuning: &crate::settings::RuntimeTuning) -> Self {
+        Self {
+            timeout_ms: tuning.timeout_ms,
+            fallback_attempts: tuning.fallback_attempts,
+        }
+    }
+}
+
+/// 共享调参句柄。
+pub type SharedTuning = crate::ctl::SharedTuning;
+
+impl DialTuning {
     /// dial 单个候选的超时：测速超时的 2 倍。
     /// 测速能过说明建连一般在测速超时内完成，留 2 倍余量给抖动。
     fn dial(&self) -> Duration {
@@ -49,7 +62,7 @@ pub async fn run(
     listener_addr: &str,
     registry: Registry,
     selection: SharedSelection,
-    tuning: DialTuning,
+    tuning: SharedTuning,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(listener_addr).await?;
     tracing::info!(
@@ -61,6 +74,7 @@ pub async fn run(
         let (socket, peer) = listener.accept().await?;
         let registry = registry.clone();
         let selection = selection.clone();
+        let tuning = tuning.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_one(socket, peer, &registry, &selection, tuning).await {
                 tracing::debug!(peer = %peer, "{e}");
@@ -94,7 +108,7 @@ async fn handle_one(
     peer: SocketAddr,
     registry: &Registry,
     selection: &SharedSelection,
-    tuning: DialTuning,
+    tuning: SharedTuning,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut peek = [0u8; 1];
     socket
@@ -117,10 +131,13 @@ async fn handle_one(
         return Ok(());
     };
 
+    // 调参快照：TCP dial 与 UDP associate 都从这里取，热改对新建连接即时生效
+    let dt = DialTuning::snapshot(&tuning.read());
+
     // UDP ASSOCIATE：分配中继 socket，回其地址，然后在 TCP 存活期间跑中继循环。
     // 注意：客户端常填 0.0.0.0:0（自己也不知道源地址），所以不能用 host 空判断拦。
     if target.cmd == Cmd::UdpAssociate {
-        return handle_udp_associate(socket, registry, selection, tuning).await;
+        return handle_udp_associate(socket, registry, selection, dt).await;
     }
 
     if target.host.is_empty() {
@@ -155,7 +172,7 @@ async fn handle_one(
     // 避免 guard 跨 await
     let candidates: Vec<_> = {
         let guard = registry.read();
-        pick_candidates(&order, &guard, tuning.fallback_attempts)
+        pick_candidates(&order, &guard, dt.fallback_attempts)
     };
     // 逐个 dial，**每个都带超时**。
     //
@@ -164,10 +181,11 @@ async fn handle_one(
     // 客户端超时后失败，而后排明明有活节点。超时取测速超时的 2 倍：
     // 测速能过说明这个节点建连一般在测速超时内完成，留 2 倍余量给抖动。
     // fallback 尝试上限来自配置（silverq.toml [data_plane].fallback_attempts，
-    // SILVERQ_FALLBACK_ATTEMPTS 可覆盖）。按 EWMA 顺序最多试 N 个候选：
+    // PATCH /configs 可热改）。按 EWMA 顺序最多试 N 个候选：
     // 池子普遍半死时，大值能救回更多请求；但每个死候选都要烧一个 dial 超时，
     // 单请求最坏延迟随之上升。
-    let dial_timeout = tuning.dial();
+    let dt = DialTuning::snapshot(&tuning.read());
+    let dial_timeout = dt.dial();
     let mut conn = None;
     for adapter in &candidates {
         match tokio::time::timeout(dial_timeout, adapter.dial_tcp(&metadata)).await {
@@ -202,7 +220,7 @@ async fn handle_one(
     };
     let _ = peer;
 
-    relay(socket, conn, tuning.first_response()).await
+    relay(socket, conn, dt.first_response()).await
 }
 
 /// 双向中继，带"对端首次响应"超时。

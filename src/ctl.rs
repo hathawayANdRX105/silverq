@@ -11,11 +11,15 @@
 #[cfg(feature = "meow")]
 use crate::meow::Registry;
 use crate::node::Node;
+use crate::settings::RuntimeTuning;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
+
+/// 运行时可热更调参的共享句柄。调度循环/inbound/web 三方共用。
+pub type SharedTuning = Arc<parking_lot::RwLock<RuntimeTuning>>;
 
 /// 共享控制状态：调度循环、inbound、ctl 三方共用。
 pub struct CtlState {
@@ -37,9 +41,20 @@ pub struct CtlState {
     /// 与批发布形成双写者竞争，实测 4/10 概率被旧 EWMA 结果覆盖 ——
     /// 加锁只能缩小窗口，改成单写者才根治。
     pub pin_target: Arc<Mutex<Option<String>>>,
+    /// 运行时调参（PATCH /configs 热改的落点）
+    pub tuning: SharedTuning,
+    /// 探测 URL（按需单节点测延迟 GET /proxies/{name}/delay 用）
+    #[cfg_attr(not(feature = "meow"), allow(dead_code))] // 仅 meow 的 web 模块读
+    pub probe_url: String,
+    /// metacubexd 静态目录；空 = 不服务 /ui/
+    #[cfg_attr(not(feature = "meow"), allow(dead_code))]
+    pub ui_dir: String,
+    /// tag -> 协议名（clash_api /proxies 的 type 字段；reload 时重建）
+    pub protocols: Mutex<std::collections::HashMap<String, String>>,
 }
 
 impl CtlState {
+    #[allow(clippy::too_many_arguments)]
     #[cfg(feature = "meow")]
     pub fn new(
         registry: Registry,
@@ -48,6 +63,10 @@ impl CtlState {
         nodes_path: String,
         pinned: Arc<AtomicBool>,
         pin_target: Arc<Mutex<Option<String>>>,
+        tuning: SharedTuning,
+        probe_url: String,
+        ui_dir: String,
+        protocols: std::collections::HashMap<String, String>,
     ) -> Self {
         Self {
             registry,
@@ -56,9 +75,14 @@ impl CtlState {
             nodes_path: Mutex::new(nodes_path),
             pinned,
             pin_target,
+            tuning,
+            probe_url,
+            ui_dir,
+            protocols: Mutex::new(protocols),
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[cfg(not(feature = "meow"))]
     pub fn new(
         pool: Arc<RwLock<Vec<Node>>>,
@@ -66,6 +90,10 @@ impl CtlState {
         nodes_path: String,
         pinned: Arc<AtomicBool>,
         pin_target: Arc<Mutex<Option<String>>>,
+        tuning: SharedTuning,
+        probe_url: String,
+        ui_dir: String,
+        protocols: std::collections::HashMap<String, String>,
     ) -> Self {
         Self {
             pool,
@@ -73,6 +101,10 @@ impl CtlState {
             nodes_path: Mutex::new(nodes_path),
             pinned,
             pin_target,
+            tuning,
+            probe_url,
+            ui_dir,
+            protocols: Mutex::new(protocols),
         }
     }
 }
@@ -159,6 +191,20 @@ async fn do_reload(state: &CtlState, path_arg: Option<&str>) -> Result<String, S
         *reg = new_reg;
     }
 
+    *state.protocols.lock() = specs
+        .iter()
+        .map(|s| {
+            let name = match s.protocol {
+                crate::nodespec::Protocol::Vless => "Vless",
+                crate::nodespec::Protocol::Trojan => "Trojan",
+                crate::nodespec::Protocol::Shadowsocks => "Shadowsocks",
+                crate::nodespec::Protocol::Hysteria2 => "Hysteria2",
+                crate::nodespec::Protocol::Direct => "Direct",
+            };
+            (s.tag.clone(), name.to_string())
+        })
+        .collect();
+
     // 更新调度池：新增进池、删除出池、存活继承 EWMA
     let pool = {
         let mut guard = state.pool.write().await;
@@ -178,11 +224,8 @@ async fn do_reload(state: &CtlState, path_arg: Option<&str>) -> Result<String, S
 
     *state.nodes_path.lock() = path.clone();
     if !state.pinned.load(Ordering::Relaxed) {
-        let top = crate::decision::select_top(
-            &pool,
-            crate::config::active_capacity(),
-            crate::node::DEFAULT_FAILURE_PENALTY_MS,
-        );
+        let t = state.tuning.read().clone();
+        let top = crate::decision::select_top(&pool, t.capacity, t.timeout_penalty);
         *state.selection.write().await = top.clone();
         return Ok(format!("reloaded {path} ({top:?})"));
     }
@@ -196,11 +239,9 @@ async fn do_select(state: &CtlState, arg: Option<&str>) -> Result<String, String
         // 立刻按 EWMA 重算，别等下一轮测速（间隔可能 30s+）。
         // 早先只清标志、不改 selection，导致解钉后 selection 仍是钉住的那
         // 单个节点 —— 钉到死节点再 auto 的话，请求会继续全失败到下一轮。
-        let top = crate::decision::select_top(
-            &state.pool.read().await,
-            crate::config::active_capacity(),
-            crate::node::DEFAULT_FAILURE_PENALTY_MS,
-        );
+        let t = state.tuning.read().clone();
+        let top =
+            crate::decision::select_top(&state.pool.read().await, t.capacity, t.timeout_penalty);
         *state.selection.write().await = top.clone();
         return Ok(format!("auto (unpinned, {top:?})"));
     }

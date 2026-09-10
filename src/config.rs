@@ -32,11 +32,6 @@ pub fn probe_url() -> String {
     std::env::var("SILVERQ_PROBE_URL").unwrap_or_else(|_| DEFAULT_PROBE_URL.to_string())
 }
 
-/// 主组容量（`SILVERQ_CAPACITY`）。
-pub fn active_capacity() -> usize {
-    env_parsed("SILVERQ_CAPACITY", DEFAULT_ACTIVE_CAPACITY)
-}
-
 /// fallback 尝试上限（`SILVERQ_FALLBACK_ATTEMPTS`）。
 #[cfg_attr(feature = "meow", allow(dead_code))] // 生产走 settings::Effective
 #[cfg_attr(not(feature = "meow"), allow(dead_code))]

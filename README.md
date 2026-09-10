@@ -111,26 +111,36 @@ sing-box 测同样超时。这不是 silverq 的问题，排查时容易误判�
 
 ### Web 面板
 
-`serve` 时自动起一个只读面板 + 手动切换入口，默认 `127.0.0.1:9095`
-（9090 是 clash_api 惯例端口，本机常被 sing-box 占用，故避开）。
+双面板,同一端口:
 
-    http://127.0.0.1:9095/
+**`/ui/` — zashboard**(外部 dashboard,MIT,`scripts/fetch-zashboard.sh` 下载)
+通过 clash 兼容 API 对接:节点列表+延迟历史图、组内切换(= 钉住)、
+配置面板(PATCH /configs 热生效,不写回 TOML)、连接/日志页。
+zashboard 首次打开在 setup 页填 `127.0.0.1` + `9095`,或直接访问
+`/ui/?hostname=127.0.0.1&port=9095` 自动配置。
+
+**`/` — 内嵌轻量面板**:silverq 特有数据(纯实测延迟、连续失败次数、
+可用/不可用/待测三态、健康度汇总),3 秒轮询,无前端依赖。
 
 | 端点 | 说明 |
 | --- | --- |
-| `GET /` | 单页面板（内嵌，无前端依赖），3 秒轮询 |
-| `GET /api/status` | JSON：节点表、EWMA、样本数、当前 selection、pinned |
+| `GET /` | 内嵌轻量面板 |
+| `GET /ui/` | zashboard(需先 fetch-zashboard.sh) |
+| `GET /api/status` | JSON:节点表、EWMA、样本、selection、pinned |
+| `GET /version` `/proxies` `/configs` `/providers/*` `/connections` `/rules` | clash 兼容 API |
+| `GET /traffic` `/memory` `/logs` `/connections`(WebSocket) | clash 兼容 WS(数据恒 0) |
+| `PUT /proxies/{group}` | 切换/钉住(name=auto 解钉) |
+| `PATCH /configs` | 热更调度参数(capacity/batch_size/interval_secs/timeout_ms/concurrency/timeout_penalty/fallback_attempts) |
 | `GET /api/health` | 存活探针 |
-| `POST /api/select` | `{"tag":"节点名"}` 钉住，`{"tag":"auto"}` 恢复自动 |
 
-**无认证**，只绑回环地址；不要改成 `0.0.0.0`。改端口：
+**无认证**,只绑回环;不要改成 `0.0.0.0`。改端口:
 
 ```toml
 [data_plane]
+listen = "127.0.0.1:17321"
 web_listen = "127.0.0.1:9095"
+ui_dir = "~/.local/share/silverq/ui"   # zashboard 静态目录
 ```
-
-或 `SILVERQ_WEB_LISTEN=127.0.0.1:9096`。
 
 ## 已知范围
 

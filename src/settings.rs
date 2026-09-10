@@ -74,6 +74,9 @@ pub struct DataPlaneSection {
     /// 设大值在"池子普遍半死"时能救回更多请求，但单请求最坏延迟随之上升
     /// （每个死候选都要烧一个 dial 超时）。
     pub fallback_attempts: usize,
+    /// metacubexd 等 clash 风格 dashboard 的静态文件目录（serve 在 /ui/ 下）。
+    #[serde(default)]
+    pub ui_dir: Option<String>,
 }
 
 impl Default for DataPlaneSection {
@@ -82,6 +85,7 @@ impl Default for DataPlaneSection {
             listen: crate::config::DEFAULT_LISTEN.to_string(),
             web_listen: None,
             fallback_attempts: 3,
+            ui_dir: None,
         }
     }
 }
@@ -165,6 +169,7 @@ pub struct Effective {
     #[cfg_attr(not(feature = "meow"), allow(dead_code))] // web 面板仅 meow 模式
     pub web_listen: String,
     pub fallback_attempts: usize,
+    pub ui_dir: String,
     pub state: String,
     pub ctl_sock: String,
     pub selector_store: String,
@@ -179,6 +184,50 @@ fn env_parsed_or<T: std::str::FromStr>(key: &str, v: T) -> T {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(v)
+}
+
+/// 运行时可热更的调度/数据面调参（Web 配置面板与 clash_api PATCH 的落点）。
+///
+/// 从 `Effective` 播种，运行期经 `PATCH /configs` 热改；**不写回 silverq.toml**
+/// —— 程序改写用户带注释的 TOML 是破坏性的，持久化仍以手改文件为准，
+/// 面板上会提示"重启后回落到文件值"。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuntimeTuning {
+    pub capacity: usize,
+    pub batch_size: usize,
+    pub interval_secs: u64,
+    pub timeout_ms: u64,
+    pub concurrency: usize,
+    pub timeout_penalty: f64,
+    pub fallback_attempts: usize,
+}
+
+impl RuntimeTuning {
+    pub fn from_eff(eff: &Effective) -> Self {
+        Self {
+            capacity: eff.capacity,
+            batch_size: eff.batch_size,
+            interval_secs: eff.interval_secs,
+            timeout_ms: eff.timeout_ms,
+            concurrency: eff.concurrency,
+            timeout_penalty: eff.timeout_penalty,
+            fallback_attempts: eff.fallback_attempts,
+        }
+        .validated()
+    }
+
+    /// 夹到安全范围。并发 < 批大小时批内排队（buffer_unordered 语义），
+    /// 这里不强制并发 ≥ batch，只保证非零与上限，让用户自己权衡。
+    pub fn validated(mut self) -> Self {
+        self.capacity = self.capacity.clamp(1, 50);
+        self.batch_size = self.batch_size.clamp(1, 100);
+        self.interval_secs = self.interval_secs.clamp(5, 3600);
+        self.timeout_ms = self.timeout_ms.clamp(500, 15_000);
+        self.concurrency = self.concurrency.clamp(1, 100);
+        self.timeout_penalty = self.timeout_penalty.clamp(100.0, 30_000.0);
+        self.fallback_attempts = self.fallback_attempts.clamp(1, 10);
+        self
+    }
 }
 
 impl Effective {
@@ -206,6 +255,15 @@ impl Effective {
                 "SILVERQ_FALLBACK_ATTEMPTS",
                 fc.data_plane.fallback_attempts,
             ),
+            // TOML 里的 ~ 不经 shell，程序自己展开（paths 同款，别再忘）
+            ui_dir: expand_home(env_or(
+                "SILVERQ_UI_DIR",
+                fc.data_plane
+                    .ui_dir
+                    .clone()
+                    .unwrap_or_else(|| "~/.local/share/silverq/ui".into()),
+            )),
+
             state: env_or("SILVERQ_STATE", fc.paths.state.clone()),
             ctl_sock: env_or("SILVERQ_CTL_SOCK", fc.paths.ctl_sock.clone()),
             selector_store: env_or("SILVERQ_SELECTOR_STORE", fc.paths.selector_store.clone()),

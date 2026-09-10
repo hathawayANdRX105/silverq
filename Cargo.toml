@@ -18,6 +18,7 @@ tracing-subscriber = "0.3"
 futures-util = { version = "0.3", features = ["std"] }
 async-trait = "0.1"
 base64 = "0.22"
+sha1 = "0.10"   # clash_api WebSocket 握手（已在依赖树，零新增下载）
 parking_lot = "0.12"
 
 [dependencies.meow-proxy]

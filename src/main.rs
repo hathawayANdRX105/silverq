@@ -110,7 +110,6 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             Arc::new(meow::MeowMeasurer::with_probe(
                 registry.clone(),
                 eff.probe_url.clone(),
-                eff.timeout_ms,
             ))
         }
         #[cfg(not(feature = "meow"))]
@@ -134,6 +133,23 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
     let pinned = Arc::new(AtomicBool::new(false));
     let pin_target: Arc<parking_lot::Mutex<Option<String>>> =
         Arc::new(parking_lot::Mutex::new(None));
+    // 运行时可热更调参：调度循环 / inbound / web(PATCH /configs) 三方共享
+    let tuning: ctl::SharedTuning = Arc::new(parking_lot::RwLock::new(
+        crate::settings::RuntimeTuning::from_eff(&eff),
+    ));
+    let protocols: std::collections::HashMap<String, String> = specs
+        .iter()
+        .map(|sp| {
+            let name = match sp.protocol {
+                crate::nodespec::Protocol::Vless => "Vless",
+                crate::nodespec::Protocol::Trojan => "Trojan",
+                crate::nodespec::Protocol::Shadowsocks => "Shadowsocks",
+                crate::nodespec::Protocol::Hysteria2 => "Hysteria2",
+                crate::nodespec::Protocol::Direct => "Direct",
+            };
+            (sp.tag.clone(), name.to_string())
+        })
+        .collect();
 
     // 4. 调度循环（测速 + EWMA + 切换），pinned 时暂停覆盖
     let handles = SchedulerHandles {
@@ -144,15 +160,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
         pin_target: pin_target.clone(),
         selector_store: eff.selector_store.clone(),
     };
-    let sched_cfg = SchedulerConfig {
-        capacity: eff.capacity,
-        batch_size: eff.batch_size,
-        interval_secs: eff.interval_secs,
-        timeout_ms: eff.timeout_ms,
-        concurrency: eff.concurrency,
-        timeout_penalty: eff.timeout_penalty,
-    };
-    let sched = tokio::spawn(schedule_loop(handles, sched_cfg));
+    let sched = tokio::spawn(schedule_loop(handles, tuning.clone()));
 
     // 5. ctl socket（unix）：reload / select / status
     #[cfg(unix)]
@@ -165,6 +173,10 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             nodes.clone(),
             pinned.clone(),
             pin_target.clone(),
+            tuning.clone(),
+            eff.probe_url.clone(),
+            eff.ui_dir.clone(),
+            protocols.clone(),
         ));
         #[cfg(not(feature = "meow"))]
         let ctl_state = Arc::new(ctl::CtlState::new(
@@ -173,6 +185,10 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             nodes.clone(),
             pinned.clone(),
             pin_target.clone(),
+            tuning.clone(),
+            eff.probe_url.clone(),
+            eff.ui_dir.clone(),
+            protocols.clone(),
         ));
         let ctl_sock = std::path::PathBuf::from(eff.ctl_sock.clone());
         #[cfg(feature = "meow")]
@@ -199,16 +215,8 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             let inbound_sel = selection.clone();
             let inbound_reg = registry.clone();
             let inb2 = tokio::spawn(async move {
-                if let Err(e) = inbound::run(
-                    &listen,
-                    inbound_reg,
-                    inbound_sel,
-                    inbound::DialTuning {
-                        timeout_ms: eff.timeout_ms,
-                        fallback_attempts: eff.fallback_attempts,
-                    },
-                )
-                .await
+                if let Err(e) =
+                    inbound::run(&listen, inbound_reg, inbound_sel, tuning.clone()).await
                 {
                     tracing::error!("inbound exited: {e}");
                 }
@@ -246,17 +254,6 @@ fn report_task_exit(name: &str, res: Result<(), tokio::task::JoinError>) {
     }
 }
 
-/// 调度参数。收拢成结构体：之前 10 个位置参数，加一个就得改所有调用点，
-/// 且相邻的同类型 usize/u64 很容易传错位置。
-struct SchedulerConfig {
-    capacity: usize,
-    batch_size: usize,
-    interval_secs: u64,
-    timeout_ms: u64,
-    concurrency: usize,
-    timeout_penalty: f64,
-}
-
 /// 调度共享句柄。
 struct SchedulerHandles {
     measurer: Arc<dyn Measurer>,
@@ -285,7 +282,7 @@ struct SchedulerHandles {
 ///    但要先 tick 再算间隔，不能先干等一个 interval）
 /// 3. **每批测完就发布一次**中间结果，而不是等整轮 —— 头几批就是当前最优节点，
 ///    第一批（6 个）测完约 2.5s 内数据面就可用
-async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
+async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
     let SchedulerHandles {
         measurer,
         pool,
@@ -293,15 +290,8 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
         pinned,
         pin_target,
         selector_store,
+        ..
     } = h;
-    let SchedulerConfig {
-        capacity,
-        batch_size,
-        interval_secs,
-        timeout_ms,
-        concurrency,
-        timeout_penalty,
-    } = cfg;
 
     // 冷启动播种：还没有任何测速数据时，按配置顺序给数据面一个候选集，
     // 免得首轮测完前（真实池约 75s）所有请求直接失败。
@@ -310,7 +300,7 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
             .read()
             .await
             .iter()
-            .take(capacity)
+            .take(tuning.read().capacity)
             .map(|n| n.tag.clone())
             .collect();
         if !seed.is_empty() {
@@ -319,22 +309,24 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
         }
     }
 
-    let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+    // 早先用 interval ticker：周期建死就改不了，配置面板热调间隔无效。
+    // 改成"跑一轮 → sleep(间隔)"：冷启动首轮立即（sleep 在轮末，语义同
+    // interval 的首 tick 立即），间隔每轮从共享调参现读，热改即时生效。
     let mut last_selection: Vec<String> = Vec::new();
 
     loop {
-        ticker.tick().await;
+        let t = tuning.read().clone();
 
         // 交错分批：已测的按分数、未测的按配置序，每批混合两者。
         // 详见 decision::measurement_order 的文档（含为什么必须交错）。
         let batches = {
             let guard = pool.read().await;
-            decision::measurement_order(&guard, batch_size, timeout_penalty)
+            decision::measurement_order(&guard, t.batch_size, t.timeout_penalty)
         };
 
         for chunk in batches {
             let results =
-                batch::run_batch_owned(measurer.as_ref(), chunk, timeout_ms, concurrency).await;
+                batch::run_batch_owned(measurer.as_ref(), chunk, t.timeout_ms, t.concurrency).await;
 
             {
                 let mut guard = pool.write().await;
@@ -355,7 +347,7 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
                 let target = pin_target.lock().clone();
                 let desired = match (&target, pinned.load(Ordering::Relaxed)) {
                     (Some(tag), true) => vec![tag.clone()],
-                    _ => decision::select_top(&pool.read().await, capacity, timeout_penalty),
+                    _ => decision::select_top(&pool.read().await, t.capacity, t.timeout_penalty),
                 };
                 let mut sel_guard = selection.write().await;
                 if *sel_guard != desired {
@@ -373,6 +365,10 @@ async fn schedule_loop(h: SchedulerHandles, cfg: SchedulerConfig) {
             selection = ?last_selection,
             "测速轮完成"
         );
+
+        // 先取值再 await：parking_lot 的 guard 不是 Send，不能跨 await 存活
+        let iv = tuning.read().interval_secs;
+        tokio::time::sleep(Duration::from_secs(iv)).await;
     }
 }
 
