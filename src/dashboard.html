@@ -10,26 +10,46 @@
   h1 { font-size:18px; margin:0 0 4px; }
   .sub { color:var(--dim); font-size:12px; margin-bottom:16px; }
   .cards { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
-  .card { background:var(--card); border-radius:8px; padding:12px 16px; min-width:180px; }
+  .card { background:var(--card); border-radius:8px; padding:12px 16px; min-width:150px; }
   .card .k { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
   .card .v { font-size:20px; margin-top:2px; }
   .v.ok { color:var(--ok); } .v.bad { color:var(--bad); } .v.acc { color:var(--acc); }
-  table { width:100%; border-collapse:collapse; background:var(--card); border-radius:8px; overflow:hidden; }
-  th,td { padding:7px 12px; text-align:left; font-size:13px; }
-  th { color:var(--dim); font-weight:500; border-bottom:1px solid #232833; position:sticky; top:0; background:var(--card); }
-  tr:hover td { background:#1c2029; }
-  td.tag { font-family:ui-monospace,monospace; }
+  /* 筛选 tab */
+  .tabs { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
+  .tab { background:var(--card); border:1px solid #232833; color:var(--dim); border-radius:16px;
+         padding:3px 14px; font-size:12px; cursor:pointer; user-select:none; }
+  .tab.on { background:#2a3b4d; color:var(--fg); border-color:var(--acc); }
+  .tab .n { color:var(--acc); margin-left:4px; }
+  /* 排行榜卡牌 */
+  .leader { display:grid; grid-template-columns:repeat(auto-fill,minmax(215px,1fr)); gap:10px; }
+  .ncard { background:var(--card); border-radius:10px; padding:12px 14px; border:1px solid #232833;
+           display:flex; flex-direction:column; gap:6px; }
+  .ncard.primary { border-color:var(--ok); box-shadow:0 0 0 1px var(--ok); }
+  .ncard.cand { border-color:#2a3b4d; }
+  .ncard.dead { opacity:.5; }
+  .ncard .top { display:flex; align-items:center; gap:6px; }
+  .ncard .rank { color:var(--dim); font-size:11px; min-width:22px; }
+  .ncard .tag { font-family:ui-monospace,monospace; font-size:13px; overflow:hidden;
+                text-overflow:ellipsis; white-space:nowrap; flex:1; }
+  .ncard .lat { font-size:26px; font-weight:600; letter-spacing:-.5px; }
+  .ncard .lat.ok { color:var(--ok); } .ncard .lat.bad { color:var(--bad); font-size:18px; }
+  .ncard .lat.dim { color:var(--dim); font-size:18px; }
+  .ncard .lat .u { font-size:12px; color:var(--dim); font-weight:400; margin-left:2px; }
+  .bar { height:4px; background:#232833; border-radius:2px; }
+  .bar i { display:block; height:100%; background:var(--acc); border-radius:2px; }
+  .ncard .meta { display:flex; gap:10px; color:var(--dim); font-size:11px; flex-wrap:wrap; }
+  .ncard .meta b { color:var(--fg); font-weight:500; }
+  .ncard .meta .f { color:var(--bad); }
+  .ncard button { align-self:flex-start; background:#2a3b4d; color:var(--acc); border:0;
+                  border-radius:4px; padding:2px 10px; cursor:pointer; font-size:11px; }
+  .ncard button:hover { background:#36506b; }
+  .ncard button.pin { background:#4a3b20; color:var(--warn); }
   .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; }
   .b-primary { background:var(--ok); color:#000; }
   .b-active { background:#2a3b4d; color:var(--acc); }
   .b-dead { background:#3a2528; color:var(--bad); }
   .b-unmeasured { background:#2e2e38; color:var(--dim); }
   .b-ok { background:#1f3328; color:var(--ok); }
-  button { background:#2a3b4d; color:var(--acc); border:0; border-radius:4px; padding:3px 10px; cursor:pointer; font-size:12px; }
-  button:hover { background:#36506b; }
-  button.pin { background:#4a3b20; color:var(--warn); }
-  .bar { height:3px; background:#232833; border-radius:2px; margin-top:3px; width:120px; }
-  .bar i { display:block; height:100%; background:var(--acc); border-radius:2px; }
   #err { color:var(--bad); font-size:12px; margin:8px 0; min-height:16px; }
 </style>
 </head>
@@ -44,12 +64,32 @@
   <div class="card"><div class="k">健康度</div><div class="v" id="health">—</div></div>
   <div class="card"><div class="k">模式</div><div class="v" id="mode">—</div></div>
 </div>
-<table>
-  <thead><tr><th>#</th><th>节点</th><th>EWMA</th><th>样本</th><th>状态</th><th>操作</th></tr></thead>
-  <tbody id="rows"></tbody>
-</table>
+<div class="tabs" id="tabs"></div>
+<div class="leader" id="leader"></div>
 <script>
 const $ = id => document.getElementById(id);
+// ewma 是纯实测延迟（毫秒，经该节点请求 gstatic 的往返），不是抽象分数；
+// 失败罚分在 failures 字段单独展示，绝不混进延迟数字。
+let filter = 'alive';   // alive | dead | todo | all
+function renderTabs(d) {
+  const alive = d.nodes.filter(n => n.ewma !== null).length;
+  const dead  = d.nodes.filter(n => n.ewma === null && n.probed).length;
+  const todo  = d.nodes.filter(n => n.ewma === null && !n.probed).length;
+  const tabs = [
+    ['alive', '可用', alive], ['dead', '不可用', dead],
+    ['todo', '待测', todo], ['all', '全部', d.nodes.length],
+  ];
+  $('tabs').innerHTML = tabs.map(([id, label, n]) =>
+    `<span class="tab ${filter === id ? 'on' : ''}" onclick="setFilter('${id}')">${label}<span class="n">${n}</span></span>`
+  ).join('');
+}
+function setFilter(f) { filter = f; refresh(); }
+function ageOf(secs) {
+  if (secs === undefined) return '';
+  if (secs >= 3600) return Math.floor(secs / 3600) + 'h 前';
+  if (secs >= 120) return Math.floor(secs / 60) + 'm 前';
+  return secs + 's 前';
+}
 async function refresh() {
   try {
     const r = await fetch('/api/status');
@@ -63,8 +103,6 @@ async function refresh() {
     // 必须一眼看出"没测通"是节点死了而不是调度漏测。
     const dead = d.nodes.filter(n => n.ewma === null && n.probed).length;
     const todo = d.nodes.filter(n => n.ewma === null && !n.probed).length;
-    // ewma 现在是纯实测延迟，不含罚分，所以"可用"就是测通过的。
-    // 其中正在失败的单独标出：它们延迟仍是真的，只是当前被降权。
     const flaky = alive.filter(n => n.failures > 0).length;
     $('health').textContent =
       `${alive.length} 可用 / ${dead} 不可用`
@@ -73,33 +111,43 @@ async function refresh() {
     $('mode').innerHTML = d.pinned
       ? '<span class="badge b-dead">已钉住</span>'
       : '<span class="badge b-ok">自动</span>';
+    renderTabs(d);
 
+    const shown = d.nodes.filter(n =>
+      filter === 'all' ? true
+      : filter === 'alive' ? n.ewma !== null
+      : filter === 'dead' ? (n.ewma === null && n.probed)
+      : (n.ewma === null && !n.probed));
+    // 全局排名号：用全部节点里的原始位置
+    const globalRank = new Map(d.nodes.map((n, i) => [n.tag, i + 1]));
     const maxEwma = Math.max(...alive.map(n => n.ewma), 1);
-    $('rows').innerHTML = d.nodes.map((n, i) => {
-      let badge, ms;
+    $('leader').innerHTML = shown.map(n => {
+      const rank = globalRank.get(n.tag);
+      let lat, badge, cls = '';
       if (n.ewma === null) {
-        // samples 只在成功时累加，所以 samples==0 不等于「没测」。
-        // 用 probed 分开：测过不通 = 节点自己死了；没测过 = 还没轮到。
         badge = n.probed ? '<span class="badge b-dead">不可用</span>'
                          : '<span class="badge b-unmeasured">待测</span>';
-        ms = '—';
-      }
-      else {
-        // ms 始终是纯实测延迟。连续失败中的节点额外标注失败次数 ——
-        // 早先罚分累加进 ewma，这里会显示 7512ms，看着像 2500ms 超时失效。
-        ms = n.ewma + 'ms';
+        lat = n.probed ? '<span class="lat bad">不可用</span>' : '<span class="lat dim">待测</span>';
+        cls = 'dead';
+      } else {
         badge = n.failures > 0
           ? `<span class="badge b-dead">失败 ${n.failures} 次</span>`
           : n.primary ? '<span class="badge b-primary">首选</span>'
           : n.active ? '<span class="badge b-active">候选</span>'
           : '<span class="badge b-ok">正常</span>';
+        lat = `<span class="lat ok">${n.ewma}<span class="u">ms</span></span>`;
+        cls = n.primary ? 'primary' : (n.active ? 'cand' : '');
       }
       const bar = n.ewma !== null
         ? `<div class="bar"><i style="width:${Math.max(4, 100 - n.ewma / maxEwma * 100).toFixed(0)}%"></i></div>` : '';
-      const btn = n.primary
-        ? ''
-        : `<button onclick="pick('${n.tag.replace(/'/g,"")}')" class="${n.active ? '' : 'pin'}">${n.active ? '移到首选' : '钉住'}</button>`;
-      return `<tr><td class="tag">${i+1}</td><td class="tag">${n.tag}</td><td>${ms}${bar}</td><td>${n.samples}</td><td>${badge}</td><td>${btn}</td></tr>`;
+      const btn = n.primary ? '' :
+        `<button onclick="pick('${n.tag.replace(/'/g,"")}')" class="${n.active ? '' : 'pin'}">${n.active ? '移到首选' : '钉住'}</button>`;
+      return `<div class="ncard ${cls}">
+        <div class="top"><span class="rank">#${rank}</span><span class="tag" title="${n.tag}">${n.tag}</span>${badge}</div>
+        ${lat}${bar}
+        <div class="meta"><span>样本 <b>${n.samples}</b></span>${n.failures ? `<span class="f">失败 <b>${n.failures}</b></span>` : ''}${n.probed ? `<span>${ageOf(n.last_probe_secs)}</span>` : ''}</div>
+        ${btn}
+      </div>`;
     }).join('');
   } catch (e) { $('err').textContent = '刷新失败: ' + e; }
 }
