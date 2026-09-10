@@ -513,6 +513,12 @@ async fn serve_ui(state: &CtlState, rel: &str) -> Option<String> {
             )
         }
     };
+    // index.html 注入引导脚本（见 inject_bootstrap 文档）
+    let bytes = if rel == "index.html" {
+        inject_bootstrap(&String::from_utf8_lossy(&bytes)).into_bytes()
+    } else {
+        bytes
+    };
     let mime = match path.extension().and_then(|e| e.to_str()) {
         Some("html") => "text/html; charset=utf-8",
         Some("js") => "application/javascript",
@@ -579,19 +585,29 @@ pub async fn run(
 
 use crate::node::Node;
 
+/// serve index.html 时注入引导脚本：浏览器 localStorage 没有 zashboard 的
+/// config/* 键（未配置过后端）时，自动跳到 ?hostname=&port= 参数地址 ——
+/// zashboard 解析后自动应用并落到 proxies 页，用户零输入。
+/// silverq 本身无认证，setup 表单的 Password 留空即可。
+fn inject_bootstrap(html: &str) -> String {
+    let bootstrap = "<script>(function(){try{if(!location.search&&!Object.keys(localStorage).some(function(k){return k.startsWith('config/')})){location.replace(location.origin+'/ui/?hostname='+location.hostname+'&port='+location.port);}}catch(e){}})();</script>";
+    html.replace("</body>", &format!("{bootstrap}</body>"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// rfc3339 必须产出标准 ISO 时间，dayjs（metacubexd 的解析器）才认。
+    /// 引导脚本只注入 index.html 的 </body> 前，且无 </body> 时原样返回。
     #[test]
-    fn rfc3339_formats_known_epochs() {
-        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
-        assert_eq!(rfc3339(86_400), "1970-01-02T00:00:00Z");
-        // 2026-09-10T08:00:00Z == 1789027200（与 python 交叉核对）
-        assert_eq!(rfc3339(1_789_027_200), "2026-09-10T08:00:00Z");
-        // 闰年 2024-02-29
-        assert_eq!(rfc3339(1_709_164_800), "2024-02-29T00:00:00Z");
+    fn inject_bootstrap_appends_before_body_close() {
+        let html = "<html><body>x</body></html>";
+        let out = inject_bootstrap(html);
+        assert!(out.contains("<script>"), "必须注入 script");
+        assert!(out.contains("config/"), "必须检查 config/ 键避免重复引导");
+        assert!(out.ends_with("</body></html>"), "注入点必须在 </body> 前");
+        // 无 </body> 的输入原样返回（真实 index.html 恒有 </body>）
+        assert_eq!(inject_bootstrap("<html>"), "<html>");
     }
 
     /// 调参夹紧：面板/ PATCH 传任意值都不会把调度打坏。
@@ -615,5 +631,16 @@ mod tests {
         assert_eq!(t.concurrency, 1);
         assert_eq!(t.timeout_penalty, 100.0);
         assert_eq!(t.fallback_attempts, 10);
+    }
+
+    /// rfc3339 必须产出标准 ISO 时间，dayjs（zashboard 的解析器）才认。
+    #[test]
+    fn rfc3339_formats_known_epochs() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(86_400), "1970-01-02T00:00:00Z");
+        // 2026-09-10T08:00:00Z == 1789027200（与 python 交叉核对）
+        assert_eq!(rfc3339(1_789_027_200), "2026-09-10T08:00:00Z");
+        // 闰年 2024-02-29
+        assert_eq!(rfc3339(1_709_164_800), "2024-02-29T00:00:00Z");
     }
 }
