@@ -6,14 +6,19 @@
 [scheduler]
 # 主组容量：EWMA 排名前 N 进 selection
 capacity = 10
-# 每批测速节点数
-batch_size = 5
-# 测速轮间隔（秒）
-interval_secs = 45
+# 每批测速节点数。
+# concurrency 必须 ≥ 这个值，否则批内排队：并发上限作用在批内
+# （buffer_unordered），真实并行度 = min(batch_size, concurrency)。
+batch_size = 20
+# 测速轮间隔（秒）。实际周期 = max(一轮耗时, interval_secs)。
+# 217 节点 / batch 20 → 11 批 ≈ 27s 一轮，所以 90 真正生效。
+# 早先 batch 5 时一轮要 110s > interval 45s，间隔被淹没，等于满负荷连轴转。
+interval_secs = 90
 # 单节点测速超时（毫秒）
 timeout_ms = 2500
-# 批内最大并发
-concurrency = 6
+# 批内最大并发。必须 ≥ batch_size，见上。
+# 测速全是等 IO，不烧 CPU，提高并发几乎无代价。
+concurrency = 20
 # 超时扣分幅度（毫秒）
 timeout_penalty = 3000.0
 # 探测 URL（generate_204 风格）
