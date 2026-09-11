@@ -153,6 +153,16 @@ fn json_response(status: u16, body: &str) -> String {
     )
 }
 
+/// JS 响应。service worker 脚本必须以 JS MIME 返回，否则浏览器拒绝注册/更新。
+fn js_response(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/javascript; charset=utf-8\r\n\
+         Content-Length: {}\r\nCache-Control: no-store\r\nService-Worker-Allowed: /ui/\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
 fn html_response(body: &str) -> String {
     format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
@@ -293,7 +303,19 @@ async fn handle_request(buf: &[u8], state: &CtlState) -> Option<String> {
             "{\"downloadTotal\":0,\"uploadTotal\":0,\"connections\":[],\"memory\":0}",
         )),
         ("GET", "/rules") => Some(json_response(200, "{\"rules\":[]}")),
-        // metacubexd 静态资源。/ui/config.js 动态注入后端地址（= 本服务 origin）。
+        // zashboard 是 PWA：workbox 预缓存 index.html，SW 一旦注册，服务端对
+        // index 的注入（首访引导）就永久失效 —— 页面直接从缓存出，不再经过我们。
+        // 实测：文档里 hasBootstrap=false、被钉死在 #/setup。
+        // 这里把注册脚本换成「注销 + 清缓存」，让已注册的 SW 自我卸载、
+        // 新访问不再注册。本地面板不需要离线能力，代价为零。
+        ("GET", "/ui/registerSW.js") => Some(js_response(
+            "if('serviceWorker' in navigator){navigator.serviceWorker.getRegistrations().then(function(rs){var n=rs.length;rs.forEach(function(r){r.unregister()});if(window.caches){caches.keys().then(function(ks){ks.forEach(function(k){caches.delete(k)});if(n)location.reload();})}else if(n){location.reload();}})}",
+        )),
+        // 已缓存旧 sw.js 的浏览器会来取更新：给一个自我注销的空 SW。
+        ("GET", "/ui/sw.js") => Some(js_response(
+            "self.addEventListener('install',function(){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil((async function(){try{for(const k of await caches.keys())await caches.delete(k)}catch(err){}await self.registration.unregister();for(const c of await self.clients.matchAll())c.navigate(c.url)})())});",
+        )),
+        // zashboard 静态资源。/ui/config.js 动态注入后端地址（= 本服务 origin）。
         ("GET", "/ui/config.js") => {
             let host = header(text, "Host").unwrap_or_else(|| "127.0.0.1".into());
             Some(html_response(&format!(
@@ -532,7 +554,7 @@ async fn serve_ui(state: &CtlState, rel: &str) -> Option<String> {
         _ => "application/octet-stream",
     };
     Some(format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         bytes.len()
     ) + &String::from_utf8_lossy(&bytes))
 }
@@ -585,12 +607,15 @@ pub async fn run(
 
 use crate::node::Node;
 
-/// serve index.html 时注入引导脚本：浏览器 localStorage 没有 zashboard 的
-/// config/* 键（未配置过后端）时，自动跳到 ?hostname=&port= 参数地址 ——
-/// zashboard 解析后自动应用并落到 proxies 页，用户零输入。
+/// serve index.html 时注入引导脚本：zashboard 的后端列表为空时，自动跳到
+/// `?hostname=&port=` 参数地址 —— 它解析后自动落到 proxies 页，用户零输入。
 /// silverq 本身无认证，setup 表单的 Password 留空即可。
+///
+/// 判定用 `setup/api-list`（后端列表，未配置时是 `[]`）。早先按 `config/*`
+/// 前缀判断，但 zashboard 一进页面就会写 `config/proxy-folders` 等设置键，
+/// 于是首访之后引导永久失效、被钉死在 #/setup（实测）。
 fn inject_bootstrap(html: &str) -> String {
-    let bootstrap = "<script>(function(){try{if(!location.search&&!Object.keys(localStorage).some(function(k){return k.startsWith('config/')})){location.replace(location.origin+'/ui/?hostname='+location.hostname+'&port='+location.port);}}catch(e){}})();</script>";
+    let bootstrap = "<script>(function(){try{if(location.search)return;var l=localStorage.getItem('setup/api-list');if(l&&JSON.parse(l).length)return;location.replace(location.origin+'/ui/?hostname='+location.hostname+'&port='+location.port);}catch(e){}})();</script>";
     html.replace("</body>", &format!("{bootstrap}</body>"))
 }
 
@@ -604,7 +629,10 @@ mod tests {
         let html = "<html><body>x</body></html>";
         let out = inject_bootstrap(html);
         assert!(out.contains("<script>"), "必须注入 script");
-        assert!(out.contains("config/"), "必须检查 config/ 键避免重复引导");
+        assert!(
+            out.contains("setup/api-list"),
+            "必须按后端列表判空，避免首访后引导失效"
+        );
         assert!(out.ends_with("</body></html>"), "注入点必须在 </body> 前");
         // 无 </body> 的输入原样返回（真实 index.html 恒有 </body>）
         assert_eq!(inject_bootstrap("<html>"), "<html>");
