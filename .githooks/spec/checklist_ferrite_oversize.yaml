@@ -1,0 +1,94 @@
+# L3 参考层: 大文件/大函数 + AGENTS.md 规范 (wildtoken fast-l)
+# 不阻断. 输出 score/confidence/reason/evidence. 开发 agent 自己设阈值.
+enabled: true
+hooks: [merge]
+sla: l3
+fail_severity: INFO
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/", "**/tests/**"]
+mode: file
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      exec 2>/tmp/gate-l3-oversize-err.log
+      ROOT=$(git rev-parse --show-toplevel)
+      FILE=$(cat)
+      LINES=$(printf '%s' "$FILE" | wc -l | tr -d ' ')
+      AGENTS=""
+      [ -f "$ROOT/AGENTS.md" ] && AGENTS=$(head -c 6000 "$ROOT/AGENTS.md")
+      KEY="${WILDTOKEN_API_KEY:-}"
+      if [ -z "$KEY" ]; then
+        if [ "$LINES" -gt 1500 ]; then
+          printf '%s\n' "[{\"id\":\"OS-01\",\"severity\":\"INFO\",\"message\":\"file has ${LINES} lines (>1500)\",\"score\":0.7,\"confidence\":1.0,\"reason\":\"file has ${LINES} lines (>1500)\",\"evidence\":\"line count only; WILDTOKEN_API_KEY missing\"}]"
+        else
+          echo '[]'
+        fi
+        exit 0
+      fi
+      BODY=$(printf '%s' "$FILE" | G_AGENTS="$AGENTS" G_LINES="$LINES" python3 -c '
+      import json, os, sys
+      agents = os.environ.get("G_AGENTS", "")
+      lines = os.environ.get("G_LINES", "0")
+      file = sys.stdin.read()
+      prompt = (
+          "Review one or more Rust files. Each section starts with "
+          "===== FILE: <path> =====. Put that path on every finding. "
+          "AGENTS.md is project norms (surgical, no speculative abstraction). "
+          "Output ONLY a JSON array of objects with keys: "
+          "id, severity (always INFO), message, score (0-1 attention not must-fix), "
+          "confidence (0-1), path, line (int), reason, evidence. "
+          "Empty array if nothing notable. "
+          "Hints: file>1500 lines score 0.6-0.9; pub fn body>200 lines 0.5-0.8."
+      )
+      user = "AGENTS.md:\n" + agents + "\n\n===== FILE (" + lines + " lines) =====\n" + file[:24000]
+      print(json.dumps({
+          "model": "fast-l",
+          "temperature": 0,
+          "max_tokens": 800,
+          "messages": [{"role": "user", "content": prompt + "\n\n" + user}],
+      }))
+      ')
+      RESP=$(curl -sS --max-time 90 \
+        -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+        http://127.0.0.1:3100/v1/chat/completions -d "$BODY") || { echo '[]'; exit 0; }
+      printf '%s' "$RESP" | python3 -c '
+      import json, re, sys
+      raw = sys.stdin.read()
+      try:
+          d = json.loads(raw)
+          text = d["choices"][0]["message"]["content"]
+      except Exception:
+          print("[]")
+          sys.exit(0)
+      m = re.search(r"\[.*\]", text, re.S)
+      if not m:
+          print("[]")
+          sys.exit(0)
+      try:
+          arr = json.loads(m.group(0))
+      except Exception:
+          print("[]")
+          sys.exit(0)
+      out = []
+      for it in arr if isinstance(arr, list) else []:
+          if not isinstance(it, dict):
+              continue
+          reason = str(it.get("reason") or it.get("message") or "")
+          out.append({
+              "id": str(it.get("id") or "OS"),
+              "severity": "INFO",
+              "message": reason,
+              "score": it.get("score", 0.5),
+              "confidence": it.get("confidence", 0.5),
+              "path": it.get("path") or "",
+              "line": int(it.get("line") or 0),
+              "reason": reason,
+              "evidence": str(it.get("evidence") or ""),
+          })
+      print(json.dumps(out))
+      '
+optional: true
+timeout: 120

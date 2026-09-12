@@ -1,0 +1,32 @@
+# 泛用: tests/ 目录下的测试文件不需要 #[cfg(test)]
+# 为什么: Cargo 对 tests/ 目录默认只在 cargo test 编译, 写 #[cfg(test)] 是重复且错误的 boilerplate
+# grep 模式, 零 LLM
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/tests/**/*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      ROOT=$(git rev-parse --show-toplevel)
+      matches=$(grep -rEn '#\[cfg\(test\)\]' "$ROOT" --include='*.rs' \
+        --exclude-dir=target --exclude-dir=.wt --exclude-dir=.git 2>/dev/null \
+        | grep '/tests/' | head -20)
+      if [ -z "$matches" ]; then
+        echo '[]'
+      else
+        printf '%s' "$matches" | jq -R -s '
+          split("\n")
+          | map(select(length > 0))
+          | map(capture("^(?<path>.+):(?<line>[0-9]+):(?<rest>.*)$"))
+          | map({id: "NO-CFG-TEST", severity: "WARN", path: .path, line: (.line|tonumber), message: ("tests/ 目录下的测试不需要 cfg(test), 删掉: " + .rest)})
+        '
+      fi
+optional: true
+timeout: 10

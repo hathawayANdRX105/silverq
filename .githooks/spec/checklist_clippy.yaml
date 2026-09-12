@@ -1,0 +1,40 @@
+# CD-07: cargo clippy（确定性硬门槛, merge only）
+# FAIL: rustc 编译错误 + unused_* / dead_code（真信号）
+# WARN: collapsible_if 等风格（不阻断, 避免硬门槛被噪音冲掉）
+enabled: true
+hooks: [merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      ROOT=$(git rev-parse --show-toplevel)
+      cd "$ROOT" || exit 2
+      cargo clippy --workspace --all-targets --message-format json 2>/dev/null |
+        grep '"reason":"compiler-message"' |
+        jq -s '
+          [.[]
+            | .message
+            | select(type == "object")
+            | select(.level == "warning" or .level == "error")
+            | (.code.code // "") as $code
+            | {
+                id: ("CLIPPY-" + ($code | sub("clippy::"; "") | ascii_upcase)),
+                severity: (
+                  if ($code | startswith("clippy::") | not) then "FAIL"
+                  elif ($code | test("unused|dead_code")) then "FAIL"
+                  else "WARN"
+                  end
+                ),
+                path: (.spans[0].file_name // ""),
+                line: (.spans[0].line_start // 0),
+                message: ($code + ": " + .message)
+              }] | unique'
+optional: true
+timeout: 600

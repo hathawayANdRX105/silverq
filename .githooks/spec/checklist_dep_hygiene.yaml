@@ -1,0 +1,39 @@
+# CD-08: 依赖卫生 — cargo-machete 检测未使用的依赖
+# 为什么: 未使用依赖拖慢编译、扩大供应链攻击面; agent 常加依赖后改用别的方案忘了删
+# 需要: cargo install cargo-machete
+# 例外: Cargo.toml [package.metadata.cargo-machete] ignored 列表
+enabled: true
+hooks: [merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/Cargo.toml", "**/*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      ROOT=$(git rev-parse --show-toplevel)
+      cd "$ROOT" || exit 2
+      out=$(cargo machete --quiet 2>/dev/null)
+      if [ -z "$out" ]; then
+        echo '[]'
+      else
+        printf '%s' "$out" | awk '
+          /^[^ \t].*:$/ { pkg=$1; next }
+          /^[ \t]+[^ \t]/ { print pkg "\t" $1 }
+        ' | jq -R -s '
+          split("\n") | map(select(length > 0))
+          | map(capture("^(?<crate>[^\t]+)\t(?<dep>.+)$"))
+          | map({
+              id: "UNUSED-DEP",
+              severity: "WARN",
+              path: "Cargo.toml",
+              line: 0,
+              message: ("crate " + .crate + " 未使用依赖: " + .dep + " (删除, 或加入 cargo-machete ignored)")
+            })'
+      fi
+optional: true
+timeout: 120

@@ -1,0 +1,19 @@
+enabled: true
+hooks:
+- merge
+sla: l1
+fail_severity: FAIL
+match:
+  paths_include:
+  - '**/*.rs'
+  - '**/Cargo.toml'
+  - '**/README.md'
+  paths_exclude:
+  - target/
+  - .wt/
+mode: grep
+harness:
+  command: sh
+  args:
+  - -c
+  - "set -e\nROOT=$(git rev-parse --show-toplevel)\ncd \"$ROOT\"\n# 1) 每个有 Cargo.toml 的 crate 必须有 README.md\nmissing_crates=$(find \"$ROOT/crates\" -mindepth 2 -maxdepth 3 -name Cargo.toml -not -path \"*/target/*\" 2>/dev/null | while read -r cargo; do\n  cd \"$(dirname \"$cargo\")\"\n  [ ! -f \"README.md\" ] && basename \"$(dirname \"$cargo\")\"\ndone | sort -u)\n# 2) 域目录 (crates/<domain>/) 必须有 README.md (含子 crate 的才算域)\nmissing_domains=$(for d in \"$ROOT\"/crates/*/; do\n  [ -d \"$d\" ] || continue\n  dom=$(basename \"$d\")\n  [ -f \"$d/README.md\" ] && continue\n  has_crate=$(find \"$d\" -mindepth 1 -maxdepth 2 -name Cargo.toml 2>/dev/null | head -1)\n  [ -n \"$has_crate\" ] && echo \"$dom\"\ndone | sort -u)\n# 3) 根 README.md 必须存在\nroot_missing=\"\"\n[ ! -f \"$ROOT/README.md\" ] && root_missing=\"yes\"\n# 用 jq -n 安全构建 JSON, 避免 shell 字符串拼接断 JSON\nFINDINGS='[]'\nif [ -n \"$missing_crates\" ]; then\n  COUNT=$(printf '%s\\n' \"$missing_crates\" | grep -c .)\n  LIST=$(printf '%s\\n' \"$missing_crates\" | tr '\\n' ', ')\n  F=$(jq -cn --arg c \"$COUNT\" --arg l \"$LIST\" '[{id:\"DOC-CRATE-README-MISSING\", severity:\"FAIL\", path:\".\", line:0, message:($c + \" 个功能 crate 缺 README.md: \" + $l + \" — 必须每个 crate 配 README 描述职责/文件清单/验收命令\")}]')\n  FINDINGS=$(jq -cn --argjson a \"$FINDINGS\" --argjson b \"$F\" '$a + $b')\nfi\nif [ -n \"$missing_domains\" ]; then\n  LIST=$(printf '%s\\n' \"$missing_domains\" | tr '\\n' ', ')\n  F=$(jq -cn --arg l \"$LIST\" '[{id:\"DOC-DOMAIN-README-MISSING\", severity:\"FAIL\", path:\".\", line:0, message:(\"以下域目录缺 README.md: \" + $l + \" — 域 README 需列明其下 crate 清单与 MVP 依赖顺序\")}]')\n  FINDINGS=$(jq -cn --argjson a \"$FINDINGS\" --argjson b \"$F\" '$a + $b')\nfi\nif [ -n \"$root_missing\" ]; then\n  F='[{\"id\":\"DOC-ROOT-README-MISSING\",\"severity\":\"FAIL\",\"path\":\".\",\"line\":0,\"message\":\"根 README.md 缺失 — 项目级文档必须同步 (模块结构/构建/部署)\"}]'\n  FINDINGS=$(jq -cn --argjson a \"$FINDINGS\" --argjson b \"$F\" '$a + $b')\nfi\nprintf '%s\\n' \"$FINDINGS\" | jq -c .\nexit 0"

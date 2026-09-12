@@ -1,0 +1,17 @@
+enabled: true
+hooks:
+- merge
+sla: l1
+fail_severity: FAIL
+match:
+  paths_include:
+  - '**/*'
+  paths_exclude:
+  - target/
+  - .wt/
+mode: grep
+harness:
+  command: sh
+  args:
+  - -c
+  - "set -e\nROOT=$(git rev-parse --show-toplevel)\ncd \"$ROOT\"\nREPO=\"${GATE_REPO:-}\"\nPR=\"${GATE_PR:-}\"\nif [ -z \"$REPO\" ]; then\n  REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)\nfi\nif [ -z \"$PR\" ]; then\n  # 兜底 1: 当前分支反查 PR (本地开发分支)\n  BR=$(git branch --show-current)\n  if [ -n \"$REPO\" ] && [ -n \"$BR\" ]; then\n    PR=$(gh pr view \"$BR\" --json number -q .number --repo \"$REPO\" 2>/dev/null || true)\n  fi\nfi\nif [ -z \"$PR\" ]; then\n  # 兜底 2: 按 HEAD SHA 反查 PR (合并后分支已删 / detached HEAD 场景)\n  HEAD_SHA=$(git rev-parse HEAD)\n  if [ -n \"$REPO\" ] && [ -n \"$HEAD_SHA\" ]; then\n    PR=$(gh api \"repos/$REPO/pulls\" -q \".[] | select(.head.sha == \"$HEAD_SHA\") | .number\" 2>/dev/null | head -1 || true)\n  fi\nfi\nif [ -z \"$REPO\" ] || [ -z \"$PR\" ]; then\n  echo '[{\"id\":\"PR-CRG\",\"severity\":\"FAIL\",\"path\":\".\",\"line\":0,\"message\":\"无法定位当前 PR (gh 不可用或未配置 GATE_REPO/GATE_PR), CRG 审查记录检查跳过 — 合并前请人工核对\"}]'\n  exit 0\nfi\nCREATED=$(timeout 30 gh api \"repos/$REPO/pulls/$PR\" -q .created_at 2>/dev/null || true)\nCREATED=\"${CREATED:-1970-01-01T00:00:00Z}\"\n# 抓 PR 创建之后的三类讨论: issue 评论 / 行内 review 评论 / 整段 review\n# 每个 API 各输出一个 JSON 数组, 合并成数组后按 created_at/submitted_at 客户端过滤\nCOMMENTS=$( {\n  timeout 60 gh api \"repos/$REPO/issues/$PR/comments\" -q '[.[] | {c: .created_at, b: .body}]' 2>/dev/null || echo '[]'\n  timeout 60 gh api \"repos/$REPO/pulls/$PR/comments\" -q '[.[] | {c: .created_at, b: .body}]' 2>/dev/null || echo '[]'\n  timeout 60 gh api \"repos/$REPO/pulls/$PR/reviews\" -q '[.[] | {c: .submitted_at, b: .body}]' 2>/dev/null || echo '[]'\n} | jq -cs 'add // [] | map(select(.c >= \"'\"${CREATED}\"'\" and (.b // \"\" | length > 0))) | map(.b) | join(\"\\n\\n\")' 2>/dev/null || true)\nif [ -z \"$COMMENTS\" ]; then\n  echo '[{\"id\":\"PR-CRG-MISSING\",\"severity\":\"FAIL\",\"path\":\".\",\"line\":0,\"message\":\"PR #'\"$PR\"' 讨论区无任何审查记录 — 合并前必须贴一条 CRG (code-review-graph) 审查结论 (detect-changes + 风险点), 有问题需附修复记录\"}]'\n  exit 0\nfi\n# 是否含 CRG 审查记录: 命中任意一个结构层标识词\nCRG_MARKER=0\nfor m in \"CRG\" \"code-review-graph\" \"detect-changes\" \"crg_impact\" \"CRG Review\" \"结构层\" \"ocr\" \"OpenCodeReview\"; do\n  if printf '%s' \"$COMMENTS\" | grep -qiF \"$m\"; then\n    CRG_MARKER=1; break\n  fi\ndone\nif [ \"$CRG_MARKER\" -eq 0 ]; then\n  echo '[{\"id\":\"PR-CRG-MISSING\",\"severity\":\"FAIL\",\"path\":\".\",\"line\":0,\"message\":\"PR #'\"$PR\"' 讨论区未找到 CRG/code-review-graph 审查记录 (需含 detect-changes 结论或 risk 评估) — 合并前补一条\"}]'\n  exit 0\nfi\n# 若审查提到过问题/风险 → 需有修复/回应记录\nPROBLEM_MARKER=0\nfor m in \"问题\" \"缺陷\" \"风险\" \"test gap\" \"risk\" \"误报\" \"FAIL 级\" \"bug\" \"problem\" \"finding\"; do\n  if printf '%s' \"$COMMENTS\" | grep -qiF \"$m\"; then\n    PROBLEM_MARKER=1; break\n  fi\ndone\nif [ \"$PROBLEM_MARKER\" -eq 1 ]; then\n  FIX_MARKER=0\n  for m in \"Fix\" \"修复\" \"已修\" \"解决\" \"resolve\" \"采纳\" \"驳回\" \"拒绝\" \"误报\" \"回退\" \"revert\" \"commit\" \"smoke\" \"Smoke\" \"验证通过\" \"验证\"; do\n    if printf '%s' \"$COMMENTS\" | grep -qiF \"$m\"; then\n      FIX_MARKER=1; break\n    fi\n  done\n  if [ \"$FIX_MARKER\" -eq 0 ]; then\n    echo '[{\"id\":\"PR-CRG-FIX-MISSING\",\"severity\":\"FAIL\",\"path\":\".\",\"line\":0,\"message\":\"PR #'\"$PR\"' 审查记录提到过问题/风险, 但讨论区未找到对应修复/回应记录 (需附 Fix 说明 + commit SHA 或验证结论)\"}]'\n    exit 0\n  fi\nfi\n# 全部通过\necho '[]'\nexit 0\n"

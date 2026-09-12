@@ -1,0 +1,18 @@
+# FR-05 禁止函数体内定义类型 (mode: grep, 零 LLM)
+# 规则: struct / enum 不应定义在 function 内 (提到 mod 级或文件顶部)
+# 检测: grep 匹配缩进的 struct/enum 声明
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l1
+fail_severity: FAIL
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - "ROOT=$(git rev-parse --show-toplevel); matches=$(grep -rEn '^[[:space:]]+(struct|enum)[[:space:]]+[A-Z]\\w*' \"$ROOT/crates\"/page-*/src/ \"$ROOT/crates\"/ui/src/ --include='*.rs' 2>/dev/null | head -20); if [ -z \"$matches\" ]; then echo '[]'; else printf '%s' \"$matches\" | jq -R -s 'split(\"\\n\") | map(select(length>0)) | map(capture(\"^(?<path>.+):(?<line>[0-9]+):(?<rest>.*)$\")) | map({id: \"FR05-NESTED-TYPE\", severity: \"FAIL\", path: .path, line: (.line|tonumber), message: (\"禁止函数内嵌套类型定义: \" + .rest)})'; fi"
+optional: true
+timeout: 10

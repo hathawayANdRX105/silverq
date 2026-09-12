@@ -1,0 +1,38 @@
+name: Feature
+description: 用户可见的能力或流程改进
+labels: ["feature"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: 谁在什么场景下需要它
+    validations:
+      required: true
+  - type: textarea
+    id: done-when
+    attributes:
+      label: Done when
+      description: 可观测的验收标准，用 `- [ ]` 勾选项
+    validations:
+      required: true
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals
+  - type: textarea
+    id: area
+    attributes:
+      label: Area
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context

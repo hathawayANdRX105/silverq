@@ -1,0 +1,51 @@
+# CK-DUPLICATION: 复制漂移检测 (L2 语义层)
+# 模式: 4+ 连续非空行在多个文件中重复出现 (clones 类)
+# 实现: sh + awk + sort + uniq (零外部依赖)
+# 性能: ~200ms (遍历 .rs 文件)
+# SLA: l2 (语义层, 秒级)
+# Hook: merge (重量检查, 不阻塞日常提交)
+enabled: true
+hooks: [merge]
+sla: l2
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/", "**/tests/**", "**/test_*.rs"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      ROOT=$(git rev-parse --show-toplevel)
+      # 提取 4+ 连续非空行的块 (排除单行注释/单行 use 等短行)
+      # 用 awk 标记每个文件的 4-行块, sort+uniq 找跨文件重复
+      matches=$(find "$ROOT" -name "*.rs" \
+        -not -path "*/target/*" -not -path "*/.wt/*" -not -path "*/.git/*" \
+        -not -path "*/tests/*" 2>/dev/null \
+        | xargs awk '
+        BEGIN { block=""; count=0; file=FILENAME }
+        /^[[:space:]]*$/ { if (count >= 4 && length(block) > 80) print file ":" block "<<<CLONE>>>"; block=""; count=0; next }
+        { if (block == "") file=FILENAME; block = block "\n" $0; count++ }
+        ' 2>/dev/null \
+        | sort -t'<' -k4 \
+        | awk -F'<<<CLONE>>>' '
+        { n=split($1, a, ":"); file=a[1]; code=$2; if (file != prev_file) { if (count > 1) print prev_file " <-> " file " : " code; prev_file=file; count=1 } else { count++ } }
+        END { if (count > 1) print "duplicate block in " prev_file " appears " count+1 " times" }
+        ' | head -10)
+      if [ -z "$matches" ]; then
+        echo '[]'
+      else
+        printf '%s' "$matches" | jq -R -s '
+          split("\n") | map(select(length > 0))
+          | map(capture("^(?<rest>.*)$"))
+          | map({
+              id: "DUPLICATE-CODE",
+              severity: "WARN",
+              path: ".",
+              line: 0,
+              message: ("复制代码块 (>=4 连续行): " + .rest)
+            })'
+      fi
+optional: true
+timeout: 30

@@ -1,0 +1,52 @@
+# 泛用: 测试函数必须含断言
+# 一个 #[test] fn ... 函数体内,至少出现一次 assert! / assert_eq! / assert_ne!
+# grep 模式, 零 LLM
+# 限制: awk 启发式, 不能处理嵌套 mod tests, 但足以拦掉最常见的"跑过就算"
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/tests/*.rs", "**/*_test.rs", "**/test_*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      ROOT=$(git rev-parse --show-toplevel)
+      # 收集测试文件, 用 awk 按 #[test] 边界分段看有没有 assert_ 系列宏
+      test_files=$(find "$ROOT" \( -name target -o -name .git -o -name .wt \) -prune -o -path '*/tests/*' -name '*.rs' -print 2>/dev/null)
+      [ -z "$test_files" ] && { echo '[]'; exit 0; }
+      matches=$(printf '%s\n' "$test_files" | xargs awk '
+        /#\[test\]/ {
+          if (in_test && !has_assert) {
+            print test_file ":" test_line ":" test_fn
+          }
+          test_file=FILENAME; test_line=FNR; in_test=1; has_assert=0; test_fn=""
+        }
+        in_test && /^fn / {
+          test_fn=$2
+        }
+        in_test && /assert/ {
+          has_assert=1
+        }
+        END {
+          if (in_test && !has_assert) {
+            print test_file ":" test_line ":" test_fn
+          }
+        }
+      ' 2>/dev/null | head -20)
+      if [ -z "$matches" ]; then
+        echo '[]'
+      else
+        printf '%s' "$matches" | jq -R -s '
+          split("\n")
+          | map(select(length > 0))
+          | map(capture("^(?<path>.+):(?<line>[0-9]+):(?<rest>.*)$"))
+          | map({id: "TEST-NO-ASSERT", severity: "WARN", path: .path, line: (.line|tonumber), message: ("测试函数没有断言: " + .rest)})
+        '
+      fi
+optional: true
+timeout: 15

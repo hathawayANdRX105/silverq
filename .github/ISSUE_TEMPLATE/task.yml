@@ -1,0 +1,45 @@
+name: Task
+description: 内部工作：重构、CI、文档、性能、技术决策
+labels: ["task"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: 要做什么，一句话说清
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: 为什么要做。现状哪里不够
+    validations:
+      required: true
+  - type: textarea
+    id: done-when
+    attributes:
+      label: Done when
+      description: 可观测的验收标准，用 `- [ ]` 勾选项
+      placeholder: |
+        - [ ] `cargo test -p config` 通过
+        - [ ] 坏配置被拒绝且错误含行号
+    validations:
+      required: true
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals
+      description: 明确不做的部分，避免范围蔓延
+  - type: textarea
+    id: area
+    attributes:
+      label: Area
+      description: 涉及的文件路径与符号
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: 设计文档链接、参考实现、已知风险

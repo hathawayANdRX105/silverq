@@ -1,0 +1,39 @@
+# 泛用: 空模块文件检查 (禁止只有 re-export 甚至全空的文件)
+# 为什么: 文件拆得太碎, 一个文件只有 1-2 行 pub use, 增加认知负担
+# 检测: .rs 文件去除注释/空行后 <= 2 行, 且不含逻辑实现 (不含 fn/struct/impl)
+# grep 模式, 零 LLM
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      ROOT=$(git rev-parse --show-toplevel)
+      # 找出小于 100 字节的 rs 文件, 看去注释后是不是空/碎文件
+      matches=$(find "$ROOT" \( -name target -o -name .git -o -name .wt \) -prune -o -name '*.rs' -size -100c -print 2>/dev/null | while read f; do
+        lines=$(grep -v '^//' "$f" | grep -v '^\s*$' | wc -l)
+        if [ "$lines" -le 2 ]; then
+          if ! grep -qE 'fn |struct |impl |trait |enum |macro_rules!' "$f"; then
+            echo "$f:1:微型空文件, 仅含 $lines 行有效代码"
+          fi
+        fi
+      done | head -20)
+      if [ -z "$matches" ]; then
+        echo '[]'
+      else
+        printf '%s' "$matches" | jq -R -s '
+          split("\n")
+          | map(select(length > 0))
+          | map(capture("^(?<path>.+):(?<line>[0-9]+):(?<rest>.*)$"))
+          | map({id: "EMPTY-MODULE", severity: "WARN", path: .path, line: (.line|tonumber), message: ("文件太碎(<=2行)且无具体实现, 考虑合并到上层 mod: " + .rest)})
+        '
+      fi
+optional: true
+timeout: 10

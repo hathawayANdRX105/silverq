@@ -1,0 +1,45 @@
+# CK-SLOP: AI slop 检测 — agent 生成代码的典型注释病灶
+# 依据: sloplint / AI-SLOP-Detector (github.com/dannote/sloplint,
+#       github.com/flamehaven01/AI-SLOP-Detector)
+# 检测: 步骤注释(Step 1:/第一步:)、叙述型注释(复述代码的 This function.../该函数...)
+# 为什么 grep 而非 LLM: 模式固定, 零 token, 毫秒级
+# 刻意不查(误报太高): 空 catch 块、单行空 fn、注释密度、// ---- 分节线(仓库自身惯例) — 靠 clippy + oversize 兜底
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs", "**/*.ts", "**/*.js", "**/*.py", "**/*.go"]
+  paths_exclude: ["target/", ".wt/", "node_modules/", "**/tests/**"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      ROOT=$(git rev-parse --show-toplevel)
+      pat='// *(Step [0-9]|第[一二三四五六七八九十]+步|步骤[0-9一二三四五六七八九十]+|This (function|method|class|module)|该(函数|方法|类|模块))'
+      matches=$(grep -rEn "$pat" "$ROOT" \
+        --include='*.rs' --include='*.ts' --include='*.js' \
+        --include='*.py' --include='*.go' \
+        --exclude='*_test.go' --exclude='*_test.py' --exclude='test_*.py' \
+        --exclude='*.test.ts' --exclude='*.test.js' --exclude='*.spec.ts' --exclude='*.spec.js' \
+        --exclude-dir=target --exclude-dir=.wt --exclude-dir=node_modules \
+        --exclude-dir=.git --exclude-dir=dist --exclude-dir=build \
+        --exclude-dir=vendor --exclude-dir=tests 2>/dev/null | head -30)
+      if [ -z "$matches" ]; then
+        echo '[]'
+      else
+        printf '%s' "$matches" | jq -R -s '
+          split("\n") | map(select(length > 0))
+          | map(capture("^(?<path>.+):(?<line>[0-9]+):(?<rest>.*)$"))
+          | map({
+              id: "AI-SLOP-COMMENT",
+              severity: "WARN",
+              path: .path,
+              line: (.line | tonumber),
+              message: ("AI 风格注释, 删掉或写实质理由: " + .rest)
+            })'
+      fi
+optional: true
+timeout: 15

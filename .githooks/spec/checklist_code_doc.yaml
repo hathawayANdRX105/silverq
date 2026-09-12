@@ -1,0 +1,68 @@
+# 代码注释补齐门禁 (merge 时)
+# 规则: 公共 API 必须有 rust doc (`///`); 模块头必须有 `//!` 说明职责。
+#       与 AGENTS.md "公共 API 必须写 rust doc; 模块头写 //! 说明职责" 对齐。
+# 检测: 1) lib.rs / main.rs 缺 `//!` 模块文档 → WARN
+#       2) 公共 `pub fn` / `pub struct` / `pub enum` / `pub trait` 前无 `///` → WARN
+#       (只扫本次 PR diff 触碰的文件, 不扫存量, 避免老代码噪声)
+# SLA: l1 确定性 (grep/awk), 零 token。
+# 严重度: WARN (存量代码注释历史欠账多, 合并前清理; 不硬拦)
+enabled: true
+hooks: [merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/", "**/tests/**"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      set -e
+      ROOT=$(git rev-parse --show-toplevel)
+      cd "$ROOT"
+      # 只查本次 PR diff 触碰的 .rs 文件 (存量注释欠账不追责)
+      BASE=$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse HEAD~1 2>/dev/null || echo HEAD)
+      CHANGED=$(git diff --name-only "$BASE"...HEAD 2>/dev/null | grep -E '\.rs$' || true)
+      if [ -z "$CHANGED" ]; then
+        echo '[]'
+        exit 0
+      fi
+      FINDINGS=''
+      # 1) 模块文档: 变更的 lib.rs / main.rs 必须有 //! 模块头
+      for f in $CHANGED; do
+        [ -f "$ROOT/$f" ] || continue
+        case "$f" in
+          */lib.rs|*/main.rs)
+            if ! grep -q '^//! ' "$ROOT/$f" 2>/dev/null; then
+              FINDINGS="[{\"id\":\"DOC-MODULE-MISSING\",\"severity\":\"WARN\",\"path\":\"$f\",\"line\":0,\"message\":\"模块头缺 //! 说明 (职责/边界/用法)\"}]"
+              break
+            fi ;;
+        esac
+      done
+      # 2) 公共 API 文档: 变更文件里 pub 项前无 /// (收集全部命中, 循环结束后统一转 JSON)
+      API_HITS=$( {
+        for f in $CHANGED; do
+          [ -f "$ROOT/$f" ] || continue
+          awk '
+            /^\/\//{lastdoc=NR}
+            /^\/\*\*/{lastdoc=NR}
+            /^[[:space:]]*(pub fn|pub struct|pub enum|pub trait|pub type|pub const|pub static|pub use)/ {
+              if (NR-lastdoc)>3 {
+                print FILENAME":"NR": "substr($0,1)
+                lastdoc=NR
+              }
+            }' "$ROOT/$f" 2>/dev/null || true
+        done
+      } | grep -v '^$' || true)
+      if [ -n "$API_HITS" ]; then
+        API_JSON=$(printf '%s\n' "$API_HITS" | jq -R -s 'split("\n") | map(select(length>0)) | map(capture("^(?<path>.+):(?<line>[0-9]+):(?<rest>.*)$")) | map({id:"DOC-PUB-API-NODOC", severity:"WARN", path:.path, line:(.line|tonumber), message:("公共 API 缺 /// rust doc: "+.rest)})')
+        if [ -n "$FINDINGS" ] && [ "$FINDINGS" != '[]' ]; then
+          FINDINGS=$(printf '%s' "$FINDINGS" | jq -c -s '.[0] + ('$API_JSON')')
+        else
+          FINDINGS="$API_JSON"
+        fi
+      fi
+      printf '%s\n' "${FINDINGS:-[]}" | jq -c .
+      exit 0

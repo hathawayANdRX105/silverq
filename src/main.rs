@@ -7,39 +7,24 @@
 //!   silverq status                 查看当前状态
 //!
 //! 协议/传输/TLS/Reality/QUIC 全部复用 meow-rs；silverq 只做调度与转发。
-mod batch;
-mod config;
-mod decision;
-mod fast_path;
-mod node;
-mod nodespec;
-mod persist;
-mod settings;
-
-#[cfg(feature = "meow")]
-mod factory;
-#[cfg(feature = "meow")]
-mod inbound;
-#[cfg(feature = "meow")]
-mod meow;
-/// TUN 数据面未实现，见模块文档；不接线，仅作占位提醒。
-#[cfg(feature = "meow")]
-mod tun;
-#[cfg(feature = "meow")]
-mod udp;
-#[cfg(feature = "meow")]
-mod web;
-
+use silverq::config::settings;
 #[cfg(unix)]
-mod cli;
-#[cfg(unix)]
-mod ctl;
+use silverq::ctl::{cli, protocol as ctl};
+#[cfg(feature = "meow")]
+use silverq::dataplane::inbound;
+use silverq::proxy::nodespec;
+#[cfg(feature = "meow")]
+use silverq::proxy::{factory, meow};
+use silverq::scheduler::{batch, decision, fast_path, persist};
+#[cfg(feature = "meow")]
+use silverq::web;
 
 #[cfg(not(feature = "meow"))]
-use batch::NoopMeasurer;
+use silverq::scheduler::batch::NoopMeasurer;
 
-use batch::Measurer;
-use node::Node;
+use silverq::scheduler::batch::Measurer;
+use silverq::scheduler::node::Node;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -135,17 +120,17 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
         Arc::new(parking_lot::Mutex::new(None));
     // 运行时可热更调参：调度循环 / inbound / web(PATCH /configs) 三方共享
     let tuning: ctl::SharedTuning = Arc::new(parking_lot::RwLock::new(
-        crate::settings::RuntimeTuning::from_eff(&eff),
+        settings::RuntimeTuning::from_eff(&eff),
     ));
     let protocols: std::collections::HashMap<String, String> = specs
         .iter()
         .map(|sp| {
             let name = match sp.protocol {
-                crate::nodespec::Protocol::Vless => "Vless",
-                crate::nodespec::Protocol::Trojan => "Trojan",
-                crate::nodespec::Protocol::Shadowsocks => "Shadowsocks",
-                crate::nodespec::Protocol::Hysteria2 => "Hysteria2",
-                crate::nodespec::Protocol::Direct => "Direct",
+                nodespec::Protocol::Vless => "Vless",
+                nodespec::Protocol::Trojan => "Trojan",
+                nodespec::Protocol::Shadowsocks => "Shadowsocks",
+                nodespec::Protocol::Hysteria2 => "Hysteria2",
+                nodespec::Protocol::Direct => "Direct",
             };
             (sp.tag.clone(), name.to_string())
         })
