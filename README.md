@@ -69,7 +69,7 @@ src/
 ├── config/            # settings.rs（silverq.toml）+ 默认参数/env 覆盖
 ├── scheduler/         # node.rs（Node+EWMA）、batch.rs（分批测速）、
 │                      # decision.rs（select_top）、fast_path.rs（即时发布）、
-│                      # persist.rs（EWMA 存档）
+│                      # persist.rs（EWMA 存档）；mod.rs（调度进度计数）
 ├── proxy/             # nodespec.rs（节点 YAML 模型）、factory.rs（NodeSpec→meow
 │                      # adapter）、meow.rs（MeowMeasurer）——后两者 meow feature
 ├── dataplane/         # inbound.rs（SOCKS5/HTTP-CONNECT TCP）、udp.rs（UDP 中继）、
@@ -119,8 +119,10 @@ src/
 zashboard 首次打开在 setup 页填 `127.0.0.1` + `9095`,或直接访问
 `/ui/?hostname=127.0.0.1&port=9095` 自动配置。
 
-**`/` — 内嵌轻量面板**:silverq 特有数据(纯实测延迟、连续失败次数、
-可用/不可用/待测三态、健康度汇总),3 秒轮询,无前端依赖。
+**`/` — 内嵌轻量面板**:silverq 特有数据(纯实测延迟 + EWMA 历史曲线、
+连续失败次数、可用/不可用/待测三态、健康度汇总、调度轮/批进度),
+3 秒轮询,无前端依赖。样式与图表原语来自 [uikit](../uikit) 模板
+(vendored 于 `src/web/uikit/`,头部注释标了来源 commit)。
 
 | 端点 | 说明 |
 | --- | --- |

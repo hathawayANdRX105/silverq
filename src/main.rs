@@ -15,7 +15,7 @@ use silverq::dataplane::inbound;
 use silverq::proxy::nodespec;
 #[cfg(feature = "meow")]
 use silverq::proxy::{factory, meow};
-use silverq::scheduler::{batch, decision, fast_path, persist};
+use silverq::scheduler::{batch, decision, fast_path, persist, SchedulerProgress};
 #[cfg(feature = "meow")]
 use silverq::web;
 
@@ -137,6 +137,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
         .collect();
 
     // 4. 调度循环（测速 + EWMA + 切换），pinned 时暂停覆盖
+    let progress = Arc::new(SchedulerProgress::default());
     let handles = SchedulerHandles {
         measurer: measurer.clone(),
         pool: pool.clone(),
@@ -144,6 +145,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
         pinned: pinned.clone(),
         pin_target: pin_target.clone(),
         selector_store: eff.selector_store.clone(),
+        progress: progress.clone(),
     };
     let sched = tokio::spawn(schedule_loop(handles, tuning.clone()));
 
@@ -162,6 +164,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             eff.probe_url.clone(),
             eff.ui_dir.clone(),
             protocols.clone(),
+            progress.clone(),
         ));
         #[cfg(not(feature = "meow"))]
         let ctl_state = Arc::new(ctl::CtlState::new(
@@ -174,6 +177,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             eff.probe_url.clone(),
             eff.ui_dir.clone(),
             protocols.clone(),
+            progress.clone(),
         ));
         let ctl_sock = std::path::PathBuf::from(eff.ctl_sock.clone());
         #[cfg(feature = "meow")]
@@ -239,7 +243,6 @@ fn report_task_exit(name: &str, res: Result<(), tokio::task::JoinError>) {
     }
 }
 
-/// 调度共享句柄。
 struct SchedulerHandles {
     measurer: Arc<dyn Measurer>,
     pool: Arc<RwLock<Vec<Node>>>,
@@ -250,6 +253,8 @@ struct SchedulerHandles {
     pin_target: Arc<parking_lot::Mutex<Option<String>>>,
     /// SelectorStore 路径（publish_selector_store 用）
     selector_store: String,
+    /// 面板进度计数（schedule_loop 写，web 读）
+    progress: Arc<SchedulerProgress>,
 }
 
 /// 调度主循环：周期全池测速 → EWMA 更新 → 纯 EWMA 选前 N → 写共享选择。
@@ -275,7 +280,7 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
         pinned,
         pin_target,
         selector_store,
-        ..
+        progress,
     } = h;
 
     // 冷启动播种：还没有任何测速数据时，按配置顺序给数据面一个候选集，
@@ -308,6 +313,8 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
             let guard = pool.read().await;
             decision::measurement_order(&guard, t.batch_size, t.timeout_penalty)
         };
+        let round_started = std::time::Instant::now();
+        progress.round_begin(batches.len());
 
         for chunk in batches {
             let results =
@@ -344,13 +351,14 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
             }
 
             persist::save(&pool.read().await);
+            progress.batch_done(persist::now_secs() as i64);
         }
 
         tracing::info!(
             selection = ?last_selection,
             "测速轮完成"
         );
-
+        progress.round_end(round_started.elapsed().as_secs());
         // 先取值再 await：parking_lot 的 guard 不是 Send，不能跨 await 存活
         let iv = tuning.read().interval_secs;
         tokio::time::sleep(Duration::from_secs(iv)).await;

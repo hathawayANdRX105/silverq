@@ -3,54 +3,41 @@
 <head>
 <meta charset="utf-8">
 <title>silverq</title>
+<!-- uikit vendored（~/projects/uikit@d8803de）：tokens.css 变量 + base.css 原语 + charts/panel js -->
+<link rel="stylesheet" href="/tokens.css">
+<link rel="stylesheet" href="/base.css">
 <style>
-  :root { --bg:#0f1115; --card:#171a21; --fg:#d7dae0; --dim:#8b93a1; --ok:#4caf7d; --warn:#e0a84c; --bad:#e06c60; --acc:#5b9bd5; }
-  * { box-sizing:border-box; }
-  body { background:var(--bg); color:var(--fg); font:14px/1.5 system-ui,sans-serif; margin:0; padding:24px; }
-  h1 { font-size:18px; margin:0 0 4px; }
-  .sub { color:var(--dim); font-size:12px; margin-bottom:16px; }
-  .cards { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
-  .card { background:var(--card); border-radius:8px; padding:12px 16px; min-width:150px; }
-  .card .k { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
-  .card .v { font-size:20px; margin-top:2px; }
-  .v.ok { color:var(--ok); } .v.bad { color:var(--bad); } .v.acc { color:var(--acc); }
-  /* 筛选 tab */
+  /* silverq 特有布局：筛选 tab + 排行卡牌网格 */
   .tabs { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
-  .tab { background:var(--card); border:1px solid #232833; color:var(--dim); border-radius:16px;
-         padding:3px 14px; font-size:12px; cursor:pointer; user-select:none; }
-  .tab.on { background:#2a3b4d; color:var(--fg); border-color:var(--acc); }
+  .tab { background:var(--card); border:1px solid var(--line); color:var(--dim);
+         border-radius:var(--radius-pill); padding:3px 14px; font-size:var(--font-size-small);
+         cursor:pointer; user-select:none; }
+  .tab.on { background:var(--acc-soft); color:var(--fg); border-color:var(--acc); }
   .tab .n { color:var(--acc); margin-left:4px; }
-  /* 排行榜卡牌 */
   .leader { display:grid; grid-template-columns:repeat(auto-fill,minmax(215px,1fr)); gap:10px; }
-  .ncard { background:var(--card); border-radius:10px; padding:12px 14px; border:1px solid #232833;
+  .ncard { background:var(--card); border-radius:var(--radius-l); padding:12px 14px; border:1px solid var(--line);
            display:flex; flex-direction:column; gap:6px; }
   .ncard.primary { border-color:var(--ok); box-shadow:0 0 0 1px var(--ok); }
-  .ncard.cand { border-color:#2a3b4d; }
+  .ncard.cand { border-color:var(--acc-soft); }
   .ncard.dead { opacity:.5; }
   .ncard .top { display:flex; align-items:center; gap:6px; }
-  .ncard .rank { color:var(--dim); font-size:11px; min-width:22px; }
+  .ncard .rank { color:var(--dim); font-size:var(--font-size-tiny); min-width:22px; }
   .ncard .tag { font-family:ui-monospace,monospace; font-size:13px; overflow:hidden;
                 text-overflow:ellipsis; white-space:nowrap; flex:1; }
   .ncard .lat { font-size:26px; font-weight:600; letter-spacing:-.5px; }
-  .ncard .lat.ok { color:var(--ok); } .ncard .lat.bad { color:var(--bad); font-size:18px; }
+  .ncard .lat.ok { color:var(--ok); } .ncard .lat.warn { color:var(--warn); }
+  .ncard .lat.bad { color:var(--bad); font-size:18px; }
   .ncard .lat.dim { color:var(--dim); font-size:18px; }
   .ncard .lat .u { font-size:12px; color:var(--dim); font-weight:400; margin-left:2px; }
-  .bar { height:4px; background:#232833; border-radius:2px; }
-  .bar i { display:block; height:100%; background:var(--acc); border-radius:2px; }
-  .ncard .meta { display:flex; gap:10px; color:var(--dim); font-size:11px; flex-wrap:wrap; }
+  .ncard canvas { width:100%; height:34px; }
+  .ncard .meta { display:flex; gap:10px; color:var(--dim); font-size:var(--font-size-tiny); flex-wrap:wrap; }
   .ncard .meta b { color:var(--fg); font-weight:500; }
   .ncard .meta .f { color:var(--bad); }
-  .ncard button { align-self:flex-start; background:#2a3b4d; color:var(--acc); border:0;
-                  border-radius:4px; padding:2px 10px; cursor:pointer; font-size:11px; }
-  .ncard button:hover { background:#36506b; }
-  .ncard button.pin { background:#4a3b20; color:var(--warn); }
-  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; }
-  .b-primary { background:var(--ok); color:#000; }
-  .b-active { background:#2a3b4d; color:var(--acc); }
-  .b-dead { background:#3a2528; color:var(--bad); }
-  .b-unmeasured { background:#2e2e38; color:var(--dim); }
-  .b-ok { background:#1f3328; color:var(--ok); }
-  #err { color:var(--bad); font-size:12px; margin:8px 0; min-height:16px; }
+  .ncard .actions { align-self:flex-start; }
+  /* 调度进度条所在行 */
+  .round-line { display:flex; align-items:center; gap:10px; margin-bottom:20px; }
+  .round-line .bar { flex:1; }
+  .round-line .txt { color:var(--dim); font-size:var(--font-size-small); white-space:nowrap; }
 </style>
 </head>
 <body>
@@ -64,8 +51,14 @@
   <div class="card"><div class="k">健康度</div><div class="v" id="health">—</div></div>
   <div class="card"><div class="k">模式</div><div class="v" id="mode">—</div></div>
 </div>
+<div class="round-line">
+  <div class="bar"><i id="rbar" style="width:0%"></i></div>
+  <span class="txt" id="rtxt">—</span>
+</div>
 <div class="tabs" id="tabs"></div>
 <div class="leader" id="leader"></div>
+<script src="/charts.js"></script>
+<script src="/panel.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 // ewma 是纯实测延迟（毫秒，经该节点请求 gstatic 的往返），不是抽象分数；
@@ -84,12 +77,6 @@ function renderTabs(d) {
   ).join('');
 }
 function setFilter(f) { filter = f; refresh(); }
-function ageOf(secs) {
-  if (secs === undefined) return '';
-  if (secs >= 3600) return Math.floor(secs / 3600) + 'h 前';
-  if (secs >= 120) return Math.floor(secs / 60) + 'm 前';
-  return secs + 's 前';
-}
 async function refresh() {
   try {
     const r = await fetch('/api/status');
@@ -111,6 +98,15 @@ async function refresh() {
     $('mode').innerHTML = d.pinned
       ? '<span class="badge b-dead">已钉住</span>'
       : '<span class="badge b-ok">自动</span>';
+    // 调度进度：第几轮 / 批进度 / 上轮耗时 / 数据新鲜度
+    const p = d.progress;
+    if (p && p.batches_total > 0) {
+      $('rbar').style.width = Math.min(100, p.batches_done / p.batches_total * 100).toFixed(0) + '%';
+      $('rtxt').textContent =
+        `第 ${p.round} 轮 ${p.batches_done}/${p.batches_total} 批`
+        + (p.last_round_secs ? ` · 上轮 ${p.last_round_secs}s` : '')
+        + ` · 最近批 ${UKPanel.fmtAgo(p.last_batch_ago_secs)}`;
+    }
     renderTabs(d);
 
     const shown = d.nodes.filter(n =>
@@ -120,35 +116,42 @@ async function refresh() {
       : (n.ewma === null && !n.probed));
     // 全局排名号：用全部节点里的原始位置
     const globalRank = new Map(d.nodes.map((n, i) => [n.tag, i + 1]));
-    const maxEwma = Math.max(...alive.map(n => n.ewma), 1);
     $('leader').innerHTML = shown.map(n => {
       const rank = globalRank.get(n.tag);
-      let lat, badge, cls = '';
+      let badge, cls = '', tier = 'dim';
       if (n.ewma === null) {
         badge = n.probed ? '<span class="badge b-dead">不可用</span>'
                          : '<span class="badge b-unmeasured">待测</span>';
-        lat = n.probed ? '<span class="lat bad">不可用</span>' : '<span class="lat dim">待测</span>';
         cls = 'dead';
       } else {
+        tier = UKPanel.latencyTier(n.ewma);
         badge = n.failures > 0
           ? `<span class="badge b-dead">失败 ${n.failures} 次</span>`
           : n.primary ? '<span class="badge b-primary">首选</span>'
           : n.active ? '<span class="badge b-active">候选</span>'
           : '<span class="badge b-ok">正常</span>';
-        lat = `<span class="lat ok">${n.ewma}<span class="u">ms</span></span>`;
         cls = n.primary ? 'primary' : (n.active ? 'cand' : '');
       }
-      const bar = n.ewma !== null
-        ? `<div class="bar"><i style="width:${Math.max(4, 100 - n.ewma / maxEwma * 100).toFixed(0)}%"></i></div>` : '';
+      const lat = n.ewma === null
+        ? (n.probed ? '<span class="lat bad">不可用</span>' : '<span class="lat dim">待测</span>')
+        : `<span class="lat ${tier}">${n.ewma}<span class="u">ms</span></span>`;
       const btn = n.primary ? '' :
-        `<button onclick="pick('${n.tag.replace(/'/g,"")}')" class="${n.active ? '' : 'pin'}">${n.active ? '移到首选' : '钉住'}</button>`;
+        `<button onclick="pick('${n.tag.replace(/'/g,"")}')" class="btn ${n.active ? '' : 'warn'}">${n.active ? '移到首选' : '钉住'}</button>`;
+      const spark = n.ewma !== null ? `<canvas data-spark="${n.tag.replace(/"/g,'')}"></canvas>` : '';
       return `<div class="ncard ${cls}">
         <div class="top"><span class="rank">#${rank}</span><span class="tag" title="${n.tag}">${n.tag}</span>${badge}</div>
-        ${lat}${bar}
-        <div class="meta"><span>样本 <b>${n.samples}</b></span>${n.failures ? `<span class="f">失败 <b>${n.failures}</b></span>` : ''}${n.probed ? `<span>${ageOf(n.last_probe_secs)}</span>` : ''}</div>
-        ${btn}
+        ${lat}${spark}
+        <div class="meta"><span>样本 <b>${n.samples}</b></span>${n.failures ? `<span class="f">失败 <b>${n.failures}</b></span>` : ''}${n.probed ? `<span>${UKPanel.fmtAgo(n.last_probe_secs)}</span>` : ''}</div>
+        <div class="actions">${btn}</div>
       </div>`;
     }).join('');
+    // 历史曲线：EWMA 时序（/api/status 的 history 字段），800ms 基线以上整线转警示色
+    document.querySelectorAll('canvas[data-spark]').forEach(c => {
+      const n = d.nodes.find(x => x.tag === c.dataset.spark);
+      if (n && n.history.length) {
+        UKCharts.sparkline(c, n.history.map(h => h[1]), { baseline: 800 });
+      }
+    });
   } catch (e) { $('err').textContent = '刷新失败: ' + e; }
 }
 async function pick(tag) {

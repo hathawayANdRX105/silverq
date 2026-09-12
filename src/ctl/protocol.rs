@@ -51,6 +51,9 @@ pub struct CtlState {
     pub ui_dir: String,
     /// tag -> 协议名（clash_api /proxies 的 type 字段；reload 时重建）
     pub protocols: Mutex<std::collections::HashMap<String, String>>,
+    /// 调度进度（schedule_loop 写、web 面板读；与调度循环共享同一 Arc）
+    #[cfg_attr(not(feature = "meow"), allow(dead_code))] // 仅 meow 的 web 模块读
+    pub progress: Arc<crate::scheduler::SchedulerProgress>,
 }
 
 impl CtlState {
@@ -67,6 +70,7 @@ impl CtlState {
         probe_url: String,
         ui_dir: String,
         protocols: std::collections::HashMap<String, String>,
+        progress: Arc<crate::scheduler::SchedulerProgress>,
     ) -> Self {
         Self {
             registry,
@@ -79,6 +83,7 @@ impl CtlState {
             probe_url,
             ui_dir,
             protocols: Mutex::new(protocols),
+            progress,
         }
     }
 
@@ -94,6 +99,7 @@ impl CtlState {
         probe_url: String,
         ui_dir: String,
         protocols: std::collections::HashMap<String, String>,
+        progress: Arc<crate::scheduler::SchedulerProgress>,
     ) -> Self {
         Self {
             pool,
@@ -105,6 +111,7 @@ impl CtlState {
             probe_url,
             ui_dir,
             protocols: Mutex::new(protocols),
+            progress,
         }
     }
 }

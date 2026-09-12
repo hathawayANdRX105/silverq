@@ -137,11 +137,33 @@ struct NodeJson<'a> {
 }
 
 #[derive(Debug, Serialize)]
+struct ProgressJson {
+    /// 第几轮测速（从 1 起）
+    round: u64,
+    batches_done: u64,
+    batches_total: u64,
+    /// 上一整轮耗时（秒）；0 = 首轮还没跑完
+    last_round_secs: u64,
+    /// 距最近一批完成多少秒
+    last_batch_ago_secs: u64,
+}
+
+#[derive(Debug, Serialize)]
 struct StatusJson<'a> {
     pinned: bool,
     nodes_path: &'a str,
     selection: &'a [String],
     nodes: Vec<NodeJson<'a>>,
+    progress: ProgressJson,
+}
+
+fn css_response(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/css; charset=utf-8\r\n\
+         Content-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
 }
 
 fn json_response(status: u16, body: &str) -> String {
@@ -204,11 +226,37 @@ async fn status_json(state: &CtlState) -> String {
         })
         .collect();
 
+    // 距最近一批的秒数：时钟回拨时 worst-case 显示为 0，可接受
+    let now = persist::now_secs() as i64;
+    let last_ts = state
+        .progress
+        .last_batch_ts
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let progress = ProgressJson {
+        round: state
+            .progress
+            .round
+            .load(std::sync::atomic::Ordering::Relaxed),
+        batches_done: state
+            .progress
+            .batches_done
+            .load(std::sync::atomic::Ordering::Relaxed),
+        batches_total: state
+            .progress
+            .round_batches
+            .load(std::sync::atomic::Ordering::Relaxed),
+        last_round_secs: state
+            .progress
+            .last_round_secs
+            .load(std::sync::atomic::Ordering::Relaxed),
+        last_batch_ago_secs: (now - last_ts).max(0) as u64,
+    };
     let payload = StatusJson {
         pinned,
         nodes_path: &nodes_path,
         selection: &selection,
         nodes: nodes_json,
+        progress,
     };
     serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into())
 }
@@ -227,6 +275,10 @@ async fn handle_request(buf: &[u8], state: &CtlState) -> Option<String> {
 
     match (method, path) {
         ("GET", "/") => Some(html_response(DASHBOARD_HTML)),
+        ("GET", "/tokens.css") => Some(css_response(include_str!("uikit/tokens.css"))),
+        ("GET", "/base.css") => Some(css_response(include_str!("uikit/base.css"))),
+        ("GET", "/charts.js") => Some(js_response(include_str!("uikit/charts.js"))),
+        ("GET", "/panel.js") => Some(js_response(include_str!("uikit/panel.js"))),
         ("GET", "/api/status") => Some(json_response(200, &status_json(state).await)),
         ("GET", "/api/health") => Some(json_response(200, "{\"ok\":true}")),
         ("POST", "/api/select") => {
@@ -606,6 +658,7 @@ pub async fn run(
 }
 
 use crate::scheduler::node::Node;
+use crate::scheduler::persist;
 
 /// serve index.html 时注入引导脚本：zashboard 的后端列表为空时，自动跳到
 /// `?hostname=&port=` 参数地址 —— 它解析后自动落到 proxies 页，用户零输入。
