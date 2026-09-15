@@ -14,6 +14,7 @@ pub enum Cmd {
     Reload {
         nodes: Option<String>,
     },
+    ConfigReload,
     Select {
         tag: String,
     },
@@ -27,6 +28,7 @@ impl Cmd {
                 Some(p) => format!("reload {p}"),
                 None => "reload".into(),
             },
+            Cmd::ConfigReload => "config-reload".into(),
             Cmd::Select { tag } => format!("select {tag}"),
             Cmd::Status => "status".into(),
             Cmd::Serve { .. } => unreachable!("serve 不走 ctl"),
@@ -56,6 +58,7 @@ pub fn parse() -> Cmd {
         Some("reload") => Cmd::Reload {
             nodes: args.get(1).cloned(),
         },
+        Some("config-reload") => Cmd::ConfigReload,
         Some("status") => Cmd::Status,
         Some("select") => match args.get(1) {
             Some(tag) => Cmd::Select { tag: tag.clone() },

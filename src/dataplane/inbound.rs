@@ -42,10 +42,12 @@ impl DialTuning {
 pub type SharedTuning = crate::ctl::SharedTuning;
 
 impl DialTuning {
-    /// dial 单个候选的超时：测速超时的 2 倍。
-    /// 测速能过说明建连一般在测速超时内完成，留 2 倍余量给抖动。
+    /// dial 单个候选的超时：与测速超时等值。
+    /// 早先是 ×2（"留余量给抖动"），但 probe 放宽到 4s 后 ×2 = 8s：
+    /// 浏览器每个死候选烧 8s 学费，fallback×3 最坏 24s —— 保命余量
+    /// 不该以交互延迟为代价，改成等值（TCP+TLS 正常 <1s 内完成）。
     pub fn dial(&self) -> Duration {
-        Duration::from_millis(self.timeout_ms * 2)
+        Duration::from_millis(self.timeout_ms)
     }
 
     /// 建连后等对端首次响应的超时：测速超时的 4 倍。

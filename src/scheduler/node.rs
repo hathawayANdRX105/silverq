@@ -36,9 +36,10 @@ pub struct Node {
     /// 排序惩罚放在 `score()` 里算，不写回 `ewma`，所以恢复是瞬时的：
     /// 一次成功测速立刻回到真实延迟排序，不需要多轮把膨胀分数"洗"回来。
     pub consecutive_failures: u32,
-    /// Number of samples seen
+    /// 本轮连续失败的起始时刻（第一次失败时置位，成功即清除）。
+    /// 淘汰机制的时间指标从它算起：曾存活过的节点连续失败满保活时长才摘。
+    pub failing_since: Option<Instant>,
     pub samples: u32,
-    /// Last measurement timestamp
     pub last_measured: Option<Instant>,
     /// Rolling window of recent delay measurements (for adaptive alpha)
     recent: VecDeque<f64>,
@@ -65,6 +66,7 @@ impl Node {
             port,
             ewma: f64::INFINITY,
             consecutive_failures: 0,
+            failing_since: None,
             samples: 0,
             last_measured: None,
             recent: VecDeque::with_capacity(EWMA_WINDOW),
@@ -77,8 +79,8 @@ impl Node {
     /// No external alpha is required.
     pub fn update(&mut self, delay_ms: f64) {
         self.consecutive_failures = 0;
+        self.failing_since = None;
         self.push_history(delay_ms);
-
         if self.samples == 0 {
             self.ewma = delay_ms;
             self.recent.push_back(delay_ms);
@@ -143,6 +145,9 @@ impl Node {
     /// 记一次测速失败。只累计次数，不动 `ewma`。
     pub fn penalize(&mut self) {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if self.failing_since.is_none() {
+            self.failing_since = Some(Instant::now());
+        }
         self.last_measured = Some(Instant::now());
     }
 
@@ -175,8 +180,8 @@ impl Node {
 
     /// 从另一个 Node 接管 EWMA 状态（配置热加载时保留分数）。
     pub fn adopt_score(&mut self, other: &Node) {
-        self.ewma = other.ewma;
         self.consecutive_failures = other.consecutive_failures;
+        self.failing_since = other.failing_since;
         self.samples = other.samples;
         self.last_measured = other.last_measured;
         self.recent = other.recent.clone();

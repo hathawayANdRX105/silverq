@@ -1,6 +1,7 @@
 use silverq::scheduler::batch::Measurement;
 use silverq::scheduler::fast_path::*;
 use silverq::scheduler::node::Node;
+use std::time::Instant;
 
 fn node(tag: &str) -> Node {
     Node::new(tag, "127.0.0.1", 443)
@@ -113,4 +114,118 @@ fn penalty_never_pollutes_measured_latency_and_recovers_instantly() {
         pool[0].ewma
     );
     assert_eq!(pool[0].consecutive_failures, 0);
+}
+
+/// 两级 pipeline：次数硬指标 + 时间延长保活。
+/// samples==0 僵尸达到次数阈值即摘；曾通过的保活期内保留，期满才摘。
+#[test]
+fn retire_pipeline_two_levels() {
+    let mut pool = vec![node("zombie"), node("tried"), node("healthy")];
+    // zombie: 从未成功 + 连续失败 5 次
+    let zs: Vec<Measurement> = (0..5).map(|_| timeout("zombie")).collect();
+    apply_batch(&mut pool, &zs);
+    // tried: 曾成功 2 次 + 连续失败 5 次（临时故障形态）
+    let ts: Vec<Measurement> = [ok("tried", 100.0), ok("tried", 110.0)]
+        .into_iter()
+        .chain((0..5).map(|_| timeout("tried")))
+        .collect();
+    apply_batch(&mut pool, &ts);
+    // healthy: 正常
+    apply_batch(&mut pool, &[ok("healthy", 50.0)]);
+
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0);
+    let tags: Vec<&str> = pool.iter().map(|n| n.tag.as_str()).collect();
+    // zombie(5次失败,从未通过) 被摘; tried(5次失败,曾通过) 在保活期内保留
+    assert_eq!(tags, vec!["tried", "healthy"], "僵尸摘、曾通过的保活");
+    assert_eq!(retired, vec!["zombie"]);
+}
+
+/// 曾通过的节点连续失败持续满保活时长后才摘（时间指标）。
+#[test]
+fn retire_tried_node_after_keep_alive_expires() {
+    let mut pool = vec![node("old-tried")];
+    let oks: Vec<Measurement> = (0..3).map(|_| ok("old-tried", 90.0)).collect();
+    apply_batch(&mut pool, &oks);
+    let tos: Vec<Measurement> = (0..6).map(|_| timeout("old-tried")).collect();
+    apply_batch(&mut pool, &tos);
+    // 手动把 failing_since 拨回 2 小时前
+    pool[0].failing_since = Some(Instant::now() - std::time::Duration::from_secs(7200));
+
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0);
+    assert_eq!(retired, vec!["old-tried"], "保活期满，摘除");
+    assert!(pool.is_empty());
+}
+
+/// 保活期内（< keep_alive）曾通过的节点不摘。
+#[test]
+fn retire_tried_node_kept_within_keep_alive() {
+    let mut pool = vec![node("new-tried")];
+    let oks: Vec<Measurement> = (0..3).map(|_| ok("new-tried", 90.0)).collect();
+    apply_batch(&mut pool, &oks);
+    let tos: Vec<Measurement> = (0..6).map(|_| timeout("new-tried")).collect();
+    apply_batch(&mut pool, &tos);
+    pool[0].failing_since = Some(Instant::now() - std::time::Duration::from_secs(600)); // 10 分钟
+
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0);
+    assert!(retired.is_empty(), "保活期内保留");
+    assert_eq!(pool.len(), 1);
+}
+
+/// max_failures == 0 = 禁用（面板热调开关）。
+#[test]
+fn retire_disabled_at_zero() {
+    let mut pool = vec![node("zombie")];
+    let zs: Vec<Measurement> = (0..9).map(|_| timeout("zombie")).collect();
+    apply_batch(&mut pool, &zs);
+    let retired = retire_stale(&mut pool, 0, std::time::Duration::from_secs(3600), 0);
+    assert!(retired.is_empty());
+    assert_eq!(pool.len(), 1);
+}
+
+/// 连续失败未达阈值的不摘 —— 阈值就是保命宽限。
+#[test]
+fn retire_respects_threshold_grace() {
+    let mut pool = vec![node("fresh-dead")];
+    let ds: Vec<Measurement> = (0..2).map(|_| timeout("fresh-dead")).collect();
+    apply_batch(&mut pool, &ds);
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0);
+    assert!(retired.is_empty());
+    assert_eq!(pool.len(), 1);
+}
+
+/// 淘汰地板：摘除后池子不得低于 min_pool，回填最可能活的
+/// （连续失败次数少者优先，其次 samples 多者优先）。
+#[test]
+fn retire_floor_backfills_best_candidates() {
+    let mut pool = vec![node("zombie-a"), node("zombie-b"), node("was-alive")];
+    let za: Vec<Measurement> = (0..9).map(|_| timeout("zombie-a")).collect();
+    apply_batch(&mut pool, &za);
+    let zb: Vec<Measurement> = (0..9).map(|_| timeout("zombie-b")).collect();
+    apply_batch(&mut pool, &zb);
+    // 曾通过 42 次 + 连续失败 9 次；keep_alive=0 让它进 retired 候选
+    let wa: Vec<Measurement> = (0..42)
+        .map(|_| ok("was-alive", 100.0))
+        .chain((0..9).map(|_| timeout("was-alive")))
+        .collect();
+    apply_batch(&mut pool, &wa);
+
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(0), 2);
+    let tags: Vec<&str> = pool.iter().map(|n| n.tag.as_str()).collect();
+    assert_eq!(pool.len(), 2, "回填到地板: {tags:?}");
+    assert!(
+        tags.contains(&"was-alive"),
+        "samples 最多的被回填: {tags:?}"
+    );
+    assert_eq!(retired, vec!["zombie-b".to_string()]);
+}
+
+/// 地板 ≥ 池大小时一个不摘（全黑防线）。
+#[test]
+fn retire_floor_keeps_everything_when_large() {
+    let mut pool = vec![node("zombie")];
+    let zs: Vec<Measurement> = (0..5).map(|_| timeout("zombie")).collect();
+    apply_batch(&mut pool, &zs);
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(0), 10);
+    assert_eq!(pool.len(), 1);
+    assert!(retired.is_empty());
 }

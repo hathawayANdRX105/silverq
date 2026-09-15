@@ -21,8 +21,8 @@ fn dial_timeouts_derive_from_configured_timeout() {
     };
     assert_eq!(
         t.dial(),
-        std::time::Duration::from_millis(5000),
-        "dial = 2x"
+        std::time::Duration::from_millis(2500),
+        "dial = 1x"
     );
     assert_eq!(
         t.first_response(),
@@ -35,7 +35,8 @@ fn dial_timeouts_derive_from_configured_timeout() {
         timeout_ms: 4000,
         fallback_attempts: 1,
     };
-    assert_eq!(t2.dial(), std::time::Duration::from_millis(8000));
+    assert_eq!(t2.dial(), std::time::Duration::from_millis(4000));
+
     assert_eq!(
         t2.first_response(),
         std::time::Duration::from_millis(16_000)

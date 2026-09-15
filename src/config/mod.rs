@@ -10,10 +10,14 @@ pub mod settings;
 
 pub const DEFAULT_BATCH_SIZE: usize = 5;
 pub const DEFAULT_CONCURRENCY: usize = 6;
-pub const DEFAULT_TIMEOUT_MS: u64 = 2000;
+pub const DEFAULT_TIMEOUT_MS: u64 = 4000;
 pub const DEFAULT_TIMEOUT_PENALTY: f64 = 3000.0;
 pub const DEFAULT_SLOW_INTERVAL_SECS: u64 = 30;
 pub const DEFAULT_ACTIVE_CAPACITY: usize = 5;
+pub const DEFAULT_RETIRE_MAX_FAILURES: u32 = 5;
+pub const DEFAULT_RETIRE_KEEP_ALIVE_SECS: u64 = 3600;
+/// 淘汰地板：池子低于该数时不再摘（摘到 0 = 全黑，留着还有自愈机会）。
+pub const DEFAULT_RETIRE_MIN_POOL: usize = 10;
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:17321";
 
 /// gstatic generate_204：无 body、稳定，适合做延迟探测。

@@ -23,6 +23,12 @@ concurrency = 20
 timeout_penalty = 3000.0
 # 探测 URL（generate_204 风格）
 probe_url = "https://www.gstatic.com/generate_204"
+# 节点淘汰（双指标）：连续失败 ≥ max_failures 触发检查——
+# 从未测通的立即摘；曾测通过的保活满 keep_alive_secs 才摘。成功一次即复活。0 = 禁用。
+retire_max_failures = 5
+retire_keep_alive_secs = 3600
+# 淘汰地板：摘除后池子不得低于该数（防全黑）。0 = 无地板。
+retire_min_pool = 10
 
 [data_plane]
 # 监听地址（SOCKS5 / HTTP-CONNECT 混合）

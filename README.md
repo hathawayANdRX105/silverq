@@ -32,7 +32,7 @@ select_top(N)  纯 EWMA 取前 N（无迟滞轮次）
 - **分批并发**：节点池按当前排名分批测速，`buffer_unordered(concurrency)`，不阻塞在最慢节点。
 - **快慢分离**：测速（周期全池离线）与切换（只读已算好的 EWMA）完全解耦，卡顿隔离。
 - **超时扣分后移**：死/慢节点拿不到前排。
-- **切换=selector**：silverq 自己就是 selector；meow 只负责连接。
+- **节点淘汰（pipeline 双指标）**：连续失败 ≥ `retire_max_failures`（默认 5）触发检查——从未测通的节点立即摘除（从未通过真实握手不会自愈）；曾测通过的进入延长保活，连续失败连续满 `retire_keep_alive_secs`（默认 3600s）才摘。期间成功一次即复活。可面板热改 + `silverq config-reload` 重读配置。
 
 ## 使用
 
