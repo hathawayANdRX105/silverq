@@ -183,6 +183,21 @@ ui_dir = "~/.local/share/silverq/ui"   # zashboard 静态目录
 
 ## TUN 手动测试
 
+### 直连 fallback（防断网）
+
+v0.2.0 给 TUN 数据面加了两层 DIRECT 兜底，避免节点挂掉时连本地网关 / DNS 都打不通：
+
+1. **私网 + 用户排除 CIDR 自动走 DIRECT** —— 规则表首部固定注入 5 段私网
+   （`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`127.0.0.0/8`、`169.254.0.0/16`），
+   再叠加配置里 `[tun].exclude_cidrs` 的条目，全部 `→ DIRECT`，先于末尾的
+   `silverq-auto` FinalRule 命中。非法 CIDR 逐条 `warn` 跳过，不阻断启动。
+2. **节点 dial 失败自动回退 DIRECT** —— `silverq-auto` 包装的主出口若 `dial_tcp` /
+   `dial_udp` 出错，自动改走共享的 DIRECT 适配器，而不是把错误透传给上层连接。
+
+Private networks and user `[tun].exclude_cidrs` always route to DIRECT; when the
+selected node fails to dial, `silverq-auto` transparently falls back to DIRECT
+instead of propagating the error.
+
 TUN 设备创建需要 root 或 `CAP_NET_ADMIN`，所以这类 smoke 测试标了 `#[ignore]`、
 **不进 CI**（runner 无 root）。CI 只覆盖 `src/tun.rs` 里的纯逻辑单测：
 `TunConfig::from_effective` 字段映射、`ProxyWrapper` 的 Proxy 桩与 `ProxyAdapter` 委托、
