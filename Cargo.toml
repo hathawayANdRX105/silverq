@@ -65,7 +65,7 @@ version = "2"
 optional = true
 
 [dependencies.smol_str]
-version = "0.1"
+version = "0.3"
 optional = true
 
 [features]
