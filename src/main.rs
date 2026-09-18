@@ -226,7 +226,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             // 7. TUN 透明代理（feature meow-tun）
             #[cfg(all(feature = "meow", feature = "meow-listener"))]
             let tun_task = if eff.tun_enabled {
-                let tun_config = crate::dataplane::tun::TunConfig::from_effective(&eff);
+                let tun_config = crate::tun::TunConfig::from_effective(&eff);
                 let tun_sel = selection.clone();
                 let tun_reg = registry.clone();
                 let tun_nodes = {
@@ -234,9 +234,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
                     guard.clone()
                 };
                 Some(tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::dataplane::tun::run(tun_config, tun_reg, tun_sel, tun_nodes).await
-                    {
+                    if let Err(e) = crate::tun::run(tun_config, tun_reg, tun_sel, tun_nodes).await {
                         tracing::error!("TUN exited: {e}");
                     }
                 }))
