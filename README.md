@@ -181,6 +181,24 @@ ui_dir = "~/.local/share/silverq/ui"   # zashboard 静态目录
 两种 feature 都进矩阵的原因：meow 关掉时走 `NoopMeasurer`，是独立编译路径，
 只测一种会漏掉 `cfg` 分支里的错误。
 
+## TUN 手动测试
+
+TUN 设备创建需要 root 或 `CAP_NET_ADMIN`，所以这类 smoke 测试标了 `#[ignore]`、
+**不进 CI**（runner 无 root）。CI 只覆盖 `src/tun.rs` 里的纯逻辑单测：
+`TunConfig::from_effective` 字段映射、`ProxyWrapper` 的 Proxy 桩与 `ProxyAdapter` 委托、
+`run` 拒绝非法 `fake_ip_cidr`，以及 `init_rules` / `sync_proxies`（经
+`meow_tunnel::Tunnel::route_snapshot()` 公开 getter 验证，无需真建设备）。
+
+本地手动跑（silverq 是 bin-only crate，这些 smoke 测试放在 `src/tun.rs` 的
+`#[cfg(test)]` 模块内，而非 `tests/` 集成测试 —— 后者拿不到 `tun::run`）：
+
+```bash
+sudo cargo test --features meow-tun --bin silverq -- --ignored --test-threads=1
+```
+
+会真的尝试创建 TUN 设备（`auto_route=false`，不动宿主路由表）。有 root 才能真正建出
+设备并阻塞运行；无 root 时 `run` 会快速返回错误而非挂死 —— 这两种情况 smoke 都算过。
+
 ## License
 
 MIT
