@@ -221,12 +221,8 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
                 let tun_config = tun::TunConfig::from_effective(&eff);
                 let tun_sel = selection.clone();
                 let tun_reg = registry.clone();
-                let tun_nodes = {
-                    let guard = pool.read().await;
-                    guard.clone()
-                };
                 Some(tokio::spawn(async move {
-                    if let Err(e) = tun::run(tun_config, tun_reg, tun_sel, tun_nodes).await {
+                    if let Err(e) = tun::run(tun_config, tun_reg, tun_sel).await {
                         tracing::error!("TUN exited: {e}");
                     }
                 }))

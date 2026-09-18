@@ -7,7 +7,7 @@
 
 use crate::config::settings::Effective;
 use crate::proxy::meow::Registry;
-use crate::scheduler::node::Node;
+
 use meow_common::{
     AdapterType, DelayHistory, DnsMode, Metadata, Proxy, ProxyAdapter, ProxyConn, ProxyHealth,
     ProxyPacketConn, TunnelMode,
@@ -142,8 +142,10 @@ struct TunRuntime {
     tunnel: Tunnel,
     registry: Registry,
     selection: SharedSelection,
-    /// 当前已注册到 Tunnel 的 "silverq-auto" proxy 对应的 tag
-    current_auto_tag: RwLock<Option<String>>,
+    /// 当前已注册到 Tunnel 的 "silverq-auto"：tag + 注册时使用的 adapter。
+    /// reload 会重建同 tag 的 adapter（新 Arc），光比 tag 发现不了 →
+    /// TUN 出口会僵在旧配置上，热加载失效（见 sync_proxies）。
+    current_auto: RwLock<Option<(String, Arc<dyn ProxyAdapter>)>>,
     /// 共享的 DIRECT 适配器：既作为 "silverq-auto" 的 dial 兜底，
     /// 又作为 "DIRECT" 注册进 Tunnel 供私网 / 用户排除 CIDR 规则路由。
     /// 单实例（Arc 共享），避免重复建 DirectAdapter。
@@ -195,53 +197,71 @@ impl TunRuntime {
             tunnel,
             registry,
             selection,
-            current_auto_tag: RwLock::new(None),
+            current_auto: RwLock::new(None),
             direct,
             exclude_cidrs,
         })
     }
 
-    /// 同步 "silverq-auto" proxy 到 Tunnel：从 registry 读取当前 selection 的第一个 adapter，更新 Tunnel 的 proxies map
+    /// 同步 "silverq-auto" 到 Tunnel：取 selection 首个节点，与上次注册的
+    /// (tag, adapter) 比较，变了才重建 Tunnel 的 proxies map。
     async fn sync_proxies(&self) {
         let selection = self.selection.read().await;
         let registry = self.registry.read();
 
         let new_tag = selection.first().cloned();
-        let mut current = self.current_auto_tag.write();
+        // registry 会因 reload 重建（同 tag 换新 Arc），所以期望状态要带上
+        // adapter 本身，不能只比 tag —— 否则 reload 后出口停在旧节点配置上。
+        let new = match new_tag.as_deref() {
+            Some(tag) => registry.get(tag).map(|a| (tag.to_string(), Arc::clone(a))),
+            None => None,
+        };
 
-        // 只有当 selection 的第一个节点变化时才更新
-        if *current != new_tag {
-            let mut proxies = HashMap::new();
+        let mut current = self.current_auto.write();
+        let needs_update = match (&*current, &new) {
+            (Some((old_tag, old_arc)), Some((new_tag, new_arc))) => {
+                old_tag != new_tag || !Arc::ptr_eq(old_arc, new_arc)
+            }
+            (None, None) => false,
+            _ => true,
+        };
+        if !needs_update {
+            return;
+        }
 
-            // 始终注册 "DIRECT"：既让私网 / 用户排除 CIDR 规则能按名路由，
-            // 又保证空 selection 时本地流量仍可达（防断网安全网）。
-            // 两字段都指向同一个共享 DirectAdapter（self.direct）。
-            let direct_wrapped = Arc::new(ProxyWrapper::new(
-                Arc::clone(&self.direct),
-                Arc::clone(&self.direct),
-            )) as Arc<dyn Proxy>;
-            proxies.insert(SmolStr::new("DIRECT"), direct_wrapped);
+        let mut proxies = HashMap::new();
 
-            if let Some(tag) = &new_tag {
-                if let Some(adapter) = registry.get(tag) {
-                    let wrapped = Arc::new(ProxyWrapper::new(
-                        Arc::clone(adapter),
-                        Arc::clone(&self.direct),
-                    )) as Arc<dyn Proxy>;
-                    proxies.insert(SmolStr::new("silverq-auto"), wrapped);
-                    *current = Some(tag.clone());
-                    info!(tag = %tag, "TUN silverq-auto proxy updated");
-                }
-            } else {
-                // 没有可用节点，清空 silverq-auto（DIRECT 仍保留在上面）
+        // 始终注册 "DIRECT"：既让私网 / 用户排除 CIDR 规则能按名路由，
+        // 又保证空 selection 时本地流量仍可达（防断网安全网）。
+        // 两字段都指向同一个共享 DirectAdapter（self.direct）。
+        let direct_wrapped = Arc::new(ProxyWrapper::new(
+            Arc::clone(&self.direct),
+            Arc::clone(&self.direct),
+        )) as Arc<dyn Proxy>;
+        proxies.insert(SmolStr::new("DIRECT"), direct_wrapped);
+
+        match new {
+            Some((tag, adapter)) => {
+                let wrapped = Arc::new(ProxyWrapper::new(
+                    Arc::clone(&adapter),
+                    Arc::clone(&self.direct),
+                )) as Arc<dyn Proxy>;
+                proxies.insert(SmolStr::new("silverq-auto"), wrapped);
+                info!(tag = %tag, "TUN silverq-auto proxy updated");
+                *current = Some((tag, adapter));
+            }
+            None => {
+                // 没有可用节点（空 selection，或 tag 尚未在 registry 里）：
+                // 移除 silverq-auto，只留 DIRECT。meow 的规则引擎对缺失的
+                // adapter 名自动回退 DIRECT，故 FinalRule 仍能放行流量。
                 *current = None;
                 info!("TUN silverq-auto proxy cleared (no available nodes)");
             }
-
-            drop(current);
-            // proxies 至少含 "DIRECT"，永不为空。
-            self.tunnel.update_proxies(proxies);
         }
+
+        drop(current);
+        // proxies 至少含 "DIRECT"，永不为空。
+        self.tunnel.update_proxies(proxies);
     }
 
     /// 初始化规则（首次启动时调用）
@@ -290,7 +310,6 @@ pub async fn run(
     config: TunConfig,
     registry: Registry,
     selection: SharedSelection,
-    _nodes: Vec<Node>,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(
         device = config.device.as_deref().unwrap_or("auto"),
@@ -319,7 +338,7 @@ pub async fn run(
 
     // 启动 proxies 同步任务（每 5 秒同步一次 selection 变化）
     let sync_runtime = Arc::clone(&runtime);
-    tokio::spawn(async move {
+    let sync_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             interval.tick().await;
@@ -358,7 +377,11 @@ pub async fn run(
         }
     });
 
-    listener.run().await
+    let result = listener.run().await;
+    // listener 退出后停掉同步循环：否则它会持着 Arc<TunRuntime>（连同
+    // tunnel / registry / selection）一直空跑到进程退出。
+    sync_task.abort();
+    result
 }
 
 #[cfg(test)]
@@ -466,14 +489,9 @@ mod tests {
             fake_ip_cidr: Some("not-a-cidr".into()),
             exclude_cidrs: vec![],
         };
-        let err = run(
-            config,
-            empty_registry(),
-            Arc::new(TokioRwLock::new(vec![])),
-            vec![],
-        )
-        .await
-        .unwrap_err();
+        let err = run(config, empty_registry(), Arc::new(TokioRwLock::new(vec![])))
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("invalid fake_ip_cidr"),
             "应报 invalid fake_ip_cidr，实际: {err}"
@@ -509,7 +527,7 @@ mod tests {
     #[tokio::test]
     async fn test_sync_proxies_updates_on_selection_change() {
         // registry 放一个 direct adapter，selection 指向它 → sync 应把它包成
-        // "silverq-auto" 注册进 Tunnel，并更新 current_auto_tag。
+        // "silverq-auto" 注册进 Tunnel，并更新 current_auto。
         let mut reg: HashMap<String, Arc<dyn ProxyAdapter>> = HashMap::new();
         reg.insert("direct-a".into(), Arc::new(DirectAdapter::new()));
         let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
@@ -527,11 +545,11 @@ mod tests {
             rt.tunnel.proxy("silverq-auto").is_some(),
             "sync 后应注册 silverq-auto"
         );
-        let tag_guard = rt.current_auto_tag.read();
+        let cur = rt.current_auto.read();
         assert_eq!(
-            *tag_guard,
-            Some("direct-a".to_string()),
-            "current_auto_tag 应记下当前 tag"
+            cur.as_ref().map(|(t, _)| t.as_str()),
+            Some("direct-a"),
+            "current_auto 应记下当前 tag"
         );
     }
 
@@ -561,9 +579,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_proxies_clears_tag_when_selection_empty() {
-        // 现有实现的取舍：空 selection 只清 current_auto_tag，并不调
-        // update_proxies 把 Tunnel 里旧的 silverq-auto 移除（proxies 为空时不更新）。
-        // 这里测的是当前行为，不是理想行为。
+        // 空 selection → 期望状态变 None：sync 会调 update_proxies 把 Tunnel 里的
+        // silverq-auto 移除（只留 DIRECT），meow 规则引擎对缺失 adapter 自动回退 DIRECT。
         let mut reg: HashMap<String, Arc<dyn ProxyAdapter>> = HashMap::new();
         reg.insert("direct-a".into(), Arc::new(DirectAdapter::new()));
         let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
@@ -578,16 +595,77 @@ mod tests {
         .expect("fake-ip pool init");
         rt.sync_proxies().await;
         {
-            let g = rt.current_auto_tag.read();
-            assert_eq!(*g, Some("direct-a".to_string()));
+            let cur = rt.current_auto.read();
+            assert_eq!(cur.as_ref().map(|(t, _)| t.as_str()), Some("direct-a"));
         }
 
         *selection.write().await = vec![];
         rt.sync_proxies().await;
         assert!(
-            rt.current_auto_tag.read().is_none(),
-            "空 selection 后 current_auto_tag 应被清空"
+            rt.current_auto.read().is_none(),
+            "空 selection 后 current_auto 应被清空"
         );
+        assert!(
+            rt.tunnel.proxy("silverq-auto").is_none(),
+            "空 selection 后 Tunnel 里的 silverq-auto 应被移除（回退 DIRECT）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_proxies_reloads_rebuilt_adapter() {
+        // reload 会用新 Arc 重建同 tag 的 adapter（ctl::do_reload 的行为）。
+        // 只比 tag 发现不了变化 → TUN 出口会僵在旧 adapter 上；sync 必须检测到
+        // 指针变化并重建路由表（snap2 != snap1）。
+        let reg: HashMap<String, Arc<dyn ProxyAdapter>> = [(
+            "direct-a".into(),
+            Arc::new(DirectAdapter::new()) as Arc<dyn ProxyAdapter>,
+        )]
+        .into_iter()
+        .collect();
+        let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
+        let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
+
+        let rt = TunRuntime::new(
+            registry.clone(),
+            selection,
+            Some("198.18.0.0/15".into()),
+            vec![],
+        )
+        .expect("fake-ip pool init");
+        rt.sync_proxies().await;
+        let snap1 = rt.tunnel.route_snapshot();
+
+        // 模拟 reload：同 tag 换一个新 adapter。
+        registry
+            .write()
+            .insert("direct-a".into(), Arc::new(DirectAdapter::new()));
+        rt.sync_proxies().await;
+        let snap2 = rt.tunnel.route_snapshot();
+
+        assert!(
+            !Arc::ptr_eq(&snap1, &snap2),
+            "reload 重建 adapter 后应重建 route table，不能僵在旧 adapter"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_proxies_skips_when_tag_missing_from_registry() {
+        // selection 指向 registry 里还没有的 tag（节点被移除 / 尚未构建）：
+        // 期望状态与当前都是 None → 跳过，不每 5s 空转重建路由表。
+        let registry: Registry = empty_registry();
+        let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["not-there".into()]));
+        let rt = TunRuntime::new(registry, selection, Some("198.18.0.0/15".into()), vec![])
+            .expect("fake-ip pool init");
+
+        rt.sync_proxies().await;
+        let snap1 = rt.tunnel.route_snapshot();
+        rt.sync_proxies().await;
+        let snap2 = rt.tunnel.route_snapshot();
+        assert!(
+            Arc::ptr_eq(&snap1, &snap2),
+            "tag 缺失时不应反复重建 route table"
+        );
+        assert!(rt.current_auto.read().is_none());
     }
 
     // ---- C: DIRECT fallback（v0.2.0 防断网安全网）----
@@ -743,8 +821,8 @@ mod tests {
     // 本地跑（CI 不跑 —— `#[ignore]`，且 runner 无 root）：
     //   sudo cargo test --features meow-tun --bin silverq -- --ignored --test-threads=1
     //
-    // silverq 是 bin-only crate（无 lib target），集成测试无法 import `tun::run`，
-    // 所以这几条 smoke 放在本模块内（同模块可直接调 `run`）。详见 README「TUN 手动测试」。
+    // 测试在 lib 里，但这些 smoke 需要直接调 `tun::run`（私有函数 + root 权限），
+    // 放在本模块内最直接（同模块可直接调 `run`）。详见 README「TUN 手动测试」。
 
     #[tokio::test]
     #[ignore]
@@ -759,13 +837,7 @@ mod tests {
             exclude_cidrs: vec![],
         };
         let mut handle = tokio::spawn(async move {
-            let _ = run(
-                config,
-                empty_registry(),
-                Arc::new(TokioRwLock::new(vec![])),
-                vec![],
-            )
-            .await;
+            let _ = run(config, empty_registry(), Arc::new(TokioRwLock::new(vec![]))).await;
         });
         tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -794,12 +866,7 @@ mod tests {
         };
         let res = tokio::time::timeout(
             Duration::from_secs(3),
-            run(
-                config,
-                empty_registry(),
-                Arc::new(TokioRwLock::new(vec![])),
-                vec![],
-            ),
+            run(config, empty_registry(), Arc::new(TokioRwLock::new(vec![]))),
         )
         .await;
         assert!(res.is_ok(), "run 应在 3s 内返回，而非永久挂起");
