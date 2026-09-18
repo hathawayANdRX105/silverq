@@ -14,6 +14,20 @@ pub const DEFAULT_SLOW_INTERVAL_SECS: u64 = 30;
 pub const DEFAULT_ACTIVE_CAPACITY: usize = 5;
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:17321";
 
+/// TUN 透明代理默认值。
+pub const DEFAULT_TUN_DEVICE: Option<&str> = None; // auto
+pub const DEFAULT_TUN_MTU: Option<u16> = None; // auto
+pub const DEFAULT_TUN_AUTO_ROUTE: bool = true;
+pub const DEFAULT_TUN_FAKE_IP_CIDR: &str = "198.18.0.0/15";
+pub const DEFAULT_TUN_DNS_PORT: u16 = 1053;
+pub const DEFAULT_TUN_EXCLUDE_CIDRS: &[&str] = &[
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+];
+
 /// gstatic generate_204：无 body、稳定，适合做延迟探测。
 /// 仅 meow feature 下用到（真实探测），默认模式的 NoopMeasurer 不发请求。
 #[cfg_attr(not(feature = "meow"), allow(dead_code))]

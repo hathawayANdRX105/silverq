@@ -38,9 +38,19 @@ optional = true
 # grpc/ws：ws 在 default features 里，grpc 要显式开，否则 grpc 节点接不了
 features = ["reality", "grpc"]
 
+[dependencies.meow-listener]
+version = "0.21"
+optional = true
+features = ["listener-tun"]
+
+[dependencies.meow-tunnel]
+version = "0.21"
+optional = true
+
 [features]
 default = []
 meow = ["meow-proxy", "meow-common", "meow-transport"]
+meow-tun = ["meow", "meow-listener", "meow-tunnel"]
 
 [dev-dependencies]
 tokio-test = "0.4"
