@@ -8,7 +8,10 @@
 use crate::meow::Registry;
 use crate::node::Node;
 use crate::settings::Effective;
-use meow_common::{AdapterType, DnsMode, DelayHistory, Metadata, Proxy, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn, Result as MeowResult, TunnelMode};
+use meow_common::{
+    AdapterType, DelayHistory, DnsMode, Metadata, Proxy, ProxyAdapter, ProxyConn, ProxyHealth,
+    ProxyPacketConn, TunnelMode,
+};
 use meow_dns::resolver::Resolver;
 use meow_listener::tun::{TunListener, TunListenerConfig, TunReady, TunRouteScope};
 use meow_rules::final_rule::FinalRule;
@@ -47,10 +50,10 @@ impl ProxyAdapter for ProxyWrapper {
     fn support_udp(&self) -> bool {
         self.inner.support_udp()
     }
-    async fn dial_tcp(&self, metadata: &Metadata) -> MeowResult<Box<dyn ProxyConn>> {
+    async fn dial_tcp(&self, metadata: &Metadata) -> meow_common::Result<Box<dyn ProxyConn>> {
         self.inner.dial_tcp(metadata).await
     }
-    async fn dial_udp(&self, metadata: &Metadata) -> MeowResult<Box<dyn ProxyPacketConn>> {
+    async fn dial_udp(&self, metadata: &Metadata) -> meow_common::Result<Box<dyn ProxyPacketConn>> {
         self.inner.dial_udp(metadata).await
     }
     fn health(&self) -> &ProxyHealth {
@@ -119,13 +122,18 @@ struct TunRuntime {
 }
 
 impl TunRuntime {
-    fn new(registry: Registry, selection: SharedSelection, _dns_port: u16, fake_ip_cidr: Option<String>) -> Self {
+    fn new(
+        registry: Registry,
+        selection: SharedSelection,
+        _dns_port: u16,
+        fake_ip_cidr: Option<String>,
+    ) -> Self {
         // 创建 DNS resolver（用于 fake-IP 模式）
         let fake_ip_range = fake_ip_cidr
             .as_deref()
             .and_then(|s| ipnet::Ipv4Net::from_str(s).ok())
             .unwrap_or_else(|| ipnet::Ipv4Net::new(Ipv4Addr::new(198, 18, 0, 0), 15).unwrap());
-        
+
         let resolver = Arc::new(Resolver::new(
             vec![], // upstream DNS（留空，后续可通过配置添加）
             vec![], // hosts
@@ -150,17 +158,18 @@ impl TunRuntime {
     async fn sync_proxies(&self) {
         let selection = self.selection.read().await;
         let registry = self.registry.read();
-        
+
         let new_tag = selection.first().cloned();
         let mut current = self.current_auto_tag.write();
-        
+
         // 只有当 selection 的第一个节点变化时才更新
         if *current != new_tag {
             let mut proxies = HashMap::new();
-            
+
             if let Some(tag) = &new_tag {
                 if let Some(adapter) = registry.get(tag) {
-                    let wrapped = Arc::new(ProxyWrapper::new(Arc::clone(adapter))) as Arc<dyn Proxy>;
+                    let wrapped =
+                        Arc::new(ProxyWrapper::new(Arc::clone(adapter))) as Arc<dyn Proxy>;
                     proxies.insert(SmolStr::new("silverq-auto"), wrapped);
                     *current = Some(tag.clone());
                     info!(tag = %tag, "TUN silverq-auto proxy updated");
@@ -170,7 +179,7 @@ impl TunRuntime {
                 *current = None;
                 info!("TUN silverq-auto proxy cleared (no available nodes)");
             }
-            
+
             drop(current);
             if !proxies.is_empty() {
                 self.tunnel.update_proxies(proxies);
@@ -182,9 +191,7 @@ impl TunRuntime {
     fn init_rules(&self) {
         // 简单规则：所有流量走 silverq-auto
         // 注意：不使用 GEOIP，避免依赖 GeoIP 数据库
-        let rules: Vec<Box<dyn meow_common::Rule>> = vec![
-            Box::new(FinalRule::new("silverq-auto")),
-        ];
+        let rules: Vec<Box<dyn meow_common::Rule>> = vec![Box::new(FinalRule::new("silverq-auto"))];
         self.tunnel.update_rules(rules);
     }
 }
@@ -203,7 +210,10 @@ pub async fn run(
     );
 
     // 解析 fake-ip CIDR
-    let fake_ip_cidr = config.fake_ip_cidr.clone().unwrap_or_else(|| "198.18.0.0/15".to_string());
+    let fake_ip_cidr = config
+        .fake_ip_cidr
+        .clone()
+        .unwrap_or_else(|| "198.18.0.0/15".to_string());
     let fake_ip_net = ipnet::Ipv4Net::from_str(&fake_ip_cidr)
         .map_err(|e| format!("invalid fake_ip_cidr: {e}"))?;
 
@@ -235,24 +245,28 @@ pub async fn run(
         inet4_address: fake_ip_net, // TUN 设备分配的 IP（在 fake-IP 范围内）
         auto_route: config.auto_route,
         route_scope: TunRouteScope::FakeIp, // 默认 fake-IP 模式，跨平台无环路
-        outbound_interface: None, // fake-IP 模式不需要
-        dns_hijack: true, // 劫持 UDP :53 到内置 DNS
+        outbound_interface: None,           // fake-IP 模式不需要
+        dns_hijack: true,                   // 劫持 UDP :53 到内置 DNS
         udp_timeout: Duration::from_secs(60),
         max_connections: 256,
     };
 
     // 创建并运行 TUN Listener
-    let listener = TunListener::new(runtime.tunnel.clone(), listener_config, "silverq-tun".to_string());
-    
+    let listener = TunListener::new(
+        runtime.tunnel.clone(),
+        listener_config,
+        "silverq-tun".to_string(),
+    );
+
     // 设置 readiness channel
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<TunReady>();
     let listener = listener.with_readiness_signal(ready_tx);
-    
+
     // 启动 listener（阻塞直到出错/取消）
     let run_result = listener.run().await;
-    
+
     // 等待 readiness 信号（如果 run 很快返回，也检查 readiness）
     let _ = ready_rx.await;
-    
+
     run_result
 }
