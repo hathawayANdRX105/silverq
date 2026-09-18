@@ -166,7 +166,10 @@ impl Default for TunSection {
             mtu: crate::config::DEFAULT_TUN_MTU,
             auto_route: crate::config::DEFAULT_TUN_AUTO_ROUTE,
             fake_ip_cidr: Some(crate::config::DEFAULT_TUN_FAKE_IP_CIDR.to_string()),
-            exclude_cidrs: crate::config::DEFAULT_TUN_EXCLUDE_CIDRS.iter().map(|s| s.to_string()).collect(),
+            exclude_cidrs: crate::config::DEFAULT_TUN_EXCLUDE_CIDRS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             dns_port: crate::config::DEFAULT_TUN_DNS_PORT,
         }
     }
@@ -210,19 +213,40 @@ pub struct Effective {
     pub ctl_sock: String,
     pub selector_store: String,
     // TUN 配置
-    #[cfg_attr(not(all(feature = "meow", feature = "meow-listener")), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "meow", feature = "meow-listener")),
+        allow(dead_code)
+    )]
     pub tun_enabled: bool,
-    #[cfg_attr(not(all(feature = "meow", feature = "meow-listener")), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "meow", feature = "meow-listener")),
+        allow(dead_code)
+    )]
     pub tun_device: Option<String>,
-    #[cfg_attr(not(all(feature = "meow", feature = "meow-listener")), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "meow", feature = "meow-listener")),
+        allow(dead_code)
+    )]
     pub tun_mtu: Option<u16>,
-    #[cfg_attr(not(all(feature = "meow", feature = "meow-listener")), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "meow", feature = "meow-listener")),
+        allow(dead_code)
+    )]
     pub tun_auto_route: bool,
-    #[cfg_attr(not(all(feature = "meow", feature = "meow-listener")), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "meow", feature = "meow-listener")),
+        allow(dead_code)
+    )]
     pub tun_fake_ip_cidr: Option<String>,
-    #[cfg_attr(not(all(feature = "meow", feature = "meow-listener")), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "meow", feature = "meow-listener")),
+        allow(dead_code)
+    )]
     pub tun_exclude_cidrs: Vec<String>,
-    #[cfg_attr(not(all(feature = "meow", feature = "meow-listener")), allow(dead_code))]
+    #[cfg_attr(
+        not(all(feature = "meow", feature = "meow-listener")),
+        allow(dead_code)
+    )]
     pub tun_dns_port: u16,
 }
 
@@ -320,13 +344,19 @@ impl Effective {
             selector_store: env_or("SILVERQ_SELECTOR_STORE", fc.paths.selector_store.clone()),
             // TUN 配置
             tun_enabled: env_parsed_or("SILVERQ_TUN_ENABLED", fc.tun.enabled),
-            tun_device: std::env::var("SILVERQ_TUN_DEVICE").ok().filter(|s| !s.is_empty()).or(fc.tun.device.clone()),
+            tun_device: std::env::var("SILVERQ_TUN_DEVICE")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or(fc.tun.device.clone()),
             tun_mtu: std::env::var("SILVERQ_TUN_MTU")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .or(fc.tun.mtu),
             tun_auto_route: env_parsed_or("SILVERQ_TUN_AUTO_ROUTE", fc.tun.auto_route),
-            tun_fake_ip_cidr: std::env::var("SILVERQ_TUN_FAKE_IP_CIDR").ok().filter(|s| !s.is_empty()).or(fc.tun.fake_ip_cidr.clone()),
+            tun_fake_ip_cidr: std::env::var("SILVERQ_TUN_FAKE_IP_CIDR")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or(fc.tun.fake_ip_cidr.clone()),
             tun_exclude_cidrs: std::env::var("SILVERQ_TUN_EXCLUDE_CIDRS")
                 .ok()
                 .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
