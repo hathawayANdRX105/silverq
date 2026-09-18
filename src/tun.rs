@@ -9,8 +9,8 @@ use crate::meow::Registry;
 use crate::node::Node;
 use crate::settings::Effective;
 use meow_common::{
-    AdapterType, DelayHistory, DnsMode, Metadata, Proxy, ProxyAdapter, ProxyConn, ProxyHealth,
-    ProxyPacketConn, Result, TunnelMode,
+    AdapterType, DelayHistory, DnsMode, MeowError, Metadata, Proxy, ProxyAdapter, ProxyConn,
+    ProxyHealth, ProxyPacketConn, TunnelMode,
 };
 use meow_dns::resolver::Resolver;
 use meow_listener::tun::{TunListener, TunListenerConfig, TunReady, TunRouteScope};
@@ -51,10 +51,10 @@ impl ProxyAdapter for ProxyWrapper {
     fn support_udp(&self) -> bool {
         self.inner.support_udp()
     }
-    async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
+    async fn dial_tcp(&self, metadata: &Metadata) -> meow_common::Result<Box<dyn ProxyConn>> {
         self.inner.dial_tcp(metadata).await
     }
-    async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
+    async fn dial_udp(&self, metadata: &Metadata) -> meow_common::Result<Box<dyn ProxyPacketConn>> {
         self.inner.dial_udp(metadata).await
     }
     fn health(&self) -> &ProxyHealth {
@@ -203,7 +203,7 @@ pub async fn run(
     registry: Registry,
     selection: SharedSelection,
     _nodes: Vec<Node>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(
         device = config.device.as_deref().unwrap_or("auto"),
         auto_route = config.auto_route,
