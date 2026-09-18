@@ -15,6 +15,7 @@ use meow_common::{
 use meow_dns::resolver::Resolver;
 use meow_listener::tun::{TunListener, TunListenerConfig, TunReady, TunRouteScope};
 use meow_rules::final_rule::FinalRule;
+use meow_rules::ipcidr::IpCidrRule;
 use meow_tunnel::Tunnel;
 use parking_lot::RwLock;
 use smol_str::SmolStr;
@@ -24,16 +25,21 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock as TokioRwLock;
-use tracing::info;
+use tracing::{info, warn};
 
-/// 将 ProxyAdapter 包装为实现 Proxy trait（增加 alive/alive_for_url 等方法）
+/// 将 ProxyAdapter 包装为实现 Proxy trait（增加 alive/alive_for_url 等方法）。
+///
+/// `inner` 是主出口（silverq-auto 选中的节点），`direct` 是 DIRECT 兜底：
+/// 当 `inner` 的 dial 失败时自动回退到 `direct`，避免节点挂掉时连本地
+/// 网关 / DNS 都打不通（v0.2.0 引入的断网防护）。
 struct ProxyWrapper {
     inner: Arc<dyn ProxyAdapter>,
+    direct: Arc<dyn ProxyAdapter>,
 }
 
 impl ProxyWrapper {
-    fn new(inner: Arc<dyn ProxyAdapter>) -> Self {
-        Self { inner }
+    fn new(inner: Arc<dyn ProxyAdapter>, direct: Arc<dyn ProxyAdapter>) -> Self {
+        Self { inner, direct }
     }
 }
 
@@ -52,10 +58,30 @@ impl ProxyAdapter for ProxyWrapper {
         self.inner.support_udp()
     }
     async fn dial_tcp(&self, metadata: &Metadata) -> meow_common::Result<Box<dyn ProxyConn>> {
-        self.inner.dial_tcp(metadata).await
+        match self.inner.dial_tcp(metadata).await {
+            Ok(c) => Ok(c),
+            Err(e) => {
+                warn!(
+                    err = %e,
+                    tag = self.inner.name(),
+                    "primary proxy dial_tcp failed, falling back to DIRECT"
+                );
+                self.direct.dial_tcp(metadata).await
+            }
+        }
     }
     async fn dial_udp(&self, metadata: &Metadata) -> meow_common::Result<Box<dyn ProxyPacketConn>> {
-        self.inner.dial_udp(metadata).await
+        match self.inner.dial_udp(metadata).await {
+            Ok(c) => Ok(c),
+            Err(e) => {
+                warn!(
+                    err = %e,
+                    tag = self.inner.name(),
+                    "primary proxy dial_udp failed, falling back to DIRECT"
+                );
+                self.direct.dial_udp(metadata).await
+            }
+        }
     }
     fn health(&self) -> &ProxyHealth {
         self.inner.health()
@@ -120,14 +146,23 @@ struct TunRuntime {
     selection: SharedSelection,
     /// 当前已注册到 Tunnel 的 "silverq-auto" proxy 对应的 tag
     current_auto_tag: RwLock<Option<String>>,
+    /// 共享的 DIRECT 适配器：既作为 "silverq-auto" 的 dial 兜底，
+    /// 又作为 "DIRECT" 注册进 Tunnel 供私网 / 用户排除 CIDR 规则路由。
+    /// 单实例（Arc 共享），避免重复建 DirectAdapter。
+    direct: Arc<dyn ProxyAdapter>,
+    /// 用户配置的不走 TUN 的 CIDR（来自 `[tun].exclude_cidrs`），
+    /// 在 `init_rules` 时生成 IpCidrRule → DIRECT。
+    exclude_cidrs: Vec<String>,
 }
 
 impl TunRuntime {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         registry: Registry,
         selection: SharedSelection,
         _dns_port: u16,
         fake_ip_cidr: Option<String>,
+        exclude_cidrs: Vec<String>,
     ) -> Self {
         // 创建 DNS resolver（用于 fake-IP 模式）
         let fake_ip_range = fake_ip_cidr
@@ -147,11 +182,16 @@ impl TunRuntime {
         tunnel.set_mode(TunnelMode::Rule);
         tunnel.spawn_background_tasks();
 
+        // 单一 DirectAdapter 实例，Arc 共享给 silverq-auto 兜底与 "DIRECT" 规则出口。
+        let direct: Arc<dyn ProxyAdapter> = Arc::new(meow_proxy::DirectAdapter::new());
+
         Self {
             tunnel,
             registry,
             selection,
             current_auto_tag: RwLock::new(None),
+            direct,
+            exclude_cidrs,
         }
     }
 
@@ -167,32 +207,73 @@ impl TunRuntime {
         if *current != new_tag {
             let mut proxies = HashMap::new();
 
+            // 始终注册 "DIRECT"：既让私网 / 用户排除 CIDR 规则能按名路由，
+            // 又保证空 selection 时本地流量仍可达（防断网安全网）。
+            // 两字段都指向同一个共享 DirectAdapter（self.direct）。
+            let direct_wrapped = Arc::new(ProxyWrapper::new(
+                Arc::clone(&self.direct),
+                Arc::clone(&self.direct),
+            )) as Arc<dyn Proxy>;
+            proxies.insert(SmolStr::new("DIRECT"), direct_wrapped);
+
             if let Some(tag) = &new_tag {
                 if let Some(adapter) = registry.get(tag) {
-                    let wrapped =
-                        Arc::new(ProxyWrapper::new(Arc::clone(adapter))) as Arc<dyn Proxy>;
+                    let wrapped = Arc::new(ProxyWrapper::new(
+                        Arc::clone(adapter),
+                        Arc::clone(&self.direct),
+                    )) as Arc<dyn Proxy>;
                     proxies.insert(SmolStr::new("silverq-auto"), wrapped);
                     *current = Some(tag.clone());
                     info!(tag = %tag, "TUN silverq-auto proxy updated");
                 }
             } else {
-                // 没有可用节点，清空 silverq-auto
+                // 没有可用节点，清空 silverq-auto（DIRECT 仍保留在上面）
                 *current = None;
                 info!("TUN silverq-auto proxy cleared (no available nodes)");
             }
 
             drop(current);
-            if !proxies.is_empty() {
-                self.tunnel.update_proxies(proxies);
-            }
+            // proxies 至少含 "DIRECT"，永不为空。
+            self.tunnel.update_proxies(proxies);
         }
     }
 
     /// 初始化规则（首次启动时调用）
+    ///
+    /// 规则按 first-match-wins 求值，顺序：
+    ///   1. 私网安全网（硬编码 5 段）→ DIRECT
+    ///   2. 用户 `[tun].exclude_cidrs` → DIRECT
+    ///   3. FinalRule → silverq-auto（兜底）
+    /// 不用 GEOIP，避免依赖 GeoIP 数据库。
     fn init_rules(&self) {
-        // 简单规则：所有流量走 silverq-auto
-        // 注意：不使用 GEOIP，避免依赖 GeoIP 数据库
-        let rules: Vec<Box<dyn meow_common::Rule>> = vec![Box::new(FinalRule::new("silverq-auto"))];
+        let mut rules: Vec<Box<dyn meow_common::Rule>> = Vec::new();
+
+        // 私网安全网：无论用户怎么配，这些段永远走 DIRECT（防断网）。
+        const PRIVATE_NETS: &[&str] = &[
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "127.0.0.0/8",
+            "169.254.0.0/16",
+        ];
+        for cidr in PRIVATE_NETS {
+            match IpCidrRule::new(cidr, "DIRECT", false, false) {
+                Ok(r) => rules.push(Box::new(r)),
+                // 硬编码常量理论不会错，但即便错也只跳过这一条，不阻断 TUN 启动。
+                Err(e) => warn!(cidr = cidr, err = %e, "private-network CIDR invalid, skipped"),
+            }
+        }
+
+        // 用户排除 CIDR：非法的逐条 warn 并跳过，不让一条坏配置炸掉整个 TUN。
+        for cidr in &self.exclude_cidrs {
+            match IpCidrRule::new(cidr, "DIRECT", false, false) {
+                Ok(r) => rules.push(Box::new(r)),
+                Err(e) => warn!(cidr = %cidr, err = %e, "invalid exclude_cidr skipped"),
+            }
+        }
+
+        // 兜底：其余流量走 silverq-auto。
+        rules.push(Box::new(FinalRule::new("silverq-auto")));
         self.tunnel.update_rules(rules);
     }
 }
@@ -224,6 +305,7 @@ pub async fn run(
         selection.clone(),
         config.dns_port,
         Some(fake_ip_cidr.clone()),
+        config.exclude_cidrs.clone(),
     ));
 
     // 初始化规则
@@ -294,9 +376,11 @@ mod tests {
     }
 
     /// 包了 `DirectAdapter` 的 `ProxyWrapper`（测 Proxy 桩 + 委托）。
+    /// 两字段都指向同一个 DirectAdapter（与生产代码里 "DIRECT" 注册一致）。
     fn direct_wrapper() -> ProxyWrapper {
         let inner: Arc<dyn ProxyAdapter> = Arc::new(DirectAdapter::new());
-        ProxyWrapper::new(inner)
+        let direct: Arc<dyn ProxyAdapter> = Arc::new(DirectAdapter::new());
+        ProxyWrapper::new(inner, direct)
     }
 
     // ---- A1/A2: TunConfig::from_effective 映射 ----
@@ -396,22 +480,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_init_rules_registers_single_final_rule() {
-        // `Tunnel::route_snapshot().rules` 是 pub，可以拿到 init_rules 注册的规则。
-        // （标 `#[tokio::test]` 是因为 `TunRuntime::new` 内部 spawn 后台任务需要 runtime。）
+        // init_rules 现在注册「5 私网 + 用户 exclude_cidrs + FinalRule」。
+        // 这里 exclude_cidrs 为空，所以应是 6 条，且最后一条是 FinalRule→silverq-auto。
+        // （首条匹配语义下 FinalRule 永远在末尾兜底。）
         let rt = TunRuntime::new(
             empty_registry(),
             Arc::new(TokioRwLock::new(vec![])),
             1053,
             Some("198.18.0.0/15".into()),
+            vec![],
         );
         rt.init_rules();
         let snap = rt.tunnel.route_snapshot();
-        assert_eq!(snap.rules.len(), 1, "init_rules 只注册一条 FinalRule");
+        assert!(snap.rules.len() >= 1, "init_rules 至少注册一条 FinalRule");
+        let last = snap.rules.last().expect("至少一条规则");
         assert_eq!(
-            snap.rules[0].adapter(),
+            last.adapter(),
             "silverq-auto",
-            "FinalRule 应指向 silverq-auto"
+            "末尾 FinalRule 应指向 silverq-auto"
         );
+        assert_eq!(last.payload(), "", "FinalRule payload 为空");
     }
 
     #[tokio::test]
@@ -423,7 +511,13 @@ mod tests {
         let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
         let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
 
-        let rt = TunRuntime::new(registry, selection, 1053, Some("198.18.0.0/15".into()));
+        let rt = TunRuntime::new(
+            registry,
+            selection,
+            1053,
+            Some("198.18.0.0/15".into()),
+            vec![],
+        );
 
         assert!(
             rt.tunnel.proxy("silverq-auto").is_none(),
@@ -452,7 +546,13 @@ mod tests {
         let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
         let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
 
-        let rt = TunRuntime::new(registry, selection, 1053, Some("198.18.0.0/15".into()));
+        let rt = TunRuntime::new(
+            registry,
+            selection,
+            1053,
+            Some("198.18.0.0/15".into()),
+            vec![],
+        );
         rt.sync_proxies().await;
         let snap1 = rt.tunnel.route_snapshot();
 
@@ -480,6 +580,7 @@ mod tests {
             selection.clone(),
             1053,
             Some("198.18.0.0/15".into()),
+            vec![],
         );
         rt.sync_proxies().await;
         {
@@ -492,6 +593,157 @@ mod tests {
         assert!(
             rt.current_auto_tag.read().is_none(),
             "空 selection 后 current_auto_tag 应被清空"
+        );
+    }
+
+    // ---- C: DIRECT fallback（v0.2.0 防断网安全网）----
+
+    /// dial 总是失败的假 adapter，用于验证 `ProxyWrapper` 的 DIRECT 兜底：
+    /// 主出口 dial 失败时应自动回退到 direct，而非把错误透传给上层。
+    struct FailingAdapter {
+        health: ProxyHealth,
+    }
+
+    #[async_trait::async_trait]
+    impl ProxyAdapter for FailingAdapter {
+        fn name(&self) -> &str {
+            "failing"
+        }
+        fn adapter_type(&self) -> AdapterType {
+            AdapterType::Socks5
+        }
+        fn addr(&self) -> &str {
+            ""
+        }
+        fn support_udp(&self) -> bool {
+            true
+        }
+        async fn dial_tcp(&self, _metadata: &Metadata) -> meow_common::Result<Box<dyn ProxyConn>> {
+            Err(MeowError::Io(std::io::Error::other(
+                "mock dial_tcp failure",
+            )))
+        }
+        async fn dial_udp(
+            &self,
+            _metadata: &Metadata,
+        ) -> meow_common::Result<Box<dyn ProxyPacketConn>> {
+            Err(MeowError::Io(std::io::Error::other(
+                "mock dial_udp failure",
+            )))
+        }
+        fn health(&self) -> &ProxyHealth {
+            &self.health
+        }
+    }
+
+    #[tokio::test]
+    async fn test_proxy_wrapper_falls_back_to_direct_on_dial_failure() {
+        // inner = 总是失败的假 adapter；direct = 真 DirectAdapter。
+        // dial 一个本地真监听端口：inner 必失败 → 回退 direct → 连上 → Ok。
+        // 能拿到 Ok 就证明兜底生效（错误没被透传）。
+        let failing: Arc<dyn ProxyAdapter> = Arc::new(FailingAdapter {
+            health: ProxyHealth::new(),
+        });
+        let direct: Arc<dyn ProxyAdapter> = Arc::new(DirectAdapter::new());
+        let wrapper = ProxyWrapper::new(failing, direct);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // 持续 accept，避免 backlog 满导致 connect 被拒（虽单连通常不会）。
+        let accept_handle = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut metadata = Metadata::default();
+        metadata.dst_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        metadata.dst_port = addr.port();
+
+        let result = wrapper.dial_tcp(&metadata).await;
+        accept_handle.abort();
+        assert!(
+            result.is_ok(),
+            "inner dial 失败应回退 DIRECT 并成功，实际: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_init_rules_includes_private_network_excludes() {
+        // 5 私网(硬编码) + 1 用户 CIDR + 1 FinalRule = 7 条，顺序固定。
+        let rt = TunRuntime::new(
+            empty_registry(),
+            Arc::new(TokioRwLock::new(vec![])),
+            1053,
+            Some("198.18.0.0/15".into()),
+            vec!["224.0.0.0/4".into()],
+        );
+        rt.init_rules();
+        let snap = rt.tunnel.route_snapshot();
+        assert_eq!(snap.rules.len(), 7, "应 = 5 私网 + 1 用户 + 1 final");
+
+        let private = [
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "127.0.0.0/8",
+            "169.254.0.0/16",
+        ];
+        for (i, cidr) in private.iter().enumerate() {
+            assert_eq!(snap.rules[i].payload(), *cidr, "私网规则顺序/内容 @ {i}");
+            assert_eq!(
+                snap.rules[i].adapter(),
+                "DIRECT",
+                "私网规则应路由 DIRECT @ {i}"
+            );
+        }
+        assert_eq!(snap.rules[5].payload(), "224.0.0.0/4", "第 6 条是用户 CIDR");
+        assert_eq!(snap.rules[5].adapter(), "DIRECT");
+        assert_eq!(snap.rules[6].payload(), "", "末尾 FinalRule payload 为空");
+        assert_eq!(snap.rules[6].adapter(), "silverq-auto");
+    }
+
+    #[tokio::test]
+    async fn test_init_rules_skips_malformed_user_cidr() {
+        // 非法 CIDR 应被静默跳过（warn），不 panic、不阻断其余规则。
+        // 5 私网 + 1 final = 6（坏的那条不计）。
+        let rt = TunRuntime::new(
+            empty_registry(),
+            Arc::new(TokioRwLock::new(vec![])),
+            1053,
+            Some("198.18.0.0/15".into()),
+            vec!["not-a-cidr".into()],
+        );
+        rt.init_rules();
+        let snap = rt.tunnel.route_snapshot();
+        assert_eq!(snap.rules.len(), 6, "非法 CIDR 被跳过：5 私网 + 1 final");
+        // 末尾仍是 FinalRule，未被坏配置影响。
+        assert_eq!(snap.rules.last().unwrap().adapter(), "silverq-auto");
+    }
+
+    #[tokio::test]
+    async fn test_direct_proxy_registered_in_tunnel() {
+        // sync_proxies 后 "DIRECT" 应可按名解析（规则路由私网/排除 CIDR 依赖它）。
+        let mut reg: HashMap<String, Arc<dyn ProxyAdapter>> = HashMap::new();
+        reg.insert("direct-a".into(), Arc::new(DirectAdapter::new()));
+        let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
+        let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
+
+        let rt = TunRuntime::new(
+            registry,
+            selection,
+            1053,
+            Some("198.18.0.0/15".into()),
+            vec![],
+        );
+        assert!(rt.tunnel.proxy("DIRECT").is_none(), "sync 前不应有 DIRECT");
+        rt.sync_proxies().await;
+        assert!(
+            rt.tunnel.proxy("DIRECT").is_some(),
+            "sync 后应注册 DIRECT 供规则路由"
         );
     }
 
