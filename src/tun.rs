@@ -276,7 +276,6 @@ pub async fn run(
 mod tests {
     use super::*;
     use crate::settings::FileConfig;
-    use meow_common::Rule;
     use meow_proxy::direct::DirectAdapter;
     use std::time::Duration;
 
@@ -332,7 +331,7 @@ mod tests {
         assert_eq!(tc.fake_ip_cidr.as_deref(), Some("10.10.0.0/16"));
         assert_eq!(
             tc.exclude_cidrs,
-            vec!["1.2.3.0/24".to_string(), "9.9.9.0/24"]
+            vec!["1.2.3.0/24".to_string(), "9.9.9.0/24".to_string()]
         );
         assert_eq!(tc.dns_port, 5300);
     }
@@ -517,7 +516,7 @@ mod tests {
             exclude_cidrs: vec![],
             dns_port: 1053,
         };
-        let handle = tokio::spawn(async move {
+        let mut handle = tokio::spawn(async move {
             let _ = run(
                 config,
                 empty_registry(),
