@@ -47,10 +47,26 @@ features = ["listener-tun"]
 version = "0.21"
 optional = true
 
+[dependencies.meow-dns]
+version = "0.21"
+optional = true
+
+[dependencies.meow-trie]
+version = "0.21"
+optional = true
+
+[dependencies.meow-rules]
+version = "0.21"
+optional = true
+
+[dependencies.ipnet]
+version = "2"
+optional = true
+
 [features]
 default = []
 meow = ["meow-proxy", "meow-common", "meow-transport"]
-meow-tun = ["meow", "meow-listener", "meow-tunnel"]
+meow-tun = ["meow", "meow-listener", "meow-tunnel", "meow-dns", "meow-trie", "meow-rules", "ipnet"]
 
 [dev-dependencies]
 tokio-test = "0.4"
