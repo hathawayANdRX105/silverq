@@ -37,6 +37,7 @@ impl ProxyWrapper {
     }
 }
 
+#[async_trait::async_trait]
 impl ProxyAdapter for ProxyWrapper {
     fn name(&self) -> &str {
         self.inner.name()
