@@ -1,0 +1,20 @@
+# FR-03 文案常量 (反硬编码) (mode: file, 需 LLM 推理)
+# 规则: rsx 内中文字面量复用 >=2 次 → 抽 const
+#      动态插值 ("折合 {var}") 不能抽 const
+#      数据 (人名/渠道名/mock 数值) 不是文案
+# harness: 用 llm-checklist-harness.sh 调任意 LLM, dry-run 模式可测
+enabled: true
+hooks: [pre-push, merge]   # 慢检查不在 pre-commit
+sla: l1
+fail_severity: WARN         # 磨合期先 WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/", "**/tests/**"]
+mode: file
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - "cat | sh \"$(git rev-parse --show-toplevel)/.githooks/spec/llm-checklist-harness.sh\""
+optional: true
+timeout: 60

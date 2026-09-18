@@ -1,0 +1,18 @@
+# FR-02 共享组件归属 (mode: grep)
+# 规则: page crate 不应自带 ui 子模块; 共享组件放 crates/admin-web/ui/
+# 检测: find crates/admin-web/page-*/src/ui.rs 应无结果
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l1
+fail_severity: FAIL
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - "ROOT=$(git rev-parse --show-toplevel); hits=$(find \"$ROOT/crates/admin-web\"/page-* -path '*/src/ui.rs' 2>/dev/null); if [ -z \"$hits\" ]; then echo '[]'; else printf '%s\\n' \"$hits\" | jq -R -s 'split(\"\\n\") | map(select(length>0)) | map({id: \"FR02-UI\", severity: \"FAIL\", path: ., line: 0, message: \"page 不应自带 ui 子模块; 共享组件放 crates/admin-web/ui/\"})'; fi"
+optional: true
+timeout: 10

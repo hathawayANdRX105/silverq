@@ -62,29 +62,29 @@ silverq select auto           # 取消钉住，恢复自动
 
 ## 模块
 
-| 文件 | 职责 |
-|------|------|
-| `node.rs` | Node + 自适应 EWMA（方案 C）+ adopt_score（reload 继承） |
-| `nodespec.rs` | 节点 YAML 配置模型（协议 + 凭证 + 校验） |
-| `factory.rs` | NodeSpec → meow 协议 adapter |
-| `meow.rs` | MeowMeasurer（按 tag 查 adapter，委托 meow `health::url_test`） |
-| `batch.rs` | 分批并发测速 + Measurer trait |
-| `fast_path.rs` | 立即应用结果 + 超时扣分 |
-| `decision.rs` | 纯 EWMA select_top |
-| `inbound.rs` | 数据面 TCP（SOCKS5 CONNECT / HTTP-CONNECT → 当前选择，best→次优 fallback） |
-| `udp.rs` | 数据面 UDP（SOCKS5 UDP ASSOCIATE 中继，按 (客户端,目标) 分会话） |
-| `tun.rs` | TUN 透明代理（meow-listener listener-tun，`meow-tun` feature）：fake-IP 路由 + 规则分流 + DIRECT 兜底 |
-| `cli.rs` | 子命令解析（serve / reload / select / status） |
-| `ctl.rs` | 控制通道（unix socket：热加载、手动钉住、状态查询） |
-| `persist.rs` | EWMA 分数持久化（原子写 + 6 小时过期判定） |
-| `config.rs` | 默认参数 + 环境变量覆盖（探测 URL / 间隔 / 超时 / 容量） |
-| `scripts/singbox2silverq.py` | sing-box `nodes.json` → silverq YAML（凭证只在本地文件间流动） |
+```
+src/
+├── main.rs            # 进程装配：serve + 调度主循环
+├── lib.rs             # 模块树（供集成测试与二进制复用）
+├── config/            # settings.rs（silverq.toml）+ 默认参数/env 覆盖
+├── scheduler/         # node.rs（Node+EWMA）、batch.rs（分批测速）、
+│                      # decision.rs（select_top）、fast_path.rs（即时发布）、
+│                      # persist.rs（EWMA 存档）；mod.rs（调度进度计数）
+├── proxy/             # nodespec.rs（节点 YAML 模型）、factory.rs（NodeSpec→meow
+│                      # adapter）、meow.rs（MeowMeasurer）——后两者 meow feature
+├── dataplane/         # inbound.rs（SOCKS5/HTTP-CONNECT TCP）、udp.rs（UDP 中继）、
+│                      # tun.rs（TUN 透明代理，meow-tun feature）——meow feature
+├── web/               # mod.rs（内嵌面板 + JSON API）——meow feature
+└── ctl/               # cli.rs（子命令解析）、protocol.rs（unix socket 控制通道）
+```
 
 ## 已验证 / 已知范围
 
-### 自动化测试（22 项，`cargo test --features meow`）
+### 自动化测试（52 项，`cargo test --features meow`）
 
-17 单测 + 5 e2e。e2e 真起 `silverq serve` 进程、用真 SOCKS5 / HTTP-CONNECT 客户端打流量，
+41 单测 + 11 e2e。测试按源文件划分放在 `tests/`（`decision.rs`/`inbound.rs`/… 与 `src/`
+模块一一对应）。依赖 meow 的测试文件带 `#![cfg(feature = "meow")]`，纯 `cargo test`
+也能跑非协议部分。e2e 真起 `silverq serve` 进程、用真 SOCKS5 / HTTP-CONNECT 客户端打流量，
 目标是本地 echo 服务、探测端点也在本地 —— **全程回环，不依赖外网**，CI 可稳定跑。
 
 | 覆盖 | 内容 |
@@ -98,16 +98,16 @@ silverq select auto           # 取消钉住，恢复自动
 
 ### 真实节点池实测（本地，不进 CI）
 
-用 `scripts/singbox2silverq.py` 从 sing-box 的 `nodes.json` 转出 **217 个节点**
-（vless 161 / hysteria2 23 / shadowsocks 22 / trojan 11），实测结果：
+节点池从旧栈的 `nodes.json` 一次性迁移转出 **217 个节点**
+（vless 161 / hysteria2 23 / shadowsocks 22 / trojan 11；迁移脚本已完成使命删除），实测结果：
 
 - 217/217 全部成功构建 meow adapter（四种协议 + ws/grpc transport 都真实跑过）
 - 经 silverq + 真实代理节点出网：`http_code=204`，稳定 0.18~0.22s
 - 出口 IP 确认为代理落地 IP（直连被墙 → 证明没有静默走直连兜底）
 - UDP ASSOCIATE 经真实节点查 DNS：回包 tid 匹配、`ANCOUNT=2`
 
-对照 sing-box 同节点测速可知：池中大量节点（含 46 个 Vision+Reality）**本身已死** ——
-sing-box 测同样超时。这不是 silverq 的问题，排查时容易误判成协议 bug。
+对照旧栈同节点测速可知：池中大量节点（含 46 个 Vision+Reality）**本身已死** ——
+旧栈测同样超时。这不是 silverq 的问题，排查时容易误判成协议 bug。
 
 ### Web 面板
 
@@ -119,8 +119,10 @@ sing-box 测同样超时。这不是 silverq 的问题，排查时容易误判�
 zashboard 首次打开在 setup 页填 `127.0.0.1` + `9095`,或直接访问
 `/ui/?hostname=127.0.0.1&port=9095` 自动配置。
 
-**`/` — 内嵌轻量面板**:silverq 特有数据(纯实测延迟、连续失败次数、
-可用/不可用/待测三态、健康度汇总),3 秒轮询,无前端依赖。
+**`/` — 内嵌轻量面板**:silverq 特有数据(纯实测延迟 + EWMA 历史曲线、
+连续失败次数、可用/不可用/待测三态、健康度汇总、调度轮/批进度),
+3 秒轮询,无前端依赖。样式与图表原语来自 [uikit](../uikit) 模板
+(vendored 于 `src/web/uikit/`,头部注释标了来源 commit)。
 
 | 端点 | 说明 |
 | --- | --- |

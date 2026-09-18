@@ -1,0 +1,70 @@
+# 全局规则严重级别覆盖
+# 格式: "规则ID": "FAIL" | "WARN" | "INFO"
+#
+# 适用于所有 hook (pre-commit / pre-push / merge / gh create)
+# 只有非 INFO 的 finding 会被覆盖 (确认项不受影响)
+#
+# 完整规则列表:
+# === PR (Pull Request) ===
+#   PR-01: FAIL — 标题含 CJK
+#   PR-02: WARN — 标题非 conventional commit
+#   PR-03: FAIL — 缺少必填 heading
+#   PR-04: FAIL — heading 含 CJK / What 无中文
+#   PR-05: WARN — 缺少 Fixes # 关联
+#   PR-06: FAIL — 缺少 type label
+#   PR-07: FAIL — Construction plan/Checklist checkbox < 2
+#   PR-08: FAIL — 分支名前缀不在白名单
+#   PR-10: INFO — Part of/Related 纯文本
+#
+# === ISSUE ===
+#   IS-00: FAIL — 标题含禁用前缀 (父/issue:/sub:)
+#   IS-01: FAIL — 缺少必填 heading
+#   IS-02: WARN — Suspected areas 为空
+#   IS-03: WARN — 多个 H1 标题
+#   IS-04: FAIL — Done when 缺少 checkbox
+#   IS-05: FAIL — 标题非中文
+#   IS-06: FAIL — heading 含 CJK
+#   IS-07: FAIL — 正文缺少中文
+#   IS-08: WARN — backtick 路径引用不存在
+#   IS-09: FAIL — 含禁用交叉引用 (Parent:/Related:)
+#   IS-10: FAIL — sub-issue 含 PR 占位符
+#   IS-11: FAIL — parent 含 Done when
+#   IS-14: WARN — 缺少 type label / 关键词与 label 不对齐
+#   IS-15: FAIL — 关闭时 Done when 未全勾
+#   IS-16: FAIL — 乱码/禁用关键词/全角标点
+#
+# === COMMIT (CM) ===
+#   CM-01: FAIL — commit 标题非 conventional commit
+#   CM-02: FAIL — commit 标题含 CJK
+#   CM-03: WARN — commit 与 PR 不一致
+#
+# === REVIEW (RV) ===
+#   RV-01: FAIL — review 评论含 checkbox
+#   RV-02: FAIL — reply 缺少 intent word
+#   RV-03: WARN — reply 缺少详细理由
+#   RV-04: FAIL — inline review 格式错误
+#   RV-05: FAIL — 缺少 CRG Review
+#   RV-06: FAIL — inline review 无 reply
+#   RV-07: FAIL — 审查未完成
+#
+# === WORKSPACE (WS) ===
+#   WS-01: WARN — 目录树不合规
+#   WS-02: FAIL — 文件放置位置错误
+#
+# === CHECKLIST (CL) ===
+#   CL-01: WARN — checklist 项未勾选
+#   CL-02: FAIL — checklist 格式错误
+#   CL-03: WARN — checklist 缺少必要项
+#
+# === PR 合并前门禁 (checklist_pr_*.yaml, 经 dispatch github/pr_gates 段挂载) ===
+#   PR-LABEL-MISSING: FAIL — PR 缺 type label (pr_labels)
+#   PR-LABEL-DOMAIN:  FAIL — 标题命中域关键词但缺域 label (pr_labels, 建议性, 可降 WARN)
+#   PR-CRG-MISSING:   FAIL — PR 讨论区无 CRG 审查记录 (pr_crg_review)
+#   PR-CRG-FIX-MISSING: FAIL — 审查记录提到问题但缺修复/回应记录 (pr_crg_review)
+#
+# 示例: 把 PR-05 改成 INFO，不再阻塞无 Fixes # 的 PR
+# severity_overrides:
+#   PR-05: "INFO"
+#   PR-LABEL-DOMAIN: "WARN"  # 域 label 建议降级为提示, 不阻断
+
+severity_overrides: {}

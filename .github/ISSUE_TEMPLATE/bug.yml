@@ -1,0 +1,41 @@
+name: Bug
+description: 可复现的失败或回归
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: 命令、配置、请求。要能被别人重复
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+      description: 原始报错请原样贴，不要改写
+    validations:
+      required: true
+  - type: textarea
+    id: done-when
+    attributes:
+      label: Done when
+      description: 用 `- [ ]` 勾选项
+    validations:
+      required: true
+  - type: textarea
+    id: area
+    attributes:
+      label: Area
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context

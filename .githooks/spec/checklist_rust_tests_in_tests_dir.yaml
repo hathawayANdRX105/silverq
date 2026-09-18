@@ -1,0 +1,127 @@
+# 自定义约定: 测试代码必须统一放 tests/ 目录, 严禁留在 src/
+# 为什么: 多 crate 架构下, src/ 留测试容易乱, tests/ 集中管理更好找
+# grep 模式, 零 LLM
+# 检测 1: 仅扫描本次 diff 新增的 src/*.rs 行是否新增 #[cfg(test)] 或 #[test]
+# 检测 2: 仅扫描本次 diff 新增的 src/*.rs 文件, 名称为 *_test.rs / test_*.rs / tests.rs
+#
+# 增量语义 (重要):
+#   harness 不从 argv 收到 scope, 必须从 git 状态自检决定 diff 范围:
+#     1. 若 `git diff --cached --name-only` 非空 → 视为 pre-commit, 用 --cached
+#     2. 否则若 `git diff HEAD --name-only` 非空 → 视为 pre-push, 用 HEAD
+#     3. 否则用 `git diff origin/main...HEAD --name-only` (merge scope)
+#   用 `--unified=0`, 对每个候选 */src/*.rs, 只检查 diff 中以 `+` 开头且非 `+++` 的行
+#   是否新增 #[cfg(test)] 或 #[test]; 修改既有 src 文件中已有的测试模块 → 不报错.
+#   新建 src 测试文件 (e.g. crates/adaptor/src/bad_test.rs) → 仍必须报告.
+#   干净 base 上三种 git diff 全空 → 候选为空 → 输出 [].
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l1
+fail_severity: FAIL
+match:
+  paths_include: ["**/src/**/*.rs"]
+  paths_exclude: ["target/", ".wt/", ".githooks/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      ROOT=$(git rev-parse --show-toplevel)
+      # 增量: 按 hook 自检取 diff 范围 (pre-commit -> pre-push -> merge 优先)
+      diff_arg=""
+      if [ -n "$(git diff --cached --name-only 2>/dev/null)" ]; then
+        diff_arg="--cached"
+      elif [ -n "$(git diff HEAD --name-only 2>/dev/null)" ]; then
+        diff_arg="HEAD"
+      else
+        diff_arg="origin/main...HEAD"
+      fi
+      out=""
+      # 按文件名取候选 (仅用于决定是否需要进一步扫 diff 内容)
+      if [ "$diff_arg" = "--cached" ]; then
+        candidates=$(git diff --cached --name-only)
+      else
+        candidates=$(git diff $diff_arg --name-only 2>/dev/null || true)
+      fi
+      if [ -n "$candidates" ]; then
+        for f in $candidates; do
+          [ -z "$f" ] && continue
+          # 只关注 .rs 文件
+          case "$f" in
+            *.rs) ;;
+            *) continue ;;
+          esac
+          # 只关注 src/ 下的文件 (其它路径不属于本规则范围)
+          case "$f" in
+            */src/*) ;;
+            *) continue ;;
+          esac
+          # 排除特定子树
+          case "$f" in
+            .githooks/*|target/*|.wt/*) continue ;;
+          esac
+          base=$(basename "$f")
+          # 取出该文件本次 diff 中以 + 开头且非 +++ 的行, 命中 #[cfg(test)] 或 #[test] 才报错
+          if [ "$diff_arg" = "--cached" ]; then
+            file_diff=$(git diff --cached --unified=0 -- "$f" 2>/dev/null)
+          else
+            file_diff=$(git diff $diff_arg --unified=0 -- "$f" 2>/dev/null)
+          fi
+          [ -z "$file_diff" ] && continue
+          # 新增测试文件名模式 → 立即报告 (不依赖 diff 行级扫描)
+          case "$base" in
+            *_test.rs|test_*.rs|tests.rs)
+              # 仅当本次新增/重命名为该模式名才报 (避免既有 *_test.rs 的删行被误报)
+              if printf '%s' "$file_diff" | grep -q '^+++ '; then
+                out="$out\n$f:1:测试文件必须放 crate/tests/ 目录"
+              fi
+              continue
+            ;;
+          esac
+          hit=$(printf '%s\n' "$file_diff" | awk '
+            BEGIN { lineno = 0 }
+            /^@@/ {
+              if (match($0, /\+([0-9]+)/)) {
+                s = $0
+                p = RSTART + 1
+                n = 0
+                while (p <= length(s) && substr(s, p, 1) ~ /[0-9]/) {
+                  n = n * 10 + substr(s, p, 1) + 0
+                  p++
+                }
+                lineno = n
+              }
+              next
+            }
+            {
+              c = substr($0, 1, 1)
+              if (c == "+" && substr($0, 1, 3) != "+++") {
+                if (lineno > 0) {
+                  if (index($0, "#[cfg(test)]") || index($0, "#[test]")) {
+                    rest = substr($0, 2)
+                    printf "%d:%s\n", lineno, rest
+                  }
+                  lineno++
+                }
+              } else if (c != "-" && c != "+") {
+                if (lineno > 0) lineno++
+              }
+            }
+          ' | head -1)
+          if [ -n "$hit" ]; then
+            out="$out\n$f:$hit"
+          fi
+        done
+      fi
+      if [ -z "$out" ] || [ "$out" = "\n" ]; then
+        echo '[]'
+      else
+        printf '%b' "$out" | jq -R -s '
+          split("\n")
+          | map(select(length > 0))
+          | map(capture("^(?<path>.+):(?<line>[0-9]+):(?<rest>.*)$"))
+          | map({id: "NO-SRC-TEST", severity: "FAIL", path: .path, line: (.line|tonumber), message: ("测试必须同层 tests/ 目录, 严禁在 src/ 留测试代码: " + .rest)})
+        '
+      fi
+optional: true
+timeout: 15

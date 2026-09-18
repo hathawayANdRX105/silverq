@@ -1,0 +1,19 @@
+# PR 合并前门禁 — label 完整性 + CRG 审查记录
+# 使用方式: gate merge 读取本文件 (经 dispatch.yaml 的 github/pr_gates 段挂载),
+#           逐行列出要触发的 checklist 规则名 (对应 .githooks/spec/checklist_<名字>.yaml)。
+#
+# 规则清单:
+#
+# 1. PR label 完整性 (checklist_pr_labels.yaml)
+#    - PR 必须至少挂 1 个 type label (bug/feature/chore/refactor/tests/documentation/epic)
+#    - 标题命中域关键词但缺对应域 label → 建议补挂
+#
+# 2. CRG 审查记录 (checklist_pr_crg_review.yaml)
+#    - PR 讨论区必须留有 CRG (code-review-graph) 审查结论
+#    - 若审查记录提到过问题/风险, 需附对应修复/回应记录 (Fix 说明 + commit SHA / 验证结论)
+#
+# 两条都走 gh api 取数, 依赖 gh CLI + 网络; 取数失败时输出"跳过, 请人工核对" finding (FAIL 桶),
+# 保守拦下而不是静默假绿。
+
+pr_labels
+pr_crg_review

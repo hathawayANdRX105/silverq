@@ -1,0 +1,31 @@
+# 防嵌套 worktree: .wt 下不得出现嵌套的 .wt 子目录或 .git stub
+# 检测: .wt/<name> 是合法 worktree(唯一 .git stub), .wt/<name>/.wt/... 是递归事故
+# grep 模式, 零 LLM
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l1
+fail_severity: FAIL
+match:
+  paths_include: ["**/.wt/**", "**/.gitignore"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      ROOT=$(git rev-parse --show-toplevel)
+      # 检测嵌套: 任何深度 >= 2 的 .wt 目录 (合法顶层 worktree 的 .wt 不算)
+      nested=$(find "$ROOT/.wt" -mindepth 2 -type d -name .wt 2>/dev/null | head -20)
+      # 检测嵌套 stub: .wt/<name>/.wt/... 里的 .git 文件 (合法 stub 只在 .wt/<name>/.git)
+      stubs=$(find "$ROOT/.wt" -mindepth 3 -name .git -type f 2>/dev/null | head -20)
+      if [ -z "$nested" ] && [ -z "$stubs" ]; then
+        echo '[]'
+      else
+        printf '%s\n%s\n' "$nested" "$stubs" | jq -R -s '
+          split("\n")
+          | map(select(length > 0))
+          | map({id: "NESTED-WORKTREE", severity: "FAIL", path: ., line: 1, message: ("嵌套 worktree: worktree 里不能再建 worktree, 必须回仓库根执行 git worktree add .wt/<name> — 递归会成倍复制整个 checkout: " + .)})
+        '
+      fi
+optional: true
+timeout: 15

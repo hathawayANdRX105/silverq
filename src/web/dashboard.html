@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>silverq</title>
+<!-- uikit vendored（~/projects/uikit@d8803de）：tokens.css 变量 + base.css 原语 + charts/panel js -->
+<link rel="stylesheet" href="/tokens.css">
+<link rel="stylesheet" href="/base.css">
+<style>
+  /* silverq 特有布局：筛选 tab + 排行卡牌网格 */
+  .tabs { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
+  .tab { background:var(--card); border:1px solid var(--line); color:var(--dim);
+         border-radius:var(--radius-pill); padding:3px 14px; font-size:var(--font-size-small);
+         cursor:pointer; user-select:none; }
+  .tab.on { background:var(--acc-soft); color:var(--fg); border-color:var(--acc); }
+  .tab .n { color:var(--acc); margin-left:4px; }
+  .leader { display:grid; grid-template-columns:repeat(auto-fill,minmax(215px,1fr)); gap:10px; }
+  .ncard { background:var(--card); border-radius:var(--radius-l); padding:12px 14px; border:1px solid var(--line);
+           display:flex; flex-direction:column; gap:6px; }
+  .ncard.primary { border-color:var(--ok); box-shadow:0 0 0 1px var(--ok); }
+  .ncard.cand { border-color:var(--acc-soft); }
+  .ncard.dead { opacity:.5; }
+  .ncard .top { display:flex; align-items:center; gap:6px; }
+  .ncard .rank { color:var(--dim); font-size:var(--font-size-tiny); min-width:22px; }
+  .ncard .tag { font-family:ui-monospace,monospace; font-size:13px; overflow:hidden;
+                text-overflow:ellipsis; white-space:nowrap; flex:1; }
+  .ncard .lat { font-size:26px; font-weight:600; letter-spacing:-.5px; }
+  .ncard .lat.ok { color:var(--ok); } .ncard .lat.warn { color:var(--warn); }
+  .ncard .lat.bad { color:var(--bad); font-size:18px; }
+  .ncard .lat.dim { color:var(--dim); font-size:18px; }
+  .ncard .lat .u { font-size:12px; color:var(--dim); font-weight:400; margin-left:2px; }
+  .ncard canvas { width:100%; height:34px; }
+  .ncard .meta { display:flex; gap:10px; color:var(--dim); font-size:var(--font-size-tiny); flex-wrap:wrap; }
+  .ncard .meta b { color:var(--fg); font-weight:500; }
+  .ncard .meta .f { color:var(--bad); }
+  .ncard .actions { align-self:flex-start; }
+  /* 调度进度条所在行 */
+  .round-line { display:flex; align-items:center; gap:10px; margin-bottom:20px; }
+  .round-line .bar { flex:1; }
+  .round-line .txt { color:var(--dim); font-size:var(--font-size-small); white-space:nowrap; }
+</style>
+</head>
+<body>
+<h1>silverq</h1>
+<div class="sub">stability-first proxy scheduler · engine: meow-rs</div>
+<div id="err"></div>
+<div class="cards">
+  <div class="card"><div class="k">Primary</div><div class="v ok" id="primary">—</div></div>
+  <div class="card"><div class="k">候选</div><div class="v acc" id="selcount">—</div></div>
+  <div class="card"><div class="k">节点池</div><div class="v" id="poolsize">—</div></div>
+  <div class="card"><div class="k">健康度</div><div class="v" id="health">—</div></div>
+  <div class="card"><div class="k">模式</div><div class="v" id="mode">—</div></div>
+</div>
+<div class="round-line">
+  <div class="bar"><i id="rbar" style="width:0%"></i></div>
+  <span class="txt" id="rtxt">—</span>
+</div>
+<div class="tabs" id="tabs"></div>
+<div class="leader" id="leader"></div>
+<script src="/charts.js"></script>
+<script src="/panel.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+// ewma 是纯实测延迟（毫秒，经该节点请求 gstatic 的往返），不是抽象分数；
+// 失败罚分在 failures 字段单独展示，绝不混进延迟数字。
+let filter = 'alive';   // alive | dead | todo | all
+function renderTabs(d) {
+  const alive = d.nodes.filter(n => n.ewma !== null).length;
+  const dead  = d.nodes.filter(n => n.ewma === null && n.probed).length;
+  const todo  = d.nodes.filter(n => n.ewma === null && !n.probed).length;
+  const tabs = [
+    ['alive', '可用', alive], ['dead', '不可用', dead],
+    ['todo', '待测', todo], ['all', '全部', d.nodes.length],
+  ];
+  $('tabs').innerHTML = tabs.map(([id, label, n]) =>
+    `<span class="tab ${filter === id ? 'on' : ''}" onclick="setFilter('${id}')">${label}<span class="n">${n}</span></span>`
+  ).join('');
+}
+function setFilter(f) { filter = f; refresh(); }
+async function refresh() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    $('err').textContent = '';
+    const alive = d.nodes.filter(n => n.ewma !== null);
+    $('primary').textContent = d.selection[0] || '—';
+    $('selcount').textContent = d.selection.length;
+    $('poolsize').textContent = d.nodes.length;
+    // 可用 / 不可用 / 待测 三分。池子里死节点占多数是常态，
+    // 必须一眼看出"没测通"是节点死了而不是调度漏测。
+    const dead = d.nodes.filter(n => n.ewma === null && n.probed).length;
+    const todo = d.nodes.filter(n => n.ewma === null && !n.probed).length;
+    const flaky = alive.filter(n => n.failures > 0).length;
+    $('health').textContent =
+      `${alive.length} 可用 / ${dead} 不可用`
+      + (flaky ? ` (${flaky} 失败中)` : '')
+      + (todo ? ` / ${todo} 待测` : '');
+    $('mode').innerHTML = d.pinned
+      ? '<span class="badge b-dead">已钉住</span>'
+      : '<span class="badge b-ok">自动</span>';
+    // 调度进度：第几轮 / 批进度 / 上轮耗时 / 数据新鲜度
+    const p = d.progress;
+    if (p && p.batches_total > 0) {
+      $('rbar').style.width = Math.min(100, p.batches_done / p.batches_total * 100).toFixed(0) + '%';
+      $('rtxt').textContent =
+        `第 ${p.round} 轮 ${p.batches_done}/${p.batches_total} 批`
+        + (p.last_round_secs ? ` · 上轮 ${p.last_round_secs}s` : '')
+        + ` · 最近批 ${UKPanel.fmtAgo(p.last_batch_ago_secs)}`;
+    }
+    renderTabs(d);
+
+    const shown = d.nodes.filter(n =>
+      filter === 'all' ? true
+      : filter === 'alive' ? n.ewma !== null
+      : filter === 'dead' ? (n.ewma === null && n.probed)
+      : (n.ewma === null && !n.probed));
+    // 全局排名号：用全部节点里的原始位置
+    const globalRank = new Map(d.nodes.map((n, i) => [n.tag, i + 1]));
+    $('leader').innerHTML = shown.map(n => {
+      const rank = globalRank.get(n.tag);
+      let badge, cls = '', tier = 'dim';
+      if (n.ewma === null) {
+        badge = n.probed ? '<span class="badge b-dead">不可用</span>'
+                         : '<span class="badge b-unmeasured">待测</span>';
+        cls = 'dead';
+      } else {
+        tier = UKPanel.latencyTier(n.ewma);
+        badge = n.failures > 0
+          ? `<span class="badge b-dead">失败 ${n.failures} 次</span>`
+          : n.primary ? '<span class="badge b-primary">首选</span>'
+          : n.active ? '<span class="badge b-active">候选</span>'
+          : '<span class="badge b-ok">正常</span>';
+        cls = n.primary ? 'primary' : (n.active ? 'cand' : '');
+      }
+      const lat = n.ewma === null
+        ? (n.probed ? '<span class="lat bad">不可用</span>' : '<span class="lat dim">待测</span>')
+        : `<span class="lat ${tier}">${n.ewma}<span class="u">ms</span></span>`;
+      const btn = n.primary ? '' :
+        `<button onclick="pick('${n.tag.replace(/'/g,"")}')" class="btn ${n.active ? '' : 'warn'}">${n.active ? '移到首选' : '钉住'}</button>`;
+      const spark = n.ewma !== null ? `<canvas data-spark="${n.tag.replace(/"/g,'')}"></canvas>` : '';
+      return `<div class="ncard ${cls}">
+        <div class="top"><span class="rank">#${rank}</span><span class="tag" title="${n.tag}">${n.tag}</span>${badge}</div>
+        ${lat}${spark}
+        <div class="meta"><span>样本 <b>${n.samples}</b></span>${n.failures ? `<span class="f">失败 <b>${n.failures}</b></span>` : ''}${n.probed ? `<span>${UKPanel.fmtAgo(n.last_probe_secs)}</span>` : ''}</div>
+        <div class="actions">${btn}</div>
+      </div>`;
+    }).join('');
+    // 历史曲线：EWMA 时序（/api/status 的 history 字段），800ms 基线以上整线转警示色
+    document.querySelectorAll('canvas[data-spark]').forEach(c => {
+      const n = d.nodes.find(x => x.tag === c.dataset.spark);
+      if (n && n.history.length) {
+        UKCharts.sparkline(c, n.history.map(h => h[1]), { baseline: 800 });
+      }
+    });
+  } catch (e) { $('err').textContent = '刷新失败: ' + e; }
+}
+async function pick(tag) {
+  try {
+    const r = await fetch('/api/select', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({tag}) });
+    const d = await r.json();
+    if (!d.ok) $('err').textContent = d.msg;
+    refresh();
+  } catch (e) { $('err').textContent = '操作失败: ' + e; }
+}
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

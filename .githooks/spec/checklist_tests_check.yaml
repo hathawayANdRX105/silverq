@@ -1,0 +1,19 @@
+# FR-04 测试代码划分 (mode: grep)
+# 规则: src/ 内禁止独立 *_test.rs (违反 Rust 惯例);
+#      集成测试必须 crates/<name>/tests/api_shapes.rs
+# 检测: 1) 找 src/*_test.rs 2) 找缺 api_shapes.rs 的 page crate
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - "ROOT=\"$(git rev-parse --show-toplevel)\"; hits=$(find \"$ROOT/crates\" -path '*/src/*_test.rs' 2>/dev/null); if [ -z \"$hits\" ]; then echo '[]'; else printf '%s\\n' \"$hits\" | jq -R -s 'split(\"\\n\") | map(select(length>0)) | map({id: \"FR04-SRC-TEST\", severity: \"WARN\", path: (sub(\"'\"$ROOT\"'/\"; \"\")), line: 0, message: \"src/ 内 _test.rs 违反 Rust 惯例; 合并到 #[cfg(test)] mod 或移到 tests/\"})'; fi"
+optional: true
+timeout: 10

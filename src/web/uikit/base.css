@@ -1,0 +1,86 @@
+/* vendored from ~/projects/uikit@d8803de — 原件改了这里跟着拷；生成物请跑 uikit 的 gen/gen.py */
+/* uikit base — 通用原语：页面骨架 / 卡片 / 徽章 / 按钮 / 表格。
+   布局与项目特有样式留在各消费方。所有取色走 tokens.css 的变量。 */
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: var(--font-size-body, 14px)/1.5 system-ui, sans-serif;
+  margin: 0;
+  padding: var(--space-xl);
+}
+
+h1 { font-size: var(--font-size-title); margin: 0 0 4px; }
+.sub { color: var(--dim); font-size: var(--font-size-small); margin-bottom: var(--space-l); }
+
+/* 指标卡 */
+.cards { display: flex; gap: var(--space-m); flex-wrap: wrap; margin-bottom: var(--space-xl); }
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+  padding: var(--space-m) var(--space-l);
+  min-width: 150px;
+}
+.card .k {
+  color: var(--dim);
+  font-size: var(--font-size-tiny);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+.card .v { font-size: var(--font-size-metric); margin-top: 2px; }
+.v.ok { color: var(--ok); } .v.warn { color: var(--warn); }
+.v.bad { color: var(--bad); } .v.acc { color: var(--acc); }
+
+/* 徽章 */
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-tiny);
+}
+.b-primary { background: var(--ok); color: #000; }
+.b-active  { background: var(--acc-soft); color: var(--acc); }
+.b-dead    { background: var(--bad-soft); color: var(--bad); }
+.b-unmeasured { background: #2e2e38; color: var(--dim); }
+.b-ok      { background: var(--ok-soft); color: var(--ok); }
+.b-warn    { background: var(--warn-soft); color: var(--warn); }
+
+/* 按钮 */
+.btn {
+  background: var(--acc-soft);
+  color: var(--acc);
+  border: 0;
+  border-radius: var(--radius-s);
+  padding: 2px 10px;
+  cursor: pointer;
+  font-size: var(--font-size-tiny);
+}
+.btn:hover { background: #36506b; }
+.btn.warn { background: var(--warn-soft); color: var(--warn); }
+.btn.warn:hover { background: #5c4b28; }
+
+/* 进度条（调度轮/批进度等） */
+.bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--acc); border-radius: 2px; transition: width .4s; }
+
+/* 数据表 */
+table.uikit { border-collapse: collapse; width: 100%; }
+table.uikit th {
+  color: var(--dim);
+  font-size: var(--font-size-tiny);
+  font-weight: 500;
+  text-align: left;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+table.uikit td { padding: 6px 10px; border-bottom: 1px solid var(--line); }
+table.uikit tr:hover td { background: var(--card); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.dim { color: var(--dim); }
+
+#err, .err { color: var(--bad); font-size: var(--font-size-small); margin: 8px 0; min-height: 16px; }

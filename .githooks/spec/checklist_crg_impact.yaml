@@ -1,0 +1,48 @@
+# CK-CRG-IMPACT: CRG 影响面门禁 (L2 语义层)
+# 检测: PR/diff 跨 N 个以上 crate 改动 → 警告（建议拆分或说明耦合）
+# 工具: code-review-graph detect-changes (已有, omenic 装了)
+# 性能: 1-2s (CRG 索引已 build 过的情况)
+# SLA: l2 (语义层, 秒级)
+# Hook: merge (重量, 跨 crate 影响需要人审视)
+enabled: true
+hooks: [merge]
+sla: l2
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs", "**/Cargo.toml"]
+  paths_exclude: ["target/", ".wt/"]
+mode: diff
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      ROOT=$(git rev-parse --show-toplevel)
+      BASE=$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse HEAD~ 2>/dev/null)
+      cd "$ROOT" || exit 2
+      # 把 stderr 丢到 /tmp, stdout 纯 JSON
+      exec 2>/tmp/gate-crg-impact-err.log
+      changed=$(git diff --name-only "$BASE"...HEAD 2>/dev/null | awk -F/ '/^crates\// || /^bin\// {print $1"/"$2}' | sort -u)
+      n_crates=$(echo "$changed" | wc -l | tr -d ' ')
+      THRESHOLD=3
+      if [ "$n_crates" -lt "$THRESHOLD" ]; then
+        echo '[]'
+      else
+        # 也调 CRG 拿 risk score (如有)
+        crg_score=""
+        if command -v code-review-graph >/dev/null 2>&1; then
+          crg_score=$(code-review-graph detect-changes --brief --base "$BASE" 2>/dev/null \
+            | grep -oE 'risk score: [0-9.]+' | head -1 || true)
+        fi
+        echo "$changed" | jq -R -s '
+          split("\n") | map(select(length > 0)) as $crates
+          | [{
+              id: "CROSS-CRATE-IMPACT",
+              severity: "WARN",
+              path: ".",
+              line: 0,
+              message: ("改动跨 " + ($crates | length | tostring) + " 个 crate (" + ($crates | join(", ")) + "), 阈值 " + ("'"$THRESHOLD"'") + (if ("'"$crg_score"'") != "" then ", CRG " + ("'"$crg_score"'") else "" end) + " — 建议拆分或 PR 描述里说明耦合理由")
+            }]' | jq -c .
+      fi
+optional: true
+timeout: 60

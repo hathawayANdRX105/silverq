@@ -7,38 +7,26 @@
 //!   silverq status                 查看当前状态
 //!
 //! 协议/传输/TLS/Reality/QUIC 全部复用 meow-rs；silverq 只做调度与转发。
-mod batch;
-mod config;
-mod decision;
-mod fast_path;
-mod node;
-mod nodespec;
-mod persist;
-mod settings;
-
+use silverq::config::settings;
+#[cfg(unix)]
+use silverq::ctl::{cli, protocol as ctl};
 #[cfg(feature = "meow")]
-mod factory;
-#[cfg(feature = "meow")]
-mod inbound;
-#[cfg(feature = "meow")]
-mod meow;
+use silverq::dataplane::inbound;
 #[cfg(all(feature = "meow", feature = "meow-listener"))]
-mod tun;
+use silverq::dataplane::tun;
+use silverq::proxy::nodespec;
 #[cfg(feature = "meow")]
-mod udp;
+use silverq::proxy::{factory, meow};
+use silverq::scheduler::{batch, decision, fast_path, persist, SchedulerProgress};
 #[cfg(feature = "meow")]
-mod web;
-
-#[cfg(unix)]
-mod cli;
-#[cfg(unix)]
-mod ctl;
+use silverq::web;
 
 #[cfg(not(feature = "meow"))]
-use batch::NoopMeasurer;
+use silverq::scheduler::batch::NoopMeasurer;
 
-use batch::Measurer;
-use node::Node;
+use silverq::scheduler::batch::Measurer;
+use silverq::scheduler::node::Node;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -137,23 +125,24 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
         Arc::new(parking_lot::Mutex::new(None));
     // 运行时可热更调参：调度循环 / inbound / web(PATCH /configs) 三方共享
     let tuning: ctl::SharedTuning = Arc::new(parking_lot::RwLock::new(
-        crate::settings::RuntimeTuning::from_eff(&eff),
+        settings::RuntimeTuning::from_eff(&eff),
     ));
     let protocols: std::collections::HashMap<String, String> = specs
         .iter()
         .map(|sp| {
             let name = match sp.protocol {
-                crate::nodespec::Protocol::Vless => "Vless",
-                crate::nodespec::Protocol::Trojan => "Trojan",
-                crate::nodespec::Protocol::Shadowsocks => "Shadowsocks",
-                crate::nodespec::Protocol::Hysteria2 => "Hysteria2",
-                crate::nodespec::Protocol::Direct => "Direct",
+                nodespec::Protocol::Vless => "Vless",
+                nodespec::Protocol::Trojan => "Trojan",
+                nodespec::Protocol::Shadowsocks => "Shadowsocks",
+                nodespec::Protocol::Hysteria2 => "Hysteria2",
+                nodespec::Protocol::Direct => "Direct",
             };
             (sp.tag.clone(), name.to_string())
         })
         .collect();
 
     // 4. 调度循环（测速 + EWMA + 切换），pinned 时暂停覆盖
+    let progress = Arc::new(SchedulerProgress::default());
     let handles = SchedulerHandles {
         measurer: measurer.clone(),
         pool: pool.clone(),
@@ -161,6 +150,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
         pinned: pinned.clone(),
         pin_target: pin_target.clone(),
         selector_store: eff.selector_store.clone(),
+        progress: progress.clone(),
     };
     let sched = tokio::spawn(schedule_loop(handles, tuning.clone()));
 
@@ -179,6 +169,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             eff.probe_url.clone(),
             eff.ui_dir.clone(),
             protocols.clone(),
+            progress.clone(),
         ));
         #[cfg(not(feature = "meow"))]
         let ctl_state = Arc::new(ctl::CtlState::new(
@@ -191,6 +182,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             eff.probe_url.clone(),
             eff.ui_dir.clone(),
             protocols.clone(),
+            progress.clone(),
         ));
         let ctl_sock = std::path::PathBuf::from(eff.ctl_sock.clone());
         #[cfg(feature = "meow")]
@@ -226,7 +218,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             // 7. TUN 透明代理（feature meow-tun）
             #[cfg(all(feature = "meow", feature = "meow-listener"))]
             let tun_task = if eff.tun_enabled {
-                let tun_config = crate::tun::TunConfig::from_effective(&eff);
+                let tun_config = tun::TunConfig::from_effective(&eff);
                 let tun_sel = selection.clone();
                 let tun_reg = registry.clone();
                 let tun_nodes = {
@@ -234,7 +226,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
                     guard.clone()
                 };
                 Some(tokio::spawn(async move {
-                    if let Err(e) = crate::tun::run(tun_config, tun_reg, tun_sel, tun_nodes).await {
+                    if let Err(e) = tun::run(tun_config, tun_reg, tun_sel, tun_nodes).await {
                         tracing::error!("TUN exited: {e}");
                     }
                 }))
@@ -294,7 +286,6 @@ fn report_task_exit(name: &str, res: Result<(), tokio::task::JoinError>) {
     }
 }
 
-/// 调度共享句柄。
 struct SchedulerHandles {
     measurer: Arc<dyn Measurer>,
     pool: Arc<RwLock<Vec<Node>>>,
@@ -305,6 +296,8 @@ struct SchedulerHandles {
     pin_target: Arc<parking_lot::Mutex<Option<String>>>,
     /// SelectorStore 路径（publish_selector_store 用）
     selector_store: String,
+    /// 面板进度计数（schedule_loop 写，web 读）
+    progress: Arc<SchedulerProgress>,
 }
 
 /// 调度主循环：周期全池测速 → EWMA 更新 → 纯 EWMA 选前 N → 写共享选择。
@@ -330,7 +323,7 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
         pinned,
         pin_target,
         selector_store,
-        ..
+        progress,
     } = h;
 
     // 冷启动播种：还没有任何测速数据时，按配置顺序给数据面一个候选集，
@@ -363,6 +356,8 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
             let guard = pool.read().await;
             decision::measurement_order(&guard, t.batch_size, t.timeout_penalty)
         };
+        let round_started = std::time::Instant::now();
+        progress.round_begin(batches.len());
 
         for chunk in batches {
             let results =
@@ -399,13 +394,14 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
             }
 
             persist::save(&pool.read().await);
+            progress.batch_done(persist::now_secs() as i64);
         }
 
         tracing::info!(
             selection = ?last_selection,
             "测速轮完成"
         );
-
+        progress.round_end(round_started.elapsed().as_secs());
         // 先取值再 await：parking_lot 的 guard 不是 Send，不能跨 await 存活
         let iv = tuning.read().interval_secs;
         tokio::time::sleep(Duration::from_secs(iv)).await;

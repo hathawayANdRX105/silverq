@@ -1,0 +1,35 @@
+# 泛用: HTTP 调用走 reqwest,不要 subprocess curl/wget
+# 检测: 任何 .rs 中 std::process::Command 拉 curl/wget/httpie
+# 例外: 测试 mock server 拉起, 工具层包装允许
+# grep 模式, 零 LLM
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l1
+fail_severity: FAIL
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/", "**/tests/**", "crates/tools/**"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      ROOT=$(git rev-parse --show-toplevel)
+      # 检测 std::process::Command 拉 HTTP CLI
+      matches=$(grep -rEn 'std::process::Command.*"(curl|wget|httpie)"' "$ROOT" \
+        --include='*.rs' \
+        --exclude-dir=target --exclude-dir=.wt --exclude-dir=.git \
+        --exclude-dir=tests 2>/dev/null | head -20)
+      if [ -z "$matches" ]; then
+        echo '[]'
+      else
+        printf '%s' "$matches" | jq -R -s '
+          split("\n")
+          | map(select(length > 0))
+          | map(capture("^(?<path>.+):(?<line>[0-9]+):(?<rest>.*)$"))
+          | map({id: "HTTP-VIA-SUBPROCESS", severity: "FAIL", path: .path, line: (.line|tonumber), message: ("HTTP 调用用 reqwest 不要 subprocess curl/wget: " + .rest)})
+        '
+      fi
+optional: true
+timeout: 15

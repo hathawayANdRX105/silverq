@@ -1,0 +1,37 @@
+# CK-STALE-API: 废弃/不推荐 Rust API 检测 (L1 确定性)
+# 检测: std::mem::uninitialized / try! / Error::description() /
+#       std::sync::ONCE_INIT / std::cell::BorrowError
+# grep 模式, 零 LLM
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      exec 2>/tmp/gate-stale-api-err.log
+      ROOT=$(git rev-parse --show-toplevel)
+      PAT='(std::mem::uninitialized|try!\(|Error::description\(\)|std::sync::ONCE_INIT|std::cell::BorrowError)'
+      matches=$(grep -rEn "$PAT" "$ROOT/crates" "$ROOT/bin" --include='*.rs' 2>/dev/null | head -50)
+      if [ -z "$matches" ]; then
+        echo '[]'
+      else
+        printf '%s' "$matches" | jq -R -s '
+          split("\n") | map(select(length > 0))
+          | map(capture("^(?<path>.+):(?<line>[0-9]+):(?<rest>.*)$"))
+          | map({
+              id: "STALE-API",
+              severity: "WARN",
+              path: .path,
+              line: (.line | tonumber),
+              message: ("废弃/不推荐 Rust API: " + .rest)
+            })' | jq -c '.'
+      fi
+optional: true
+timeout: 30

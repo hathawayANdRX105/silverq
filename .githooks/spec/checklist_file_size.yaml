@@ -1,0 +1,41 @@
+# 泛用: 单文件体积上限（架构门禁，拆分触发器）
+# 为什么: 100k 级别的巨型文件无法 review / 无法可靠测试。超阈值即提示按职责拆分。
+# 阈值: 1500 行 或 35KB（宽松档，只提示不阻断）；存量超标留 WARN，清账后可升 FAIL。
+# 检测: 扫仓库根所有 .rs（-prune 按目录名剪枝, worktree 安全）, 数行数 + 字节
+# grep 模式, 零 LLM, 毫秒级（仅 wc）
+enabled: true
+hooks: [merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      ROOT=$(git rev-parse --show-toplevel)
+      LIMIT_LINES=1500
+      LIMIT_BYTES=35840
+      matches=$(find "$ROOT" \( -name target -o -name .git -o -name .wt \) -prune \
+        -o -name '*.rs' -print 2>/dev/null \
+        | while read -r f; do
+            lines=$(( $(wc -l < "$f" 2>/dev/null) ))
+            bytes=$(( $(wc -c < "$f" 2>/dev/null) ))
+            if [ "$lines" -gt "$LIMIT_LINES" ] || [ "$bytes" -gt "$LIMIT_BYTES" ]; then
+              printf '%s:0:%s 行 / %s 字节\n' "$f" "$lines" "$bytes"
+            fi
+          done | head -30)
+      if [ -z "$matches" ]; then
+        echo '[]'
+      else
+        printf '%s' "$matches" | jq -R -s '
+          split("\n") | map(select(length > 0))
+          | map(capture("^(?<path>.+):(?<line>[0-9]+):(?<rest>.*)$"))
+          | map({id: "FILE-TOO-BIG", severity: "WARN", path: .path, line: (.line|tonumber),
+                message: ("文件过大 (>1500 行 或 >35KB), 考虑按单一职责拆分: " + .rest)})'
+      fi
+optional: true
+timeout: 30

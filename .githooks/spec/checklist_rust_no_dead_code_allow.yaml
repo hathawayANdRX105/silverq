@@ -1,0 +1,33 @@
+# 泛用: 生产代码不留 #[allow(dead_code)]
+# 为什么: 开发期压警告用的, 最终合并前该删的删,该用的用
+# 检测: 任何 rs 文件含有 allow(dead_code) 且后面没有解释理由的注释
+# grep 模式, 零 LLM
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      ROOT=$(git rev-parse --show-toplevel)
+      matches=$(grep -rEn '#\[allow\(dead_code\)\]' "$ROOT" --include='*.rs' \
+        --exclude-dir=target --exclude-dir=.wt --exclude-dir=.git 2>/dev/null \
+        | grep -v '//' | head -20)
+      if [ -z "$matches" ]; then
+        echo '[]'
+      else
+        printf '%s' "$matches" | jq -R -s '
+          split("\n")
+          | map(select(length > 0))
+          | map(capture("^(?<path>.+):(?<line>[0-9]+):(?<rest>.*)$"))
+          | map({id: "NO-DEAD-CODE-ALLOW", severity: "WARN", path: .path, line: (.line|tonumber), message: ("合并前清理掉 #[allow(dead_code)] (除非同行带 // 理由注释): " + .rest)})
+        '
+      fi
+optional: true
+timeout: 10
