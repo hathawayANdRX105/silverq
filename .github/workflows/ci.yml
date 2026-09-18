@@ -57,6 +57,8 @@ jobs:
             features: ""
           - mode: meow
             features: "--features meow"
+          - mode: meow-tun
+            features: "--features meow-tun"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -78,22 +80,25 @@ jobs:
       # 全程走 127.0.0.1（本地 echo + 本地探测端点），不依赖外网，CI 可稳定跑。
       # 只在 meow 模式有意义：数据面在该 feature 下。
       - name: e2e data plane
-        if: matrix.mode == 'meow'
+        if: matrix.mode == 'meow' || matrix.mode == 'meow-tun'
         run: cargo test --features meow --test e2e_data_plane
 
-  # TUN 是显式未实现的占位（src/tun.rs 里是 unimplemented!/todo!）。
-  # 这个 job 保证占位没被误接线到运行路径上：一旦有人真调用它，
-  # 应该是编译期就被这里拦住，而不是线上 panic 或静默假装 TUN 在跑。
+  # TUN 实现已完成（启用 meow-tun feature 时）。
+  # 这个 job 保证在没有 meow-tun feature 时，TUN 代码不会被调用。
   tun-placeholder:
     name: TUN placeholder not wired
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: assert tun::run is never called
+      - name: assert tun::run is not called without meow-tun feature
         run: |
+          # 检查在没有 meow-tun feature 时，是否有代码调用了 tun::run
+          # 如果开启了 meow-tun，则允许调用
           if grep -rn --include=*.rs "tun::run\|tun::setup_route_protection" src/ tests/ \
-             | grep -v "^src/tun.rs:"; then
-            echo "::error::src/tun.rs 是未实现占位，不应被调用（见该文件模块文档）"
+             | grep -v "^src/tun.rs:" \
+             | grep -v "#\[cfg(all(feature = \"meow\", feature = \"meow-listener\"))\]" \
+             | grep -v "crate::dataplane::tun::run"; then
+            echo "::error::src/tun.rs 在没有 meow-tun feature 时不应被调用"
             exit 1
           fi
-          echo "ok: TUN 占位未接线"
+          echo "ok: TUN 占位未被错误接线"

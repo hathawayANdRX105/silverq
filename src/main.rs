@@ -234,14 +234,16 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
                     guard.clone()
                 };
                 Some(tokio::spawn(async move {
-                    if let Err(e) = crate::dataplane::tun::run(tun_config, tun_reg, tun_sel, tun_nodes).await {
+                    if let Err(e) =
+                        crate::dataplane::tun::run(tun_config, tun_reg, tun_sel, tun_nodes).await
+                    {
                         tracing::error!("TUN exited: {e}");
                     }
                 }))
             } else {
                 None
             };
-            
+
             #[cfg(all(feature = "meow", feature = "meow-listener"))]
             {
                 let mut tasks = vec![inb, inb2, sched];
