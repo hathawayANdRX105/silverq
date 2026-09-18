@@ -19,7 +19,6 @@ pub const DEFAULT_TUN_DEVICE: Option<&str> = None; // auto
 pub const DEFAULT_TUN_MTU: Option<u16> = None; // auto
 pub const DEFAULT_TUN_AUTO_ROUTE: bool = true;
 pub const DEFAULT_TUN_FAKE_IP_CIDR: &str = "198.18.0.0/15";
-pub const DEFAULT_TUN_DNS_PORT: u16 = 1053;
 pub const DEFAULT_TUN_EXCLUDE_CIDRS: &[&str] = &[
     "10.0.0.0/8",
     "172.16.0.0/12",

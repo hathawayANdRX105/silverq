@@ -154,8 +154,6 @@ pub struct TunSection {
     pub fake_ip_cidr: Option<String>,
     /// 排除的 CIDR（不走 TUN，如本地网段、代理服务器 IP）
     pub exclude_cidrs: Vec<String>,
-    /// DNS 劫持端口（配合 fake-ip，默认 1053）
-    pub dns_port: u16,
 }
 
 impl Default for TunSection {
@@ -170,7 +168,6 @@ impl Default for TunSection {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            dns_port: crate::config::DEFAULT_TUN_DNS_PORT,
         }
     }
 }
@@ -243,11 +240,6 @@ pub struct Effective {
         allow(dead_code)
     )]
     pub tun_exclude_cidrs: Vec<String>,
-    #[cfg_attr(
-        not(all(feature = "meow", feature = "meow-listener")),
-        allow(dead_code)
-    )]
-    pub tun_dns_port: u16,
 }
 
 fn env_or(key: &str, v: String) -> String {
@@ -361,7 +353,6 @@ impl Effective {
                 .ok()
                 .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
                 .unwrap_or(fc.tun.exclude_cidrs.clone()),
-            tun_dns_port: env_parsed_or("SILVERQ_TUN_DNS_PORT", fc.tun.dns_port),
         }
     }
 }

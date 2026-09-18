@@ -9,9 +9,10 @@ use crate::meow::Registry;
 use crate::node::Node;
 use crate::settings::Effective;
 use meow_common::{
-    AdapterType, DelayHistory, DnsMode, MeowError, Metadata, Proxy, ProxyAdapter, ProxyConn,
-    ProxyHealth, ProxyPacketConn, TunnelMode,
+    AdapterType, DelayHistory, DnsMode, Metadata, Proxy, ProxyAdapter, ProxyConn, ProxyHealth,
+    ProxyPacketConn, TunnelMode,
 };
+use meow_dns::fakeip::{MemoryStore, Pool, Store};
 use meow_dns::resolver::Resolver;
 use meow_listener::tun::{TunListener, TunListenerConfig, TunReady, TunRouteScope};
 use meow_rules::final_rule::FinalRule;
@@ -119,8 +120,6 @@ pub struct TunConfig {
     pub fake_ip_cidr: Option<String>,
     /// 排除的 CIDR（不走 TUN，如本地网段、代理服务器 IP）
     pub exclude_cidrs: Vec<String>,
-    /// DNS 劫持端口（配合 fake-ip，默认 1053）
-    pub dns_port: u16,
 }
 
 impl TunConfig {
@@ -131,7 +130,6 @@ impl TunConfig {
             auto_route: eff.tun_auto_route,
             fake_ip_cidr: eff.tun_fake_ip_cidr.clone(),
             exclude_cidrs: eff.tun_exclude_cidrs.clone(),
-            dns_port: eff.tun_dns_port,
         }
     }
 }
@@ -160,23 +158,31 @@ impl TunRuntime {
     fn new(
         registry: Registry,
         selection: SharedSelection,
-        _dns_port: u16,
         fake_ip_cidr: Option<String>,
         exclude_cidrs: Vec<String>,
-    ) -> Self {
-        // 创建 DNS resolver（用于 fake-IP 模式）
+    ) -> Result<Self, String> {
+        // fake-IP 池必须装进 resolver：TunRouteScope::FakeIp 的路由范围与 DNS
+        // 劫持网关都取自 resolver.fake_ip_v4_net()，不装池子 → auto_route 不装
+        // 路由、DNS 也无法合成假地址，TUN 静默不接任何流量。
         let fake_ip_range = fake_ip_cidr
             .as_deref()
             .and_then(|s| ipnet::Ipv4Net::from_str(s).ok())
             .unwrap_or_else(|| ipnet::Ipv4Net::new(Ipv4Addr::new(198, 18, 0, 0), 15).unwrap());
 
-        let resolver = Arc::new(Resolver::new(
+        let mut resolver = Resolver::new(
             vec![], // upstream DNS（留空，后续可通过配置添加）
             vec![], // hosts
             DnsMode::FakeIp,
             meow_trie::DomainTrie::new(),
             false, // use_hosts
-        ));
+        );
+        // ponytail: 内存 LRU 容量 4096（与 meow 的 DnsCache 默认同量级）；
+        // 池子本身按 CIDR 范围循环分配，LRU 只是 host↔ip 映射的淘汰上限。
+        let store = Arc::new(MemoryStore::new(4096)) as Arc<dyn Store>;
+        let pool = Pool::new(ipnet::IpNet::V4(fake_ip_range), store)
+            .map_err(|e| format!("fake-ip pool init failed: {e}"))?;
+        resolver.set_fakeip_v4(Arc::new(pool));
+        let resolver = Arc::new(resolver);
 
         let tunnel = Tunnel::new(resolver);
         tunnel.set_mode(TunnelMode::Rule);
@@ -185,14 +191,14 @@ impl TunRuntime {
         // 单一 DirectAdapter 实例，Arc 共享给 silverq-auto 兜底与 "DIRECT" 规则出口。
         let direct: Arc<dyn ProxyAdapter> = Arc::new(meow_proxy::DirectAdapter::new());
 
-        Self {
+        Ok(Self {
             tunnel,
             registry,
             selection,
             current_auto_tag: RwLock::new(None),
             direct,
             exclude_cidrs,
-        }
+        })
     }
 
     /// 同步 "silverq-auto" proxy 到 Tunnel：从 registry 读取当前 selection 的第一个 adapter，更新 Tunnel 的 proxies map
@@ -241,9 +247,10 @@ impl TunRuntime {
     /// 初始化规则（首次启动时调用）
     ///
     /// 规则按 first-match-wins 求值，顺序：
-    ///   1. 私网安全网（硬编码 5 段）→ DIRECT
-    ///   2. 用户 `[tun].exclude_cidrs` → DIRECT
-    ///   3. FinalRule → silverq-auto（兜底）
+    /// 1. 私网安全网（硬编码 5 段）→ DIRECT
+    /// 2. 用户 `[tun].exclude_cidrs` → DIRECT
+    /// 3. FinalRule → silverq-auto（兜底）
+    ///
     /// 不用 GEOIP，避免依赖 GeoIP 数据库。
     fn init_rules(&self) {
         let mut rules: Vec<Box<dyn meow_common::Rule>> = Vec::new();
@@ -303,10 +310,9 @@ pub async fn run(
     let runtime = Arc::new(TunRuntime::new(
         registry.clone(),
         selection.clone(),
-        config.dns_port,
         Some(fake_ip_cidr.clone()),
         config.exclude_cidrs.clone(),
-    ));
+    )?);
 
     // 初始化规则
     runtime.init_rules();
@@ -341,23 +347,25 @@ pub async fn run(
         "silverq-tun".to_string(),
     );
 
-    // 设置 readiness channel
+    // readiness 只用于日志：listener 就绪时记一条，失败时不挡路。
+    // 原实现在 run() 之后才 await ready_rx —— run 提前出错时 tx 被 drop、
+    // ready_rx 永久挂起，错误既不返回也不被看见（tun 任务看起来还活着）。
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<TunReady>();
     let listener = listener.with_readiness_signal(ready_tx);
+    tokio::spawn(async move {
+        if ready_rx.await.is_ok() {
+            info!("TUN 设备就绪");
+        }
+    });
 
-    // 启动 listener（阻塞直到出错/取消）
-    let run_result = listener.run().await;
-
-    // 等待 readiness 信号（如果 run 很快返回，也检查 readiness）
-    let _ = ready_rx.await;
-
-    run_result
+    listener.run().await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::settings::FileConfig;
+    use meow_common::MeowError;
     use meow_proxy::direct::DirectAdapter;
     use std::time::Duration;
 
@@ -395,7 +403,6 @@ mod tests {
         assert_eq!(tc.auto_route, eff.tun_auto_route);
         assert_eq!(tc.fake_ip_cidr, eff.tun_fake_ip_cidr);
         assert_eq!(tc.exclude_cidrs, eff.tun_exclude_cidrs);
-        assert_eq!(tc.dns_port, eff.tun_dns_port);
     }
 
     #[test]
@@ -406,7 +413,6 @@ mod tests {
         eff.tun_auto_route = false;
         eff.tun_fake_ip_cidr = Some("10.10.0.0/16".into());
         eff.tun_exclude_cidrs = vec!["1.2.3.0/24".into(), "9.9.9.0/24".into()];
-        eff.tun_dns_port = 5300;
 
         let tc = TunConfig::from_effective(&eff);
         assert_eq!(tc.device.as_deref(), Some("utun9"));
@@ -417,7 +423,6 @@ mod tests {
             tc.exclude_cidrs,
             vec!["1.2.3.0/24".to_string(), "9.9.9.0/24".to_string()]
         );
-        assert_eq!(tc.dns_port, 5300);
     }
 
     // ---- A3: ProxyWrapper 的 Proxy trait 桩 ----
@@ -460,7 +465,6 @@ mod tests {
             auto_route: false,
             fake_ip_cidr: Some("not-a-cidr".into()),
             exclude_cidrs: vec![],
-            dns_port: 1053,
         };
         let err = run(
             config,
@@ -486,13 +490,13 @@ mod tests {
         let rt = TunRuntime::new(
             empty_registry(),
             Arc::new(TokioRwLock::new(vec![])),
-            1053,
             Some("198.18.0.0/15".into()),
             vec![],
-        );
+        )
+        .expect("fake-ip pool init");
         rt.init_rules();
         let snap = rt.tunnel.route_snapshot();
-        assert!(snap.rules.len() >= 1, "init_rules 至少注册一条 FinalRule");
+        assert!(!snap.rules.is_empty(), "init_rules 至少注册一条 FinalRule");
         let last = snap.rules.last().expect("至少一条规则");
         assert_eq!(
             last.adapter(),
@@ -511,13 +515,8 @@ mod tests {
         let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
         let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
 
-        let rt = TunRuntime::new(
-            registry,
-            selection,
-            1053,
-            Some("198.18.0.0/15".into()),
-            vec![],
-        );
+        let rt = TunRuntime::new(registry, selection, Some("198.18.0.0/15".into()), vec![])
+            .expect("fake-ip pool init");
 
         assert!(
             rt.tunnel.proxy("silverq-auto").is_none(),
@@ -546,13 +545,8 @@ mod tests {
         let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
         let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
 
-        let rt = TunRuntime::new(
-            registry,
-            selection,
-            1053,
-            Some("198.18.0.0/15".into()),
-            vec![],
-        );
+        let rt = TunRuntime::new(registry, selection, Some("198.18.0.0/15".into()), vec![])
+            .expect("fake-ip pool init");
         rt.sync_proxies().await;
         let snap1 = rt.tunnel.route_snapshot();
 
@@ -578,10 +572,10 @@ mod tests {
         let rt = TunRuntime::new(
             registry,
             selection.clone(),
-            1053,
             Some("198.18.0.0/15".into()),
             vec![],
-        );
+        )
+        .expect("fake-ip pool init");
         rt.sync_proxies().await;
         {
             let g = rt.current_auto_tag.read();
@@ -658,9 +652,11 @@ mod tests {
             }
         });
 
-        let mut metadata = Metadata::default();
-        metadata.dst_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
-        metadata.dst_port = addr.port();
+        let metadata = Metadata {
+            dst_ip: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
+            dst_port: addr.port(),
+            ..Default::default()
+        };
 
         let result = wrapper.dial_tcp(&metadata).await;
         accept_handle.abort();
@@ -677,10 +673,10 @@ mod tests {
         let rt = TunRuntime::new(
             empty_registry(),
             Arc::new(TokioRwLock::new(vec![])),
-            1053,
             Some("198.18.0.0/15".into()),
             vec!["224.0.0.0/4".into()],
-        );
+        )
+        .expect("fake-ip pool init");
         rt.init_rules();
         let snap = rt.tunnel.route_snapshot();
         assert_eq!(snap.rules.len(), 7, "应 = 5 私网 + 1 用户 + 1 final");
@@ -713,10 +709,10 @@ mod tests {
         let rt = TunRuntime::new(
             empty_registry(),
             Arc::new(TokioRwLock::new(vec![])),
-            1053,
             Some("198.18.0.0/15".into()),
             vec!["not-a-cidr".into()],
-        );
+        )
+        .expect("fake-ip pool init");
         rt.init_rules();
         let snap = rt.tunnel.route_snapshot();
         assert_eq!(snap.rules.len(), 6, "非法 CIDR 被跳过：5 私网 + 1 final");
@@ -732,13 +728,8 @@ mod tests {
         let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
         let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
 
-        let rt = TunRuntime::new(
-            registry,
-            selection,
-            1053,
-            Some("198.18.0.0/15".into()),
-            vec![],
-        );
+        let rt = TunRuntime::new(registry, selection, Some("198.18.0.0/15".into()), vec![])
+            .expect("fake-ip pool init");
         assert!(rt.tunnel.proxy("DIRECT").is_none(), "sync 前不应有 DIRECT");
         rt.sync_proxies().await;
         assert!(
@@ -766,7 +757,6 @@ mod tests {
             auto_route: false,
             fake_ip_cidr: Some("198.18.0.0/15".into()),
             exclude_cidrs: vec![],
-            dns_port: 1053,
         };
         let mut handle = tokio::spawn(async move {
             let _ = run(
@@ -801,7 +791,6 @@ mod tests {
             auto_route: false,
             fake_ip_cidr: Some("198.18.0.0/15".into()),
             exclude_cidrs: vec![],
-            dns_port: 1053,
         };
         let res = tokio::time::timeout(
             Duration::from_secs(3),

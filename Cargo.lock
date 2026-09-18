@@ -2715,10 +2715,11 @@ dependencies = [
 
 [[package]]
 name = "silverq"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "futures",
  "futures-util",
  "ipnet",
  "meow-common",
@@ -2734,6 +2735,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha1 0.10.7",
+ "smol_str",
  "tokio",
  "tokio-test",
  "tokio-util",

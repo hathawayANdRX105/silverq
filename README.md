@@ -73,7 +73,7 @@ silverq select auto           # 取消钉住，恢复自动
 | `decision.rs` | 纯 EWMA select_top |
 | `inbound.rs` | 数据面 TCP（SOCKS5 CONNECT / HTTP-CONNECT → 当前选择，best→次优 fallback） |
 | `udp.rs` | 数据面 UDP（SOCKS5 UDP ASSOCIATE 中继，按 (客户端,目标) 分会话） |
-| `tun.rs` | **未实现占位**（`unimplemented!`），见文件内说明 |
+| `tun.rs` | TUN 透明代理（meow-listener listener-tun，`meow-tun` feature）：fake-IP 路由 + 规则分流 + DIRECT 兜底 |
 | `cli.rs` | 子命令解析（serve / reload / select / status） |
 | `ctl.rs` | 控制通道（unix socket：热加载、手动钉住、状态查询） |
 | `persist.rs` | EWMA 分数持久化（原子写 + 6 小时过期判定） |
@@ -144,9 +144,12 @@ ui_dir = "~/.local/share/silverq/ui"   # zashboard 静态目录
 
 ## 已知范围
 
-- **TUN 未实现**：`src/tun.rs` 是显式占位（`unimplemented!` / `todo!`），不接线。
-  meow-rs 上游有 TUN 但**未发布到 crates.io**；要做需改 git 依赖复用上游，
-  或自行基于 `tun` + `smoltcp` 实现。两条路线与证据见该文件模块文档，CI 有 job 守着它没被误接。
+- **TUN 已实现（v0.2.0，`meow-tun` feature）**：基于 meow-listener 的 listener-tun。
+  fake-IP 路由（`TunRouteScope::FakeIp` 只接管 fake-IP 段，真实 IP 不回环，
+  故节点服务器 IP 不会绕回 TUN；若观察到异常，在 `[tun].exclude_cidrs` 加
+  `节点IP/32`），规则分流（私网 + 用户 `exclude_cidrs` → DIRECT，末尾
+  FinalRule → silverq-auto），节点 dial 失败自动回退 DIRECT。建设备需要 root
+  或 `CAP_NET_ADMIN`；只有 release 里的 `silverq-tun-*` 产物带这个 feature。
 - **ws / grpc 已支持**（VLESS）：层序为 TLS 贴 TCP、ws/grpc 叠其上，明文 ws 节点
   （`tls: false`）也可接。trojan 的 transport 还没接（其 adapter 无 TransportChain 入口）。
 - **黑洞节点已处理**：建连后加了「首次响应超时」（测速超时 ×4）。顺序是先把客户端
@@ -174,12 +177,12 @@ ui_dir = "~/.local/share/silverq/ui"   # zashboard 静态目录
 | job | 作用 |
 |-----|------|
 | `rustfmt` | 格式 gate |
-| `clippy (default / meow)` | 两种 feature 组合，`-D warnings` |
-| `test (default / meow)` | build + 单测；meow 额外跑 e2e 数据面 |
-| `TUN placeholder not wired` | 防止未实现的 TUN 占位被误接进运行路径 |
+| `clippy (default / meow / meow-tun)` | 三种 feature 组合，`-D warnings` |
+| `test (default / meow / meow-tun)` | build + 单测；meow / meow-tun 额外跑 e2e 数据面 |
+| `TUN placeholder not wired` | 守住未开 `meow-tun` 时 `tun::run` 不被无 cfg 保护的调用点引用 |
 
-两种 feature 都进矩阵的原因：meow 关掉时走 `NoopMeasurer`，是独立编译路径，
-只测一种会漏掉 `cfg` 分支里的错误。
+三种 feature 都进矩阵的原因：meow 关掉时走 `NoopMeasurer`，是独立编译路径；
+`meow-tun` 多编译一整块 TUN 数据面，只测两种会漏掉 cfg 分支里的错误（已踩过）。
 
 ## TUN 手动测试
 

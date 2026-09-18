@@ -28,13 +28,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 两种 feature 组合都要过：meow 关掉时 NoopMeasurer 路径独立编译，
-        # 只测一种会漏掉 cfg 分支里的错误（这个项目已经踩过一次）
+        # 三种 feature 组合都要过：meow 关掉时 NoopMeasurer 路径独立编译，
+        # meow-tun 多编译一整块 TUN 数据面，只测两种会漏掉 cfg 分支里的错误
         include:
           - mode: default
             features: ""
           - mode: meow
             features: "--features meow"
+          - mode: meow-tun
+            features: "--features meow-tun"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
