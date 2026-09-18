@@ -94,11 +94,34 @@ jobs:
         run: |
           # 检查在没有 meow-tun feature 时，是否有代码调用了 tun::run
           # 如果开启了 meow-tun，则允许调用
-          if grep -rn --include=*.rs "tun::run\|tun::setup_route_protection" src/ tests/ \
-             | grep -v "^src/tun.rs:" \
-             | grep -v "#\[cfg(all(feature = \"meow\", feature = \"meow-listener\"))\]" \
-             | grep -v "crate::dataplane::tun::run"; then
-            echo "::error::src/tun.rs 在没有 meow-tun feature 时不应被调用"
+          # 这里检查是否有未被 cfg(all(feature = "meow", feature = "meow-listener")) 保护的调用
+          # 使用简单的行数检查：找到 tun::run 调用，检查前几行是否有 cfg guard
+          violations=0
+          while IFS= read -r line; do
+            file="${line%%:*}"
+            lineno="${line#*:}"
+            lineno="${lineno%%:*}"
+            # 检查前 5 行是否有 cfg guard
+            has_guard=false
+            for i in $(seq 1 5); do
+              check_line=$((lineno - i))
+              if [ $check_line -lt 1 ]; then break; fi
+              prev_line=$(sed -n "${check_line}p" "$file")
+              if echo "$prev_line" | grep -q 'cfg(all(feature = "meow", feature = "meow-listener"))'; then
+                has_guard=true
+                break
+              fi
+            done
+            if [ "$has_guard" = false ]; then
+              echo "::error file=$file,line=$lineno::Found unguarded tun::run call"
+              violations=1
+            fi
+          done < <(grep -rn --include=*.rs "tun::run\|tun::setup_route_protection" src/ tests/ \
+            | grep -v "^src/tun.rs:" \
+            | grep -v "crate::tun::run" \
+            | grep -v "crate::tun::TunConfig")
+          
+          if [ $violations -eq 1 ]; then
             exit 1
           fi
           echo "ok: TUN 占位未被错误接线"
