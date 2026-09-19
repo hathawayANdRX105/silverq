@@ -213,6 +213,13 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             let listen = eff.listen.clone();
             let inbound_sel = selection.clone();
             let inbound_reg = registry.clone();
+            // 国内域名直连表：SOCKS 入站路径的直连判定 + TUN 的 fake-IP 旁路
+            // （TUN 侧在 TunRuntime::new 里独立加载同一文件）。
+            let china_domains =
+                silverq::proxy::dns::load_china_domains(&silverq::proxy::dns::china_domains_path());
+            let china = Arc::new(silverq::proxy::dns::ChinaSet::new(&china_domains));
+            tracing::info!(count = china_domains.len(), "国内域名直连表加载");
+            let inb_china = china.clone();
             let inb2 = tokio::spawn(async move {
                 if let Err(e) = inbound::run(
                     &listen,
@@ -220,6 +227,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
                     inbound_sel,
                     tuning.clone(),
                     pinned.clone(),
+                    inb_china,
                 )
                 .await
                 {

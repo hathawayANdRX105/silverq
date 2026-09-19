@@ -12,7 +12,7 @@ use meow_common::{
     AdapterType, DelayHistory, DnsMode, Metadata, Proxy, ProxyAdapter, ProxyConn, ProxyHealth,
     ProxyPacketConn, TunnelMode,
 };
-use meow_dns::fakeip::{MemoryStore, Pool, Store};
+use meow_dns::fakeip::{MemoryStore, Pool, Skipper, SkipperMode, Store};
 use meow_dns::resolver::Resolver;
 use meow_listener::tun::{TunListener, TunListenerConfig, TunReady, TunRouteScope};
 use meow_rules::final_rule::FinalRule;
@@ -21,7 +21,7 @@ use meow_tunnel::Tunnel;
 use parking_lot::RwLock;
 use smol_str::SmolStr;
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -218,8 +218,15 @@ impl TunRuntime {
             .and_then(|s| ipnet::Ipv4Net::from_str(s).ok())
             .unwrap_or_else(|| ipnet::Ipv4Net::new(Ipv4Addr::new(198, 18, 0, 0), 15).unwrap());
 
+        // 真实上游 DNS：fake-IP skipper 命中的域名（国内表）经它做真实解析。
+        // 留空的话命中域名的查询无人可答。与 proxy::dns 共用同一组上游
+        // （223.5.5.5 / 119.29.29.29，SILVERQ_RESOLVE_UPSTREAMS 可覆盖）。
+        let upstreams: Vec<SocketAddr> = crate::proxy::dns::upstreams()
+            .into_iter()
+            .map(|ip| SocketAddr::new(ip, 53))
+            .collect();
         let mut resolver = Resolver::new(
-            vec![], // upstream DNS（留空，后续可通过配置添加）
+            upstreams,
             vec![], // hosts
             DnsMode::FakeIp,
             meow_trie::DomainTrie::new(),
@@ -231,6 +238,15 @@ impl TunRuntime {
         let pool = Pool::new(ipnet::IpNet::V4(fake_ip_range), store)
             .map_err(|e| format!("fake-ip pool init failed: {e}"))?;
         resolver.set_fakeip_v4(Arc::new(pool));
+        // 国内域名 fake-IP 旁路（BlackList：命中即真实解析）——国内流量在
+        // DNS 层就拿真实 IP，不落 198.18/15 路由，TUN 根本不碰它们。
+        // 表缺失 = 空 skipper = 全部照旧走 fake-IP（安全降级）。
+        let china_patterns =
+            crate::proxy::dns::load_china_domains(&crate::proxy::dns::china_domains_path());
+        if !china_patterns.is_empty() {
+            resolver.set_fakeip_skipper(Skipper::new(&china_patterns, SkipperMode::BlackList));
+        }
+        tracing::info!(count = china_patterns.len(), "国内域名 fake-IP 旁路表加载");
         let resolver = Arc::new(resolver);
 
         let tunnel = Tunnel::new(resolver);
