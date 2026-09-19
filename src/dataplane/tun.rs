@@ -66,10 +66,7 @@ impl ProxyAdapter for ProxyWrapper {
             .unwrap_or(AdapterType::Direct)
     }
     fn addr(&self) -> &str {
-        self.candidates
-            .first()
-            .map(|a| a.addr())
-            .unwrap_or("")
+        self.candidates.first().map(|a| a.addr()).unwrap_or("")
     }
     fn support_udp(&self) -> bool {
         self.candidates
@@ -183,6 +180,10 @@ impl TunConfig {
 /// 共享选择状态：调度循环写，TUN 读
 pub type SharedSelection = Arc<TokioRwLock<Vec<String>>>;
 
+/// `current_auto` 快照：(整条候选链的名字, 注册时首个 adapter 的 Arc)。
+/// 名字列表用于检测 selection 中段变化，Arc 指针用于检测 reload 重建。
+type CurrentAuto = Option<(Vec<String>, Arc<dyn ProxyAdapter>)>;
+
 /// TUN 运行时状态（用于热更新 proxies）
 struct TunRuntime {
     tunnel: Tunnel,
@@ -191,7 +192,7 @@ struct TunRuntime {
     /// 当前已注册到 Tunnel 的 "silverq-auto"：tag + 注册时使用的 adapter。
     /// reload 会重建同 tag 的 adapter（新 Arc），光比 tag 发现不了 →
     /// TUN 出口会僵在旧配置上，热加载失效（见 sync_proxies）。
-    current_auto: RwLock<Option<(String, Arc<dyn ProxyAdapter>)>>,
+    current_auto: RwLock<CurrentAuto>,
     /// 共享的 DIRECT 适配器：既作为 "silverq-auto" 的 dial 兜底，
     /// 又作为 "DIRECT" 注册进 Tunnel 供私网 / 用户排除 CIDR 规则路由。
     /// 单实例（Arc 共享），避免重复建 DirectAdapter。
@@ -260,14 +261,20 @@ impl TunRuntime {
         //（reload 时序），按序收集存在的 adapter。
         let candidates: Vec<Arc<dyn ProxyAdapter>> = selection
             .iter()
-            .filter_map(|tag| registry.get(tag).map(|a| Arc::clone(a)))
+            .filter_map(|tag| registry.get(tag).map(Arc::clone))
             .collect();
+        let new_names: Vec<String> = candidates.iter().map(|a| a.name().to_string()).collect();
         let new_tag = candidates.first().map(|a| a.name().to_string());
 
         let mut current = self.current_auto.write();
-        let needs_update = match (&*current, &new_tag) {
-            (Some((old_tag, _)), Some(new_tag)) => old_tag != new_tag,
+        // 只比队首 tag 会漏两种变化：selection 中段调整（队首不变）与
+        // reload 重建同 tag adapter（Arc 换新）。整链名字 + 首个 adapter
+        // 指针任一变化都必须重建，否则 TUN 出口僵在旧候选链上。
+        let needs_update = match (&*current, candidates.first()) {
             (None, None) => false,
+            (Some((old_names, old_first)), Some(first)) => {
+                old_names != &new_names || !Arc::ptr_eq(old_first, first)
+            }
             _ => true,
         };
         if !needs_update {
@@ -293,7 +300,7 @@ impl TunRuntime {
                 )) as Arc<dyn Proxy>;
                 proxies.insert(SmolStr::new("silverq-auto"), wrapped);
                 info!(tag = %tag, count = candidates.len(), "TUN silverq-auto proxy updated");
-                *current = Some((tag, candidates.into_iter().next().unwrap()));
+                *current = Some((new_names, candidates.into_iter().next().unwrap()));
             }
             None => {
                 // 没有可用节点（空 selection，或 tag 尚未在 registry 里）：
@@ -363,6 +370,14 @@ pub async fn run(
     );
 
     // 解析 fake-ip CIDR
+    // 非法配置必须前置拒绝：TunRuntime::new 里对解析失败静默回退默认段
+    // （容错设计是给「未配置」用的，不该吞掉写错的值），而 TUN 设备创建
+    // 需要 root —— 无特权环境下错误会被设备错误掩盖（回归测试锁定此序）。
+    if let Some(cidr) = &config.fake_ip_cidr {
+        if cidr.parse::<ipnet::Ipv4Net>().is_err() {
+            return Err(format!("invalid fake_ip_cidr: {cidr}").into());
+        }
+    }
     let fake_ip_cidr = config
         .fake_ip_cidr
         .clone()
@@ -462,7 +477,7 @@ mod tests {
     fn direct_wrapper() -> ProxyWrapper {
         let inner: Arc<dyn ProxyAdapter> = Arc::new(DirectAdapter::new());
         let direct: Arc<dyn ProxyAdapter> = Arc::new(DirectAdapter::new());
-        ProxyWrapper::new(inner, direct)
+        ProxyWrapper::new(vec![inner], direct)
     }
 
     // ---- A1/A2: TunConfig::from_effective 映射 ----
@@ -580,7 +595,13 @@ mod tests {
         // registry 放一个 direct adapter，selection 指向它 → sync 应把它包成
         // "silverq-auto" 注册进 Tunnel，并更新 current_auto。
         let mut reg: HashMap<String, Arc<dyn ProxyAdapter>> = HashMap::new();
-        reg.insert("direct-a".into(), Arc::new(DirectAdapter::new()));
+        reg.insert(
+            "direct-a".into(),
+            Arc::new(NamedStubAdapter {
+                name: "direct-a",
+                health: ProxyHealth::new(),
+            }),
+        );
         let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
         let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
 
@@ -598,9 +619,9 @@ mod tests {
         );
         let cur = rt.current_auto.read();
         assert_eq!(
-            cur.as_ref().map(|(t, _)| t.as_str()),
+            cur.as_ref().map(|(n, _)| n[0].as_str()),
             Some("direct-a"),
-            "current_auto 应记下当前 tag"
+            "current_auto 应记下当前候选链"
         );
     }
 
@@ -610,7 +631,13 @@ mod tests {
         // 不重建 route table。`route_snapshot()` 返回的是 `Arc::clone` 自存储表，
         // 未更新时两次快照指向同一分配，指针相等即证明"跳过了"。
         let mut reg: HashMap<String, Arc<dyn ProxyAdapter>> = HashMap::new();
-        reg.insert("direct-a".into(), Arc::new(DirectAdapter::new()));
+        reg.insert(
+            "direct-a".into(),
+            Arc::new(NamedStubAdapter {
+                name: "direct-a",
+                health: ProxyHealth::new(),
+            }),
+        );
         let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
         let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
 
@@ -633,7 +660,13 @@ mod tests {
         // 空 selection → 期望状态变 None：sync 会调 update_proxies 把 Tunnel 里的
         // silverq-auto 移除（只留 DIRECT），meow 规则引擎对缺失 adapter 自动回退 DIRECT。
         let mut reg: HashMap<String, Arc<dyn ProxyAdapter>> = HashMap::new();
-        reg.insert("direct-a".into(), Arc::new(DirectAdapter::new()));
+        reg.insert(
+            "direct-a".into(),
+            Arc::new(NamedStubAdapter {
+                name: "direct-a",
+                health: ProxyHealth::new(),
+            }),
+        );
         let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
         let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
 
@@ -647,7 +680,7 @@ mod tests {
         rt.sync_proxies().await;
         {
             let cur = rt.current_auto.read();
-            assert_eq!(cur.as_ref().map(|(t, _)| t.as_str()), Some("direct-a"));
+            assert_eq!(cur.as_ref().map(|(n, _)| n[0].as_str()), Some("direct-a"));
         }
 
         *selection.write().await = vec![];
@@ -700,6 +733,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sync_proxies_updates_on_midchain_change() {
+        // 回归：selection 队首不变、中段调整（[a] → [a,b]）也必须重建。
+        // 旧实现只比队首 tag，候选链会僵在旧配置上（2026-09-19 事故日志里
+        // selection 已切新、WARN 仍在按旧链逐个拨）。
+        let mut reg: HashMap<String, Arc<dyn ProxyAdapter>> = HashMap::new();
+        reg.insert(
+            "direct-a".into(),
+            Arc::new(NamedStubAdapter {
+                name: "direct-a",
+                health: ProxyHealth::new(),
+            }),
+        );
+        let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
+        let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
+
+        let rt = TunRuntime::new(
+            registry.clone(),
+            selection.clone(),
+            Some("198.18.0.0/15".into()),
+            vec![],
+        )
+        .expect("fake-ip pool init");
+        rt.sync_proxies().await;
+        let snap1 = rt.tunnel.route_snapshot();
+
+        registry
+            .write()
+            .insert("direct-b".into(), Arc::new(DirectAdapter::new()));
+        *selection.write().await = vec!["direct-a".into(), "direct-b".into()];
+        rt.sync_proxies().await;
+        let snap2 = rt.tunnel.route_snapshot();
+
+        assert!(
+            !Arc::ptr_eq(&snap1, &snap2),
+            "队首不变但中段变化时应重建候选链"
+        );
+        let cur = rt.current_auto.read();
+        assert_eq!(
+            cur.as_ref().map(|(n, _)| n.len()),
+            Some(2usize),
+            "应记下整条链"
+        );
+    }
+
+    #[tokio::test]
     async fn test_sync_proxies_skips_when_tag_missing_from_registry() {
         // selection 指向 registry 里还没有的 tag（节点被移除 / 尚未构建）：
         // 期望状态与当前都是 None → 跳过，不每 5s 空转重建路由表。
@@ -725,6 +803,41 @@ mod tests {
     /// 主出口 dial 失败时应自动回退到 direct，而非把错误透传给上层。
     struct FailingAdapter {
         health: ProxyHealth,
+    }
+
+    /// 具名 stub：name 可指定。DirectAdapter::new() 的 name 恒为 "DIRECT"，
+    /// 验证 current_auto 按候选链记录时需要能带上注册键同名的 adapter。
+    struct NamedStubAdapter {
+        name: &'static str,
+        health: ProxyHealth,
+    }
+
+    #[async_trait::async_trait]
+    impl ProxyAdapter for NamedStubAdapter {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn adapter_type(&self) -> AdapterType {
+            AdapterType::Socks5
+        }
+        fn addr(&self) -> &str {
+            ""
+        }
+        fn support_udp(&self) -> bool {
+            true
+        }
+        async fn dial_tcp(&self, _metadata: &Metadata) -> meow_common::Result<Box<dyn ProxyConn>> {
+            Err(MeowError::Io(std::io::Error::other("stub adapter")))
+        }
+        async fn dial_udp(
+            &self,
+            _metadata: &Metadata,
+        ) -> meow_common::Result<Box<dyn ProxyPacketConn>> {
+            Err(MeowError::Io(std::io::Error::other("stub adapter")))
+        }
+        fn health(&self) -> &ProxyHealth {
+            &self.health
+        }
     }
 
     #[async_trait::async_trait]
@@ -768,7 +881,7 @@ mod tests {
             health: ProxyHealth::new(),
         });
         let direct: Arc<dyn ProxyAdapter> = Arc::new(DirectAdapter::new());
-        let wrapper = ProxyWrapper::new(failing, direct);
+        let wrapper = ProxyWrapper::new(vec![failing], direct);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -853,7 +966,13 @@ mod tests {
     async fn test_direct_proxy_registered_in_tunnel() {
         // sync_proxies 后 "DIRECT" 应可按名解析（规则路由私网/排除 CIDR 依赖它）。
         let mut reg: HashMap<String, Arc<dyn ProxyAdapter>> = HashMap::new();
-        reg.insert("direct-a".into(), Arc::new(DirectAdapter::new()));
+        reg.insert(
+            "direct-a".into(),
+            Arc::new(NamedStubAdapter {
+                name: "direct-a",
+                health: ProxyHealth::new(),
+            }),
+        );
         let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
         let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
 

@@ -28,6 +28,12 @@ pub struct NodeSpec {
     pub protocol: Protocol,
     pub server: String,
     pub port: u16,
+    /// 拨号地址：load 后由真实上游 DNS 解析 `server` 域名填充（见
+    /// [`crate::proxy::dns`]——TUN + fake-IP 环境下系统解析返回假地址，
+    /// 会把 silverq 自己的节点拨号劫进自家隧道）。None = 未解析，
+    /// build_proxy 回退用 `server` 原文。运行时派生态，不序列化。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dial_addr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vless: Option<VlessSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

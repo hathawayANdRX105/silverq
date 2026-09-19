@@ -35,7 +35,9 @@ fn select_top_orders_by_score_and_respects_capacity() {
 /// 整池都没有活节点时返回空，调度循环据此保留冷启动种子（见 main.rs）
 #[test]
 fn select_top_all_unmeasured_returns_empty() {
-    let pool: Vec<Node> = (0..5).map(|i| Node::new(format!("u{i}"), "2.2.2.2", 443)).collect();
+    let pool: Vec<Node> = (0..5)
+        .map(|i| Node::new(format!("u{i}"), "2.2.2.2", 443))
+        .collect();
     assert!(select_top(&pool, 10, DEFAULT_FAILURE_PENALTY_MS).is_empty());
 }
 

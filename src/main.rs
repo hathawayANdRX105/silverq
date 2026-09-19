@@ -74,7 +74,10 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
     );
 
     // 1. 加载节点
-    let specs = nodespec::load_nodes_yaml(&nodes)?;
+    let mut specs = nodespec::load_nodes_yaml(&nodes)?;
+    // TUN + fake-IP 环境下系统解析会返回假地址、把节点拨号劫进自家隧道
+    // （2026-09-19 事故根因）：构建 adapter 前用真实上游 DNS 预解析。
+    silverq::proxy::dns::resolve_dial_addrs(&mut specs).await;
     tracing::info!(count = specs.len(), "loaded nodes from {nodes}");
 
     // 2. registry（feature meow）→ measurer + 数据面 + ctl 共用
