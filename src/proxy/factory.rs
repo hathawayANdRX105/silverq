@@ -16,6 +16,11 @@ use crate::proxy::nodespec::NodeSpec;
 pub fn build_proxy(spec: &NodeSpec) -> Result<Arc<dyn ProxyAdapter>, String> {
     let udp = true; // UDP 保留给数据面；调度测速走 TCP 探测
 
+    // 拨号地址：优先用真实 DNS 预解析结果（见 proxy::dns 模块注释——
+    // TUN + fake-IP 环境下系统解析返回 198.18.x 假地址，会把节点拨号
+    // 劫进自家隧道）。SNI / ws Host / 各协议身份字段仍用 server 原文。
+    let dial = spec.dial_addr.as_deref().unwrap_or(&spec.server);
+
     let proxy: Box<dyn ProxyAdapter> = match spec.protocol {
         crate::proxy::nodespec::Protocol::Vless => {
             let v = spec.vless.as_ref().ok_or("vless spec missing")?;
@@ -28,7 +33,7 @@ pub fn build_proxy(spec: &NodeSpec) -> Result<Arc<dyn ProxyAdapter>, String> {
             let transport = build_transport(spec, v)?;
             Box::new(VlessAdapter::new(
                 spec.tag.as_str(),
-                spec.server.as_str(),
+                dial,
                 spec.port,
                 uuid_bytes,
                 flow,
@@ -41,7 +46,7 @@ pub fn build_proxy(spec: &NodeSpec) -> Result<Arc<dyn ProxyAdapter>, String> {
             let sni = t.sni.clone().unwrap_or_else(|| spec.server.clone());
             Box::new(TrojanAdapter::new(
                 spec.tag.as_str(),
-                spec.server.as_str(),
+                dial,
                 spec.port,
                 t.password.as_str(),
                 sni.as_str(),
@@ -57,7 +62,7 @@ pub fn build_proxy(spec: &NodeSpec) -> Result<Arc<dyn ProxyAdapter>, String> {
             Box::new(
                 ShadowsocksAdapter::new(
                     spec.tag.as_str(),
-                    spec.server.as_str(),
+                    dial,
                     spec.port,
                     s.password.as_str(),
                     s.cipher.as_str(),
@@ -70,13 +75,13 @@ pub fn build_proxy(spec: &NodeSpec) -> Result<Arc<dyn ProxyAdapter>, String> {
         }
         crate::proxy::nodespec::Protocol::Hysteria2 => {
             let h = spec.hysteria2.as_ref().ok_or("hysteria2 spec missing")?;
-            let obfs = h.obfs.as_deref().map(|v| match v {
+            let obfs = h.obfs.as_deref().and_then(|v| match v {
                 "salamander" => Some(meow_proxy::Hy2Obfs::Salamander),
                 _ => None,
-            }).flatten();
+            });
             let options = Hy2Options {
                 name: spec.tag.clone(),
-                server: spec.server.clone(),
+                server: dial.to_string(),
                 port: spec.port,
                 password: h.password.clone(),
                 sni: h.sni.clone(),

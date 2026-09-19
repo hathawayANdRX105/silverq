@@ -7,8 +7,8 @@ use crate::proxy::meow::Registry;
 use meow_common::Metadata;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -81,9 +81,7 @@ pub async fn run(
         let tuning = tuning.clone();
         let pinned = pinned.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_one(socket, peer, &registry, &selection, tuning, pinned).await
-            {
+            if let Err(e) = handle_one(socket, peer, &registry, &selection, tuning, pinned).await {
                 tracing::debug!(peer = %peer, "{e}");
             }
         });
@@ -234,11 +232,8 @@ async fn handle_one(
             target = %format!("{}/{}", target.host, target.port),
             "所有代理候选失败，尝试直连兜底"
         );
-        match tokio::time::timeout(
-            direct_timeout,
-            tokio::net::TcpStream::connect(direct_addr),
-        )
-        .await
+        match tokio::time::timeout(direct_timeout, tokio::net::TcpStream::connect(direct_addr))
+            .await
         {
             Ok(Ok(stream)) => Box::new(stream),
             Ok(Err(e)) => {

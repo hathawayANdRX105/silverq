@@ -185,7 +185,9 @@ async fn do_reload(state: &CtlState, path_arg: Option<&str>) -> Result<String, S
         .map(|s| s.to_string())
         .unwrap_or_else(|| state.nodes_path.lock().clone());
 
-    let specs = crate::proxy::nodespec::load_nodes_yaml(&path).map_err(|e| e.to_string())?;
+    let mut specs = crate::proxy::nodespec::load_nodes_yaml(&path).map_err(|e| e.to_string())?;
+    // 与 serve 启动路径同源：fake-IP 环境下节点拨号必须走真实 DNS 预解析。
+    crate::proxy::dns::resolve_dial_addrs(&mut specs).await;
 
     // 重建 registry（meow）
     #[cfg(feature = "meow")]
