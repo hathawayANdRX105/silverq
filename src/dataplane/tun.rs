@@ -322,8 +322,14 @@ pub async fn run(
         .fake_ip_cidr
         .clone()
         .unwrap_or_else(|| "198.18.0.0/15".to_string());
-    let fake_ip_net = ipnet::Ipv4Net::from_str(&fake_ip_cidr)
-        .map_err(|e| format!("invalid fake_ip_cidr: {e}"))?;
+    // 设备自身地址必须与 fake-IP 范围不相交：meow-listener 的 is_looping_dst
+    // 把「目标落在设备子网内」的包当环路丢弃。若把整个 fake 范围设成设备
+    // 子网，所有 fake-IP 流量会被静默 drop——DNS 劫持照常（UDP :53 在
+    // 环路判定之前被拦截），但 TCP 握手成功后一发数据就 RST。
+    // 与 meow-config 的默认 172.19.0.1/30 保持一致。
+    let device_net: ipnet::Ipv4Net = "172.19.0.1/30"
+        .parse()
+        .expect("device address must be a valid CIDR");
 
     // 创建 TUN 运行时
     let runtime = Arc::new(TunRuntime::new(
@@ -350,7 +356,7 @@ pub async fn run(
     let listener_config = TunListenerConfig {
         device: config.device,
         mtu: config.mtu.unwrap_or(1500),
-        inet4_address: fake_ip_net, // TUN 设备分配的 IP（在 fake-IP 范围内）
+        inet4_address: device_net, // 设备自身子网（与 fake 范围不相交，见上）
         auto_route: config.auto_route,
         route_scope: TunRouteScope::FakeIp, // 默认 fake-IP 模式，跨平台无环路
         outbound_interface: None,           // fake-IP 模式不需要
