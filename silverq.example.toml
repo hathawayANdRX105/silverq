@@ -48,3 +48,21 @@ state = "~/.local/state/silverq/scores.json"
 ctl_sock = "~/.local/state/silverq/ctl.sock"
 # 外部 meow kernel 读的 selector store
 selector_store = "~/.local/state/silverq-selector.json"
+
+[tun]
+# 透明代理（需要带 meow-tun feature 的二进制，且要 root / CAP_NET_ADMIN）。
+# 关掉时整段 TUN 不启动，SOCKS5 / HTTP 数据面不受影响。
+enabled = false
+# 设备名/MTU 留空（注释掉）= 自动：Linux tunN、macOS utunN；MTU 通常 1500。
+# 注意 TOML 里写 "" 或 0 是 Some("")/Some(0)，不是 None —— 要自动就整行删掉。
+# device = "tun0"
+# mtu = 1500
+# auto_route = true：自动接管 fake-IP 段路由。fake-IP 模式只匹配 fake 流量，
+# 真实 IP（含节点服务器 IP）不回环；若观察到节点回环异常，把节点 IP 加进下面。
+# auto_route = false：只建设备不接管路由，便于手动验证、不污染宿主路由表。
+auto_route = true
+# fake-IP CIDR：TUN 设备地址与 DNS 劫持网关都从这段派生（mihomo/clash 风格）。
+fake_ip_cidr = "198.18.0.0/15"
+# 不走 TUN 的 CIDR（→ DIRECT）。私网 5 段是硬编码安全网，不用在这里重复；
+# 这里放自定义网段，或排查节点回环时加 "节点IP/32"。
+exclude_cidrs = []

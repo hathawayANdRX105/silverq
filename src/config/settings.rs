@@ -22,6 +22,8 @@ pub struct FileConfig {
     pub data_plane: DataPlaneSection,
     #[serde(default)]
     pub paths: PathsSection,
+    #[serde(default)]
+    pub tun: TunSection,
 }
 
 /// 调度器参数。
@@ -147,6 +149,40 @@ impl Default for PathsSection {
     }
 }
 
+/// TUN 透明代理配置。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TunSection {
+    /// 是否启用 TUN 透明代理
+    pub enabled: bool,
+    /// TUN 设备名（如 "utun0"、"tun0"、"wintun"），None = 自动
+    pub device: Option<String>,
+    /// MTU，None = 自动（通常 1500/9000）
+    pub mtu: Option<u16>,
+    /// 是否启用 auto-route（全局路由 / fake-ip 路由）
+    pub auto_route: bool,
+    /// fake-ip CIDR（auto-route=fake-ip 时生效）
+    pub fake_ip_cidr: Option<String>,
+    /// 排除的 CIDR（不走 TUN，如本地网段、代理服务器 IP）
+    pub exclude_cidrs: Vec<String>,
+}
+
+impl Default for TunSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            device: crate::config::DEFAULT_TUN_DEVICE.map(|s| s.to_string()),
+            mtu: crate::config::DEFAULT_TUN_MTU,
+            auto_route: crate::config::DEFAULT_TUN_AUTO_ROUTE,
+            fake_ip_cidr: Some(crate::config::DEFAULT_TUN_FAKE_IP_CIDR.to_string()),
+            exclude_cidrs: crate::config::DEFAULT_TUN_EXCLUDE_CIDRS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        }
+    }
+}
+
 /// 从 TOML 文件加载。文件缺失/为空返回 `FileConfig::default()`；
 /// 解析失败返回错误（配置写错了就该大声失败，不能静默用默认值）。
 pub fn load(path: &std::path::Path) -> Result<FileConfig, String> {
@@ -187,6 +223,37 @@ pub struct Effective {
     pub state: String,
     pub ctl_sock: String,
     pub selector_store: String,
+    // TUN 配置
+    #[cfg_attr(
+        not(all(feature = "meow", feature = "meow-listener")),
+        allow(dead_code)
+    )]
+    pub tun_enabled: bool,
+    #[cfg_attr(
+        not(all(feature = "meow", feature = "meow-listener")),
+        allow(dead_code)
+    )]
+    pub tun_device: Option<String>,
+    #[cfg_attr(
+        not(all(feature = "meow", feature = "meow-listener")),
+        allow(dead_code)
+    )]
+    pub tun_mtu: Option<u16>,
+    #[cfg_attr(
+        not(all(feature = "meow", feature = "meow-listener")),
+        allow(dead_code)
+    )]
+    pub tun_auto_route: bool,
+    #[cfg_attr(
+        not(all(feature = "meow", feature = "meow-listener")),
+        allow(dead_code)
+    )]
+    pub tun_fake_ip_cidr: Option<String>,
+    #[cfg_attr(
+        not(all(feature = "meow", feature = "meow-listener")),
+        allow(dead_code)
+    )]
+    pub tun_exclude_cidrs: Vec<String>,
 }
 
 fn env_or(key: &str, v: String) -> String {
@@ -299,6 +366,25 @@ impl Effective {
             state: env_or("SILVERQ_STATE", fc.paths.state.clone()),
             ctl_sock: env_or("SILVERQ_CTL_SOCK", fc.paths.ctl_sock.clone()),
             selector_store: env_or("SILVERQ_SELECTOR_STORE", fc.paths.selector_store.clone()),
+            // TUN 配置
+            tun_enabled: env_parsed_or("SILVERQ_TUN_ENABLED", fc.tun.enabled),
+            tun_device: std::env::var("SILVERQ_TUN_DEVICE")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or(fc.tun.device.clone()),
+            tun_mtu: std::env::var("SILVERQ_TUN_MTU")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .or(fc.tun.mtu),
+            tun_auto_route: env_parsed_or("SILVERQ_TUN_AUTO_ROUTE", fc.tun.auto_route),
+            tun_fake_ip_cidr: std::env::var("SILVERQ_TUN_FAKE_IP_CIDR")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or(fc.tun.fake_ip_cidr.clone()),
+            tun_exclude_cidrs: std::env::var("SILVERQ_TUN_EXCLUDE_CIDRS")
+                .ok()
+                .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
+                .unwrap_or(fc.tun.exclude_cidrs.clone()),
         }
     }
 }

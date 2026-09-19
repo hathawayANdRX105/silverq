@@ -73,7 +73,7 @@ src/
 ├── proxy/             # nodespec.rs（节点 YAML 模型）、factory.rs（NodeSpec→meow
 │                      # adapter）、meow.rs（MeowMeasurer）——后两者 meow feature
 ├── dataplane/         # inbound.rs（SOCKS5/HTTP-CONNECT TCP）、udp.rs（UDP 中继）、
-│                      # tun.rs（未实现占位）——meow feature
+│                      # tun.rs（TUN 透明代理，meow-tun feature）——meow feature
 ├── web/               # mod.rs（内嵌面板 + JSON API）——meow feature
 └── ctl/               # cli.rs（子命令解析）、protocol.rs（unix socket 控制通道）
 ```
@@ -146,9 +146,12 @@ ui_dir = "~/.local/share/silverq/ui"   # zashboard 静态目录
 
 ## 已知范围
 
-- **TUN 未实现**：`src/tun.rs` 是显式占位（`unimplemented!` / `todo!`），不接线。
-  meow-rs 上游有 TUN 但**未发布到 crates.io**；要做需改 git 依赖复用上游，
-  或自行基于 `tun` + `smoltcp` 实现。两条路线与证据见该文件模块文档，CI 有 job 守着它没被误接。
+- **TUN 已实现（v0.2.0，`meow-tun` feature）**：基于 meow-listener 的 listener-tun。
+  fake-IP 路由（`TunRouteScope::FakeIp` 只接管 fake-IP 段，真实 IP 不回环，
+  故节点服务器 IP 不会绕回 TUN；若观察到异常，在 `[tun].exclude_cidrs` 加
+  `节点IP/32`），规则分流（私网 + 用户 `exclude_cidrs` → DIRECT，末尾
+  FinalRule → silverq-auto），节点 dial 失败自动回退 DIRECT。建设备需要 root
+  或 `CAP_NET_ADMIN`；只有 release 里的 `silverq-tun-*` 产物带这个 feature。
 - **ws / grpc 已支持**（VLESS）：层序为 TLS 贴 TCP、ws/grpc 叠其上，明文 ws 节点
   （`tls: false`）也可接。trojan 的 transport 还没接（其 adapter 无 TransportChain 入口）。
 - **黑洞节点已处理**：建连后加了「首次响应超时」（测速超时 ×4）。顺序是先把客户端
@@ -176,12 +179,45 @@ ui_dir = "~/.local/share/silverq/ui"   # zashboard 静态目录
 | job | 作用 |
 |-----|------|
 | `rustfmt` | 格式 gate |
-| `clippy (default / meow)` | 两种 feature 组合，`-D warnings` |
-| `test (default / meow)` | build + 单测；meow 额外跑 e2e 数据面 |
-| `TUN placeholder not wired` | 防止未实现的 TUN 占位被误接进运行路径 |
+| `clippy (default / meow / meow-tun)` | 三种 feature 组合，`-D warnings` |
+| `test (default / meow / meow-tun)` | build + 单测；meow / meow-tun 额外跑 e2e 数据面 |
+| `TUN placeholder not wired` | 守住未开 `meow-tun` 时 `tun::run` 不被无 cfg 保护的调用点引用 |
 
-两种 feature 都进矩阵的原因：meow 关掉时走 `NoopMeasurer`，是独立编译路径，
-只测一种会漏掉 `cfg` 分支里的错误。
+三种 feature 都进矩阵的原因：meow 关掉时走 `NoopMeasurer`，是独立编译路径；
+`meow-tun` 多编译一整块 TUN 数据面，只测两种会漏掉 cfg 分支里的错误（已踩过）。
+
+## TUN 手动测试
+
+### 直连 fallback（防断网）
+
+v0.2.0 给 TUN 数据面加了两层 DIRECT 兜底，避免节点挂掉时连本地网关 / DNS 都打不通：
+
+1. **私网 + 用户排除 CIDR 自动走 DIRECT** —— 规则表首部固定注入 5 段私网
+   （`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`127.0.0.0/8`、`169.254.0.0/16`），
+   再叠加配置里 `[tun].exclude_cidrs` 的条目，全部 `→ DIRECT`，先于末尾的
+   `silverq-auto` FinalRule 命中。非法 CIDR 逐条 `warn` 跳过，不阻断启动。
+2. **节点 dial 失败自动回退 DIRECT** —— `silverq-auto` 包装的主出口若 `dial_tcp` /
+   `dial_udp` 出错，自动改走共享的 DIRECT 适配器，而不是把错误透传给上层连接。
+
+Private networks and user `[tun].exclude_cidrs` always route to DIRECT; when the
+selected node fails to dial, `silverq-auto` transparently falls back to DIRECT
+instead of propagating the error.
+
+TUN 设备创建需要 root 或 `CAP_NET_ADMIN`，所以这类 smoke 测试标了 `#[ignore]`、
+**不进 CI**（runner 无 root）。CI 只覆盖 `src/tun.rs` 里的纯逻辑单测：
+`TunConfig::from_effective` 字段映射、`ProxyWrapper` 的 Proxy 桩与 `ProxyAdapter` 委托、
+`run` 拒绝非法 `fake_ip_cidr`，以及 `init_rules` / `sync_proxies`（经
+`meow_tunnel::Tunnel::route_snapshot()` 公开 getter 验证，无需真建设备）。
+
+本地手动跑（silverq 是 bin-only crate，这些 smoke 测试放在 `src/tun.rs` 的
+`#[cfg(test)]` 模块内，而非 `tests/` 集成测试 —— 后者拿不到 `tun::run`）：
+
+```bash
+sudo cargo test --features meow-tun --bin silverq -- --ignored --test-threads=1
+```
+
+会真的尝试创建 TUN 设备（`auto_route=false`，不动宿主路由表）。有 root 才能真正建出
+设备并阻塞运行；无 root 时 `run` 会快速返回错误而非挂死 —— 这两种情况 smoke 都算过。
 
 ## License
 

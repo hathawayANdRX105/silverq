@@ -12,6 +12,8 @@ use silverq::config::settings;
 use silverq::ctl::{cli, protocol as ctl};
 #[cfg(feature = "meow")]
 use silverq::dataplane::inbound;
+#[cfg(all(feature = "meow", feature = "meow-listener"))]
+use silverq::dataplane::tun;
 use silverq::proxy::nodespec;
 #[cfg(feature = "meow")]
 use silverq::proxy::{factory, meow};
@@ -32,6 +34,9 @@ use tokio::sync::RwLock;
 
 /// 共享选择：调度循环写，数据面读（best → 次优 fallback 顺序）。
 type SharedSelection = Arc<RwLock<Vec<String>>>;
+
+#[cfg(all(feature = "meow", feature = "meow-listener"))]
+use futures::future::join_all;
 #[cfg(unix)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -218,12 +223,46 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
                     tracing::error!("inbound exited: {e}");
                 }
             });
-            // 常驻任务任一退出都说明出事了。JoinError 必须报出来，
-            // 否则 panic 被静默吞掉，进程看起来还活着但实际已经瘸了。
-            let (ctl_res, inbound_res, sched_res) = tokio::join!(inb, inb2, sched);
-            report_task_exit("ctl", ctl_res);
-            report_task_exit("inbound", inbound_res);
-            report_task_exit("scheduler", sched_res);
+            // 7. TUN 透明代理（feature meow-tun）
+            #[cfg(all(feature = "meow", feature = "meow-listener"))]
+            let tun_task = if eff.tun_enabled {
+                let tun_config = tun::TunConfig::from_effective(&eff);
+                let tun_sel = selection.clone();
+                let tun_reg = registry.clone();
+                Some(tokio::spawn(async move {
+                    if let Err(e) = tun::run(tun_config, tun_reg, tun_sel).await {
+                        tracing::error!("TUN exited: {e}");
+                    }
+                }))
+            } else {
+                None
+            };
+
+            #[cfg(all(feature = "meow", feature = "meow-listener"))]
+            {
+                let mut tasks = vec![inb, inb2, sched];
+                if let Some(t) = tun_task {
+                    tasks.push(t);
+                }
+                let results = join_all(tasks).await;
+                for (i, res) in results.into_iter().enumerate() {
+                    let name = match i {
+                        0 => "ctl",
+                        1 => "inbound",
+                        2 => "scheduler",
+                        3 => "tun",
+                        _ => "unknown",
+                    };
+                    report_task_exit(name, res);
+                }
+            }
+            #[cfg(all(feature = "meow", not(feature = "meow-listener")))]
+            {
+                let (ctl_res, inbound_res, sched_res) = tokio::join!(inb, inb2, sched);
+                report_task_exit("ctl", ctl_res);
+                report_task_exit("inbound", inbound_res);
+                report_task_exit("scheduler", sched_res);
+            }
         }
         #[cfg(not(feature = "meow"))]
         {

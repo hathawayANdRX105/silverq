@@ -1,7 +1,7 @@
 name: Release
 
-# 打 v* tag 触发：构建优化二进制 → UPX 压缩 → 发 GitHub Release。
-# 版本号即 tag（v0.1.0 → 0.1.0，与 Cargo.toml version 保持一致）。
+# 打 v* tag 触发：构建两个二进制（plain + TUN）→ UPX 压缩 → 发 GitHub Release。
+# 版本号即 tag（v0.2.0 → 0.2.0，与 Cargo.toml version 保持一致）。
 on:
   push:
     tags: ["v*"]
@@ -33,38 +33,74 @@ jobs:
           fi
           echo "VERSION=$TAG" >> "$GITHUB_ENV"
 
-      - name: 构建（meow feature，release 优化见 Cargo.toml profile）
-        run: cargo build --release --features meow
+      - name: 构建 plain（--features meow）
+        run: |
+          cargo build --release --features meow
+          # 改名暂存，避免下一步 meow-tun 构建覆盖
+          mv target/release/silverq target/release/silverq-plain
 
-      - name: UPX 压缩
+      - name: 构建 TUN（--features meow-tun）
+        run: |
+          cargo build --release --features meow-tun
+          mv target/release/silverq target/release/silverq-tun
+
+      - name: UPX 压缩两个二进制
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq upx-ucl
-          upx --best --lzma target/release/silverq
+          upx --best --lzma target/release/silverq-plain
+          upx --best --lzma target/release/silverq-tun
 
-      - name: 冒烟（二进制可执行且 /version 正常）
+      - name: 冒烟（两个二进制都可执行且 --version 正常）
         run: |
-          ./target/release/silverq --help >/dev/null
-          ./target/release/silverq --version
+          ./target/release/silverq-plain --help >/dev/null
+          ./target/release/silverq-plain --version
+          ./target/release/silverq-tun --help >/dev/null
+          ./target/release/silverq-tun --version
 
-      - name: 打包
+      - name: 打包（两个 tarball + 各自 sha256）
+        # 两个 tarball 内部的二进制都叫 silverq（用户解压即用），
+        # 靠 tarball 文件名区分 plain / tun 变体。
         run: |
           cd target/release
+          # plain
+          cp silverq-plain silverq
           tar czf "silverq-${VERSION}-x86_64-linux.tar.gz" silverq
           sha256sum "silverq-${VERSION}-x86_64-linux.tar.gz" > "silverq-${VERSION}-x86_64-linux.tar.gz.sha256"
-          mv "silverq-${VERSION}-x86_64-linux.tar.gz"* "$GITHUB_WORKSPACE/"
+          # tun
+          cp silverq-tun silverq
+          tar czf "silverq-tun-${VERSION}-x86_64-linux.tar.gz" silverq
+          sha256sum "silverq-tun-${VERSION}-x86_64-linux.tar.gz" > "silverq-tun-${VERSION}-x86_64-linux.tar.gz.sha256"
+          # 搬到 workspace 根，供 release action 上传
+          mv silverq-*.tar.gz* "$GITHUB_WORKSPACE/"
 
       - name: 发布 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: silverq ${{ github.ref_name }}
           body: |
-            clash 兼容调度器。产物为 UPX 压缩的 x86_64 linux 二进制。
+            clash 兼容调度器。本次发布两个 UPX 压缩的 x86_64 linux 二进制：
+
+            | 产物 | feature | 说明 |
+            |------|---------|------|
+            | `silverq-*.tar.gz` | `meow` | 纯调度 + SOCKS5/HTTP 数据面，无需特权 |
+            | `silverq-tun-*.tar.gz` | `meow-tun` | 含 TUN 透明代理，需 root 或 `CAP_NET_ADMIN` 才能启用 TUN |
 
             ```bash
+            # plain
             tar xzf silverq-*.tar.gz
             ./silverq serve nodes.yaml --config silverq.toml
+
+            # TUN（需 root/CAP_NET_ADMIN）
+            tar xzf silverq-tun-*.tar.gz
+            ./silverq serve nodes.yaml --config silverq.toml
             ```
+
+            > ⚠️ 启用 TUN 变体前请先读 README 的 **直连 fallback（防断网）** 一节：
+            > 私网与 `[tun].exclude_cidrs` 自动走 DIRECT、节点 dial 失败自动回退 DIRECT，
+            > 避免节点挂掉时连本地网关/DNS 都打不通。
           files: |
             silverq-${{ env.VERSION }}-x86_64-linux.tar.gz
             silverq-${{ env.VERSION }}-x86_64-linux.tar.gz.sha256
+            silverq-tun-${{ env.VERSION }}-x86_64-linux.tar.gz
+            silverq-tun-${{ env.VERSION }}-x86_64-linux.tar.gz.sha256
           fail_on_unmatched_files: true

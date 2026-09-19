@@ -39,11 +39,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # 三种 feature 组合都要过：meow 关掉时 NoopMeasurer 路径独立编译，
+        # meow-tun 多编译一整块 TUN 数据面，只测两种会漏掉 cfg 分支里的错误
         include:
           - mode: default
             features: ""
           - mode: meow
             features: "--features meow"
+          - mode: meow-tun
+            features: "--features meow-tun"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -66,6 +70,8 @@ jobs:
             features: ""
           - mode: meow
             features: "--features meow"
+          - mode: meow-tun
+            features: "--features meow-tun"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -79,20 +85,28 @@ jobs:
       # 全程走 127.0.0.1（本地 echo + 本地探测端点），不依赖外网，CI 可稳定跑。
       - name: Test all
         run: cargo test ${{ matrix.features }}
+      # e2e 只在 meow 模式有意义：数据面在该 feature 下。
+      - name: e2e data plane
+        if: matrix.mode == 'meow' || matrix.mode == 'meow-tun'
+        run: cargo test --features meow --test e2e_data_plane
 
-  # TUN 是显式未实现的占位（src/dataplane/tun.rs 里是 unimplemented!/todo!）。
-  # 这个 job 保证占位没被误接线到运行路径上：一旦有人真调用它，
-  # 应该是编译期就被这里拦住，而不是线上 panic 或静默假装 TUN 在跑。
+  # TUN 实现已完成（启用 meow-tun feature 时）。
+  # 这个 job 保证在没有 meow-tun feature 时，TUN 代码不会被调用。
   tun-placeholder:
     name: TUN placeholder not wired
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: assert tun::run is never called
+      - name: assert tun::run is not called without meow-tun feature
         run: |
+          # TUN 已实现：合法调用点只有 src/dataplane/tun.rs 自身（实现）
+          # 与 main.rs 里被 #[cfg(all(feature="meow", feature="meow-listener"))]
+          # 保护的 wiring（tun::run(tun_config ...）。模块整体 #![cfg] 门控，
+          # 非 meow-tun 构建里误接会是编译错误，这里只是更早拦住并把话说清楚。
           if grep -rn --include=*.rs "tun::run\|tun::setup_route_protection" src/ tests/ \
-             | grep -v "^src/dataplane/tun.rs:"; then
-            echo "::error::src/dataplane/tun.rs 是未实现占位，不应被调用（见该文件模块文档）"
+             | grep -v "^src/dataplane/tun.rs:" \
+             | grep -v "tun::run(tun_config"; then
+            echo "::error::发现未被 meow-tun cfg 保护的 tun::run 调用"
             exit 1
           fi
-          echo "ok: TUN 占位未接线"
+          echo "ok: TUN 占位未被错误接线"
