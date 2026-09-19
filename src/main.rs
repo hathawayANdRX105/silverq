@@ -206,8 +206,14 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             let inbound_sel = selection.clone();
             let inbound_reg = registry.clone();
             let inb2 = tokio::spawn(async move {
-                if let Err(e) =
-                    inbound::run(&listen, inbound_reg, inbound_sel, tuning.clone()).await
+                if let Err(e) = inbound::run(
+                    &listen,
+                    inbound_reg,
+                    inbound_sel,
+                    tuning.clone(),
+                    pinned.clone(),
+                )
+                .await
                 {
                     tracing::error!("inbound exited: {e}");
                 }
