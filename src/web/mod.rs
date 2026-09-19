@@ -443,6 +443,9 @@ fn configs_json(state: &CtlState) -> String {
             "concurrency": t.concurrency,
             "timeout_penalty": t.timeout_penalty,
             "fallback_attempts": t.fallback_attempts,
+            "retire_max_failures": t.retire_max_failures,
+            "retire_min_pool": t.retire_min_pool,
+            "retire_keep_alive_secs": t.retire_keep_alive_secs,
         },
     });
     payload.to_string()
@@ -476,6 +479,15 @@ fn apply_config_patch(state: &CtlState, body: &str) -> String {
     }
     if let Some(n) = get("fallback_attempts").and_then(|x| x.as_u64()) {
         t.fallback_attempts = n as usize;
+    }
+    if let Some(n) = get("retire_max_failures").and_then(|x| x.as_u64()) {
+        t.retire_max_failures = n as u32;
+    }
+    if let Some(n) = get("retire_min_pool").and_then(|x| x.as_u64()) {
+        t.retire_min_pool = n as usize;
+    }
+    if let Some(n) = get("retire_keep_alive_secs").and_then(|x| x.as_u64()) {
+        t.retire_keep_alive_secs = n;
     }
     *state.tuning.write() = t.validated();
     NO_CONTENT.into()

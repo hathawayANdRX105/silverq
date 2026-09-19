@@ -8,6 +8,7 @@ use meow_common::Metadata;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -42,10 +43,12 @@ impl DialTuning {
 pub type SharedTuning = crate::ctl::SharedTuning;
 
 impl DialTuning {
-    /// dial 单个候选的超时：测速超时的 2 倍。
-    /// 测速能过说明建连一般在测速超时内完成，留 2 倍余量给抖动。
+    /// dial 单个候选的超时：与测速超时等值。
+    /// 早先是 ×2（"留余量给抖动"），但 probe 放宽到 4s 后 ×2 = 8s：
+    /// 浏览器每个死候选烧 8s 学费，fallback×3 最坏 24s —— 保命余量
+    /// 不该以交互延迟为代价，改成等值（TCP+TLS 正常 <1s 内完成）。
     pub fn dial(&self) -> Duration {
-        Duration::from_millis(self.timeout_ms * 2)
+        Duration::from_millis(self.timeout_ms)
     }
 
     /// 建连后等对端首次响应的超时：测速超时的 4 倍。
@@ -63,6 +66,7 @@ pub async fn run(
     registry: Registry,
     selection: SharedSelection,
     tuning: SharedTuning,
+    pinned: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(listener_addr).await?;
     tracing::info!(
@@ -75,8 +79,11 @@ pub async fn run(
         let registry = registry.clone();
         let selection = selection.clone();
         let tuning = tuning.clone();
+        let pinned = pinned.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_one(socket, peer, &registry, &selection, tuning).await {
+            if let Err(e) =
+                handle_one(socket, peer, &registry, &selection, tuning, pinned).await
+            {
                 tracing::debug!(peer = %peer, "{e}");
             }
         });
@@ -109,6 +116,7 @@ async fn handle_one(
     registry: &Registry,
     selection: &SharedSelection,
     tuning: SharedTuning,
+    pinned: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut peek = [0u8; 1];
     socket
@@ -205,18 +213,59 @@ async fn handle_one(
             }
         }
     }
-    let Some(conn) = conn else {
+    let conn: Box<dyn meow_common::conn::ProxyConn> = if let Some(c) = conn {
+        c
+    } else if pinned.load(Ordering::Relaxed) {
+        // 钉住语义是"只用这个节点"：所有代理候选失败时直连兜底会绕过钉住，
+        // 让钉死节点的请求悄悄走直连成功。钉住必须fail 就 fail。
+        tracing::info!("已钉住且候选全失败，不做直连兜底（遵守 pin 语义）");
         if target.proto == Proto::Http {
-            socket
+            let _ = socket
                 .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
-                .await
-                .ok();
+                .await;
         }
-        tracing::warn!(
-            target = %format!("{}/{}", target.host, target.port),
-            "no live adapter in selection"
-        );
         return Ok(());
+    } else {
+        // 所有代理候选都失败：尝试直连兜底（TCP 直连目标端口）。
+        // 直连超时 = max(dial_timeout, first_response)
+        let direct_addr = (target.host.as_str(), target.port);
+        let direct_timeout = std::cmp::max(dial_timeout, dt.first_response());
+        tracing::info!(
+            target = %format!("{}/{}", target.host, target.port),
+            "所有代理候选失败，尝试直连兜底"
+        );
+        match tokio::time::timeout(
+            direct_timeout,
+            tokio::net::TcpStream::connect(direct_addr),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => Box::new(stream),
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    target = %format!("{}/{}", target.host, target.port),
+                    "直连失败: {e}"
+                );
+                if target.proto == Proto::Http {
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+                        .await;
+                }
+                return Ok(());
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target = %format!("{}/{}", target.host, target.port),
+                    "直连超时"
+                );
+                if target.proto == Proto::Http {
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+                        .await;
+                }
+                return Ok(());
+            }
+        }
     };
     let _ = peer;
 
@@ -224,14 +273,6 @@ async fn handle_one(
 }
 
 /// 双向中继，带"对端首次响应"超时。
-///
-/// **不能盲等首字节**：绝大多数协议是客户端先说话（TLS ClientHello、HTTP 请求），
-/// 服务端在收到请求前不会发任何数据。所以顺序必须是：
-/// 先把客户端第一批数据转发过去，**再**等对端回应——这样才能区分
-/// "黑洞节点不回"和"正常节点在等我们说话"。
-///
-/// 超时只作用于**首次**响应；之后进入无超时的常规双向拷贝，
-/// 免得长连接（SSH、WebSocket 长轮询）被误杀。
 async fn relay(
     socket: TcpStream,
     conn: Box<dyn meow_common::conn::ProxyConn>,

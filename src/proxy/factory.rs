@@ -70,6 +70,10 @@ pub fn build_proxy(spec: &NodeSpec) -> Result<Arc<dyn ProxyAdapter>, String> {
         }
         crate::proxy::nodespec::Protocol::Hysteria2 => {
             let h = spec.hysteria2.as_ref().ok_or("hysteria2 spec missing")?;
+            let obfs = h.obfs.as_deref().map(|v| match v {
+                "salamander" => Some(meow_proxy::Hy2Obfs::Salamander),
+                _ => None,
+            }).flatten();
             let options = Hy2Options {
                 name: spec.tag.clone(),
                 server: spec.server.clone(),
@@ -80,13 +84,14 @@ pub fn build_proxy(spec: &NodeSpec) -> Result<Arc<dyn ProxyAdapter>, String> {
                 udp,
                 up_bps: 0,
                 down_bps: 0,
-                obfs: None,
-                obfs_password: None,
-                ports: None,
+                obfs,
+                obfs_password: h.obfs_password.clone(),
+                ports: h.ports.clone(),
                 hop_interval: None,
                 fingerprint: None,
                 fast_open: false,
             };
+            tracing::info!(tag = %spec.tag, obfs = ?options.obfs, obfs_password = ?options.obfs_password, ports = ?options.ports, "hysteria2 adapter built");
             Box::new(Hy2Adapter::new(options).map_err(|e| e.to_string())?)
         }
         crate::proxy::nodespec::Protocol::Direct => Box::new(meow_proxy::DirectAdapter::new()),

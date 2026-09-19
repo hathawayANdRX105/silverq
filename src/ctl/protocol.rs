@@ -29,6 +29,8 @@ pub struct CtlState {
     pub selection: Arc<RwLock<Vec<String>>>,
     /// 当前节点表路径（reload 默认重读它）
     pub nodes_path: Mutex<String>,
+    /// 启动时 --config 的路径（config-reload 重读它）
+    pub config_path: Mutex<String>,
     /// 手动钉住：true 时调度循环不覆盖 selection。
     /// **必须与调度循环共享同一个 Arc** —— 早先这里是独立的 AtomicBool，
     /// ctl 置位调度循环根本看不到，钉住功能实际是坏的（加锁怎么改都没用，
@@ -64,6 +66,7 @@ impl CtlState {
         pool: Arc<RwLock<Vec<Node>>>,
         selection: Arc<RwLock<Vec<String>>>,
         nodes_path: String,
+        config_path: String,
         pinned: Arc<AtomicBool>,
         pin_target: Arc<Mutex<Option<String>>>,
         tuning: SharedTuning,
@@ -77,6 +80,7 @@ impl CtlState {
             pool,
             selection,
             nodes_path: Mutex::new(nodes_path),
+            config_path: Mutex::new(config_path),
             pinned,
             pin_target,
             tuning,
@@ -93,6 +97,7 @@ impl CtlState {
         pool: Arc<RwLock<Vec<Node>>>,
         selection: Arc<RwLock<Vec<String>>>,
         nodes_path: String,
+        config_path: String,
         pinned: Arc<AtomicBool>,
         pin_target: Arc<Mutex<Option<String>>>,
         tuning: SharedTuning,
@@ -105,6 +110,7 @@ impl CtlState {
             pool,
             selection,
             nodes_path: Mutex::new(nodes_path),
+            config_path: Mutex::new(config_path),
             pinned,
             pin_target,
             tuning,
@@ -159,6 +165,7 @@ async fn handle_one(
 
     let reply = match cmd {
         "reload" => do_reload(state, parts.get(1).copied()).await,
+        "config-reload" => do_config_reload(state),
         "select" => do_select(state, parts.get(1).copied()).await,
         "status" => Ok(do_status(state).await),
         "" => Err("empty command".to_string()),
@@ -237,6 +244,25 @@ async fn do_reload(state: &CtlState, path_arg: Option<&str>) -> Result<String, S
         return Ok(format!("reloaded {path} ({top:?})"));
     }
     Ok(format!("reloaded {path} (pinned, selection unchanged)"))
+}
+
+/// 重读 silverq.toml → 更新可热更调参（不动节点表）。
+/// 与 `silverq reload`（节点表）互补：调参与节点各自热加载。
+fn do_config_reload(state: &CtlState) -> Result<String, String> {
+    let path = state.config_path.lock().clone();
+    let fc = crate::config::settings::load(std::path::Path::new(&path))?;
+    let eff = crate::config::settings::Effective::from(&fc);
+    let t = crate::config::settings::RuntimeTuning::from_eff(&eff);
+    tracing::info!(
+        capacity = t.capacity,
+        interval_secs = t.interval_secs,
+        timeout_ms = t.timeout_ms,
+        retire_max_failures = t.retire_max_failures,
+        retire_keep_alive_secs = t.retire_keep_alive_secs,
+        "config-reload: 调参已从 {path} 重读"
+    );
+    *state.tuning.write() = t;
+    Ok(format!("config reloaded from {path}"))
 }
 async fn do_select(state: &CtlState, arg: Option<&str>) -> Result<String, String> {
     let tag = arg.ok_or_else(|| "select: missing <tag|auto>".to_string())?;

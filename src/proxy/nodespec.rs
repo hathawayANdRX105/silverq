@@ -139,6 +139,12 @@ pub struct Hysteria2Spec {
     pub password: String,
     #[serde(default)]
     pub sni: Option<String>,
+    #[serde(default)]
+    pub obfs: Option<String>,
+    #[serde(default)]
+    pub obfs_password: Option<String>,
+    #[serde(default)]
+    pub ports: Option<String>,
 }
 
 impl NodeSpec {
@@ -173,12 +179,22 @@ impl NodeSpec {
 }
 
 /// 从 YAML 文件加载节点表。
+///
+/// 按 tag 去重（保留首次出现）。tag 同时是 registry 的 key 和 selection 的元素：
+/// 上游 pool poller 每轮「剥旧 POOL- 行 + 灌新行」时会写出重复 tag（实测 880 行 /
+/// 813 唯一，单个 tag 最多 6 份）。不去重则前 N 名被同一个节点重复占位，
+/// fallback 退化成本节点重试——selection 10 个名额只覆盖 3 个真实节点。
 pub fn load_nodes_yaml(path: &str) -> Result<Vec<NodeSpec>, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path, e))?;
     let file: NodeFile =
         serde_yaml::from_str(&raw).map_err(|e| format!("parse {}: {}", path, e))?;
-    for n in &file.nodes {
+    let mut seen = std::collections::HashSet::new();
+    let mut nodes = Vec::with_capacity(file.nodes.len());
+    for n in file.nodes {
         n.validate()?;
+        if seen.insert(n.tag.clone()) {
+            nodes.push(n);
+        }
     }
-    Ok(file.nodes)
+    Ok(nodes)
 }
