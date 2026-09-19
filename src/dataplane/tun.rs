@@ -28,64 +28,110 @@ use std::time::Duration;
 use tokio::sync::RwLock as TokioRwLock;
 use tracing::{info, warn};
 
-/// 将 ProxyAdapter 包装为实现 Proxy trait（增加 alive/alive_for_url 等方法）。
+/// TUN 出口代理包装：候选链 + DIRECT 兜底。
 ///
-/// `inner` 是主出口（silverq-auto 选中的节点），`direct` 是 DIRECT 兜底：
-/// 当 `inner` 的 dial 失败时自动回退到 `direct`，避免节点挂掉时连本地
-/// 网关 / DNS 都打不通（v0.2.0 引入的断网防护）。
+/// `candidates` 按 selection 顺序排列，主候选 dial 失败时逐个往下试，
+/// 全部失败再退 DIRECT。与 SOCKS5 入站（inbound.rs 的 fallback_attempts）
+/// 对齐——否则 TUN 只用 selection[0] 单点，节点池半死时每 5 秒切出口
+/// 都会卡一批连接（实测 gstatic 0.07s↔20s 抖动）。
 struct ProxyWrapper {
-    inner: Arc<dyn ProxyAdapter>,
+    candidates: Vec<Arc<dyn ProxyAdapter>>,
     direct: Arc<dyn ProxyAdapter>,
 }
 
 impl ProxyWrapper {
-    fn new(inner: Arc<dyn ProxyAdapter>, direct: Arc<dyn ProxyAdapter>) -> Self {
-        Self { inner, direct }
+    /// `candidates` 至少含一个元素；空时等价于纯 DIRECT（由 sync_proxies
+    /// 保证「空 selection」路径构造 direct-only wrapper，见下方）。
+    fn new(candidates: Vec<Arc<dyn ProxyAdapter>>, direct: Arc<dyn ProxyAdapter>) -> Self {
+        Self { candidates, direct }
+    }
+
+    fn primary_name(&self) -> &str {
+        self.candidates
+            .first()
+            .map(|a| a.name())
+            .unwrap_or("DIRECT")
     }
 }
 
 #[async_trait::async_trait]
 impl ProxyAdapter for ProxyWrapper {
     fn name(&self) -> &str {
-        self.inner.name()
+        self.primary_name()
     }
     fn adapter_type(&self) -> AdapterType {
-        self.inner.adapter_type()
+        self.candidates
+            .first()
+            .map(|a| a.adapter_type())
+            .unwrap_or(AdapterType::Direct)
     }
     fn addr(&self) -> &str {
-        self.inner.addr()
+        self.candidates
+            .first()
+            .map(|a| a.addr())
+            .unwrap_or("")
     }
     fn support_udp(&self) -> bool {
-        self.inner.support_udp()
+        self.candidates
+            .first()
+            .map(|a| a.support_udp())
+            .unwrap_or(true)
     }
     async fn dial_tcp(&self, metadata: &Metadata) -> meow_common::Result<Box<dyn ProxyConn>> {
-        match self.inner.dial_tcp(metadata).await {
-            Ok(c) => Ok(c),
-            Err(e) => {
-                warn!(
-                    err = %e,
-                    tag = self.inner.name(),
-                    "primary proxy dial_tcp failed, falling back to DIRECT"
-                );
-                self.direct.dial_tcp(metadata).await
+        for (i, adapter) in self.candidates.iter().enumerate() {
+            match adapter.dial_tcp(metadata).await {
+                Ok(c) => return Ok(c),
+                Err(e) => {
+                    // 非末位候选的失败是运维信号（记录主候选方便定位）；
+                    // 只有全链失败才升级为 warn 并兜底 DIRECT。
+                    if i + 1 < self.candidates.len() {
+                        warn!(
+                            err = %e,
+                            tag = adapter.name(),
+                            next = self.candidates[i + 1].name(),
+                            "dial_tcp failed, trying next candidate"
+                        );
+                    } else {
+                        warn!(
+                            err = %e,
+                            tag = adapter.name(),
+                            "all candidates failed, falling back to DIRECT"
+                        );
+                    }
+                }
             }
         }
+        self.direct.dial_tcp(metadata).await
     }
     async fn dial_udp(&self, metadata: &Metadata) -> meow_common::Result<Box<dyn ProxyPacketConn>> {
-        match self.inner.dial_udp(metadata).await {
-            Ok(c) => Ok(c),
-            Err(e) => {
-                warn!(
-                    err = %e,
-                    tag = self.inner.name(),
-                    "primary proxy dial_udp failed, falling back to DIRECT"
-                );
-                self.direct.dial_udp(metadata).await
+        for (i, adapter) in self.candidates.iter().enumerate() {
+            match adapter.dial_udp(metadata).await {
+                Ok(c) => return Ok(c),
+                Err(e) => {
+                    if i + 1 < self.candidates.len() {
+                        warn!(
+                            err = %e,
+                            tag = adapter.name(),
+                            next = self.candidates[i + 1].name(),
+                            "dial_udp failed, trying next candidate"
+                        );
+                    } else {
+                        warn!(
+                            err = %e,
+                            tag = adapter.name(),
+                            "all candidates failed, falling back to DIRECT"
+                        );
+                    }
+                }
             }
         }
+        self.direct.dial_udp(metadata).await
     }
     fn health(&self) -> &ProxyHealth {
-        self.inner.health()
+        self.candidates
+            .first()
+            .map(|a| a.health())
+            .unwrap_or(self.direct.health())
     }
 }
 
@@ -209,19 +255,18 @@ impl TunRuntime {
         let selection = self.selection.read().await;
         let registry = self.registry.read();
 
-        let new_tag = selection.first().cloned();
-        // registry 会因 reload 重建（同 tag 换新 Arc），所以期望状态要带上
-        // adapter 本身，不能只比 tag —— 否则 reload 后出口停在旧节点配置上。
-        let new = match new_tag.as_deref() {
-            Some(tag) => registry.get(tag).map(|a| (tag.to_string(), Arc::clone(a))),
-            None => None,
-        };
+        // 整条 selection 都是候选（不只是首个）：dial 时逐个尝试，与
+        // SOCKS5 入站的 fallback_attempts 对齐。registry 可能缺条目
+        //（reload 时序），按序收集存在的 adapter。
+        let candidates: Vec<Arc<dyn ProxyAdapter>> = selection
+            .iter()
+            .filter_map(|tag| registry.get(tag).map(|a| Arc::clone(a)))
+            .collect();
+        let new_tag = candidates.first().map(|a| a.name().to_string());
 
         let mut current = self.current_auto.write();
-        let needs_update = match (&*current, &new) {
-            (Some((old_tag, old_arc)), Some((new_tag, new_arc))) => {
-                old_tag != new_tag || !Arc::ptr_eq(old_arc, new_arc)
-            }
+        let needs_update = match (&*current, &new_tag) {
+            (Some((old_tag, _)), Some(new_tag)) => old_tag != new_tag,
             (None, None) => false,
             _ => true,
         };
@@ -235,20 +280,20 @@ impl TunRuntime {
         // 又保证空 selection 时本地流量仍可达（防断网安全网）。
         // 两字段都指向同一个共享 DirectAdapter（self.direct）。
         let direct_wrapped = Arc::new(ProxyWrapper::new(
-            Arc::clone(&self.direct),
+            vec![Arc::clone(&self.direct)],
             Arc::clone(&self.direct),
         )) as Arc<dyn Proxy>;
         proxies.insert(SmolStr::new("DIRECT"), direct_wrapped);
 
-        match new {
-            Some((tag, adapter)) => {
+        match new_tag {
+            Some(tag) => {
                 let wrapped = Arc::new(ProxyWrapper::new(
-                    Arc::clone(&adapter),
+                    candidates.clone(),
                     Arc::clone(&self.direct),
                 )) as Arc<dyn Proxy>;
                 proxies.insert(SmolStr::new("silverq-auto"), wrapped);
-                info!(tag = %tag, "TUN silverq-auto proxy updated");
-                *current = Some((tag, adapter));
+                info!(tag = %tag, count = candidates.len(), "TUN silverq-auto proxy updated");
+                *current = Some((tag, candidates.into_iter().next().unwrap()));
             }
             None => {
                 // 没有可用节点（空 selection，或 tag 尚未在 registry 里）：
