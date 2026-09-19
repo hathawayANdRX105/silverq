@@ -20,13 +20,35 @@ fn select_top_orders_by_score_and_respects_capacity() {
         select_top(&pool, 2, DEFAULT_FAILURE_PENALTY_MS),
         vec!["fast", "mid"]
     );
+    // 从未测通的节点不进 selection：进去只是占 active 名额让数据面 dial 必死节点
     assert_eq!(
-        select_top(&pool, 10, DEFAULT_FAILURE_PENALTY_MS).len(),
-        4,
-        "capacity 超池大小时取全部"
+        select_top(&pool, 10, DEFAULT_FAILURE_PENALTY_MS),
+        vec!["fast", "mid", "slow"],
+        "capacity 超活节点数时只给活的，不拿没测过的凑数"
     );
-    // 没测过的排最后
-    assert_eq!(select_top(&pool, 4, DEFAULT_FAILURE_PENALTY_MS)[3], "never");
+    assert!(
+        !select_top(&pool, 4, DEFAULT_FAILURE_PENALTY_MS).contains(&"never".to_string()),
+        "从未测通的节点绝不能出现在 selection"
+    );
+}
+
+/// 整池都没有活节点时返回空，调度循环据此保留冷启动种子（见 main.rs）
+#[test]
+fn select_top_all_unmeasured_returns_empty() {
+    let pool: Vec<Node> = (0..5).map(|i| Node::new(format!("u{i}"), "2.2.2.2", 443)).collect();
+    assert!(select_top(&pool, 10, DEFAULT_FAILURE_PENALTY_MS).is_empty());
+}
+
+/// 曾测通但当前连续失败的节点仍保留资格（罚分在 score 里算，靠后但不除名），
+/// 一次成功即复活。
+#[test]
+fn select_top_keeps_failing_but_once_alive_nodes() {
+    let mut dead_now = measured("was-alive", 300.0);
+    dead_now.penalize();
+    dead_now.penalize();
+    let pool = vec![dead_now, Node::new("fresh", "2.2.2.2", 443)];
+    let sel = select_top(&pool, 5, DEFAULT_FAILURE_PENALTY_MS);
+    assert_eq!(sel, vec!["was-alive"]);
 }
 
 /// 交错的核心保证：未测节点不会被挤到最后一批，第一批就必须包含它们。

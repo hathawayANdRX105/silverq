@@ -6,8 +6,14 @@ use crate::scheduler::node::Node;
 /// Select the top N nodes by EWMA score (lower is better).
 /// Used to determine the active proxy group.
 /// No hysteresis or round-based switching — pure score driven.
+///
+/// **从未测通的节点（ewma == INFINITY）一律排除**：它的分数加多少罚分都还是
+/// INFINITY，凑进 selection 只是占着 active 名额让数据面去 dial 一个必死的节点，
+/// 烧掉 fallback 槽位后还是兜底直连。池子半死时这会把死节点成批塞进队首
+/// （实测 789 池只剩 3 个活节点时，剩 7 个名额被 nodes.yaml 开头的手工 VLESS
+/// 死节点占走）。活节点不够 capacity 就少给，不拿死节点凑。
 pub fn select_top(nodes: &[Node], capacity: usize, penalty_ms: f64) -> Vec<String> {
-    let mut ranked: Vec<_> = nodes.iter().collect();
+    let mut ranked: Vec<_> = nodes.iter().filter(|n| n.ewma.is_finite()).collect();
     ranked.sort_by(|a, b| {
         a.score_with(penalty_ms)
             .partial_cmp(&b.score_with(penalty_ms))

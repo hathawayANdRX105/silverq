@@ -388,13 +388,18 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
                     (Some(tag), true) => vec![tag.clone()],
                     _ => decision::select_top(&pool.read().await, t.capacity, t.timeout_penalty),
                 };
-                let mut sel_guard = selection.write().await;
-                if *sel_guard != desired {
-                    *sel_guard = desired.clone();
-                    drop(sel_guard);
-                    publish_selector_store(&desired, &selector_store);
+                // select_top 现在会排除从未测通的节点，整池都还没测出活节点时
+                // 返回空。空 desired 不能覆盖冷启动种子——否则首轮测速全失败时
+                // 数据面连"瞎选的候选"都没有，请求必死。保留种子等下一轮。
+                if !desired.is_empty() {
+                    let mut sel_guard = selection.write().await;
+                    if *sel_guard != desired {
+                        *sel_guard = desired.clone();
+                        drop(sel_guard);
+                        publish_selector_store(&desired, &selector_store);
+                    }
+                    last_selection = desired;
                 }
-                last_selection = desired;
             }
 
             persist::save(&pool.read().await);
