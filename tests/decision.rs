@@ -35,7 +35,9 @@ fn select_top_orders_by_score_and_respects_capacity() {
 /// 整池都没有活节点时返回空，调度循环据此保留冷启动种子（见 main.rs）
 #[test]
 fn select_top_all_unmeasured_returns_empty() {
-    let pool: Vec<Node> = (0..5).map(|i| Node::new(format!("u{i}"), "2.2.2.2", 443)).collect();
+    let pool: Vec<Node> = (0..5)
+        .map(|i| Node::new(format!("u{i}"), "2.2.2.2", 443))
+        .collect();
     assert!(select_top(&pool, 10, DEFAULT_FAILURE_PENALTY_MS).is_empty());
 }
 
@@ -108,4 +110,32 @@ fn handles_all_unmeasured_and_all_known() {
         .collect();
     let b = measurement_order(&all_known, 2, DEFAULT_FAILURE_PENALTY_MS);
     assert_eq!(b.iter().map(|x| x.len()).sum::<usize>(), 5);
+}
+
+/// 回归：`adopt_score` 必须接管 `ewma`。
+///
+/// reload 路径（ctl `do_reload`）按 tag 建全新 Node 池再逐节点
+/// `adopt_score(o)` 继承分数，随后直接 `select_top` 写 selection。
+/// `select_top` 按 `ewma.is_finite()` 过滤 —— 一旦 adopt 丢掉 ewma，
+/// reload 后整池 INFINITY 被滤空，selection 清空，数据面没有候选可拨
+/// （代理静默退化成纯直连，直到下一轮测速重新攒出分数）。
+#[test]
+fn reload_adopts_scores_so_selection_survives() {
+    let old = [measured("a", 40.0), measured("b", 80.0)];
+    // 模拟 reload：同 tag 全新节点
+    let mut new_pool: Vec<Node> = old
+        .iter()
+        .map(|o| Node::new(o.tag.clone(), o.server.clone(), o.port))
+        .collect();
+    for n in new_pool.iter_mut() {
+        if let Some(o) = old.iter().find(|o| o.tag == n.tag) {
+            n.adopt_score(o);
+        }
+    }
+    let top = select_top(&new_pool, 10, DEFAULT_FAILURE_PENALTY_MS);
+    assert_eq!(
+        top,
+        vec!["a".to_string(), "b".to_string()],
+        "reload 后 selection 不能空"
+    );
 }

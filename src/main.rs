@@ -74,7 +74,10 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
     );
 
     // 1. 加载节点
-    let specs = nodespec::load_nodes_yaml(&nodes)?;
+    let mut specs = nodespec::load_nodes_yaml(&nodes)?;
+    // TUN + fake-IP 环境下系统解析会返回假地址、把节点拨号劫进自家隧道
+    // （2026-09-19 事故根因）：构建 adapter 前用真实上游 DNS 预解析。
+    silverq::proxy::dns::resolve_dial_addrs(&mut specs).await;
     tracing::info!(count = specs.len(), "loaded nodes from {nodes}");
 
     // 2. registry（feature meow）→ measurer + 数据面 + ctl 共用
@@ -210,13 +213,26 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             let listen = eff.listen.clone();
             let inbound_sel = selection.clone();
             let inbound_reg = registry.clone();
+            // 国内域名直连表：SOCKS 入站路径的直连判定 + TUN 的 fake-IP 旁路
+            // （TUN 侧在 TunRuntime::new 里独立加载同一文件）。
+            let china_domains =
+                silverq::proxy::dns::load_china_domains(&silverq::proxy::dns::china_domains_path());
+            let china = Arc::new(silverq::proxy::dns::ChinaSet::new(&china_domains));
+            tracing::info!(count = china_domains.len(), "国内域名直连表加载");
+            let inb_china = china.clone();
+            // 域名级路由缓存（慢触发竞速）：SOCKS 入站专用，TUN 路径暂不接入
+            let routes = Arc::new(silverq::proxy::route::RouteCache::new());
+            let inb_routes = routes.clone();
+            let inb_tuning = tuning.clone();
             let inb2 = tokio::spawn(async move {
                 if let Err(e) = inbound::run(
                     &listen,
                     inbound_reg,
                     inbound_sel,
-                    tuning.clone(),
+                    inb_tuning,
                     pinned.clone(),
+                    inb_china,
+                    inb_routes,
                 )
                 .await
                 {
@@ -230,7 +246,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
                 let tun_sel = selection.clone();
                 let tun_reg = registry.clone();
                 Some(tokio::spawn(async move {
-                    if let Err(e) = tun::run(tun_config, tun_reg, tun_sel).await {
+                    if let Err(e) = tun::run(tun_config, tun_reg, tun_sel, tuning.clone()).await {
                         tracing::error!("TUN exited: {e}");
                     }
                 }))
