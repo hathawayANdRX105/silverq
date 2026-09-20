@@ -4,9 +4,11 @@
 #![cfg(feature = "meow")]
 
 use crate::proxy::meow::Registry;
+use crate::proxy::route::{Route, RouteOutcome};
 use meow_common::Metadata;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -42,10 +44,12 @@ impl DialTuning {
 pub type SharedTuning = crate::ctl::SharedTuning;
 
 impl DialTuning {
-    /// dial 单个候选的超时：测速超时的 2 倍。
-    /// 测速能过说明建连一般在测速超时内完成，留 2 倍余量给抖动。
+    /// dial 单个候选的超时：与测速超时等值。
+    /// 早先是 ×2（"留余量给抖动"），但 probe 放宽到 4s 后 ×2 = 8s：
+    /// 浏览器每个死候选烧 8s 学费，fallback×3 最坏 24s —— 保命余量
+    /// 不该以交互延迟为代价，改成等值（TCP+TLS 正常 <1s 内完成）。
     pub fn dial(&self) -> Duration {
-        Duration::from_millis(self.timeout_ms * 2)
+        Duration::from_millis(self.timeout_ms)
     }
 
     /// 建连后等对端首次响应的超时：测速超时的 4 倍。
@@ -63,6 +67,9 @@ pub async fn run(
     registry: Registry,
     selection: SharedSelection,
     tuning: SharedTuning,
+    pinned: Arc<AtomicBool>,
+    china: Arc<crate::proxy::dns::ChinaSet>,
+    routes: Arc<crate::proxy::route::RouteCache>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(listener_addr).await?;
     tracing::info!(
@@ -75,8 +82,19 @@ pub async fn run(
         let registry = registry.clone();
         let selection = selection.clone();
         let tuning = tuning.clone();
+        let pinned = pinned.clone();
+        let china = china.clone();
+        let routes = routes.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_one(socket, peer, &registry, &selection, tuning).await {
+            let ctx = ConnCtx {
+                registry: &registry,
+                selection: &selection,
+                tuning,
+                pinned,
+                china: &china,
+                routes: &routes,
+            };
+            if let Err(e) = handle_one(socket, peer, &ctx).await {
                 tracing::debug!(peer = %peer, "{e}");
             }
         });
@@ -103,12 +121,20 @@ pub struct Target {
     cmd: Cmd,
 }
 
+/// handle_one 的共享上下文（参数打包：7 个以上就被 clippy 拦了）。
+struct ConnCtx<'a> {
+    registry: &'a Registry,
+    selection: &'a SharedSelection,
+    tuning: SharedTuning,
+    pinned: Arc<AtomicBool>,
+    china: &'a crate::proxy::dns::ChinaSet,
+    routes: &'a crate::proxy::route::RouteCache,
+}
+
 async fn handle_one(
     mut socket: TcpStream,
     peer: SocketAddr,
-    registry: &Registry,
-    selection: &SharedSelection,
-    tuning: SharedTuning,
+    ctx: &ConnCtx<'_>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut peek = [0u8; 1];
     socket
@@ -132,12 +158,12 @@ async fn handle_one(
     };
 
     // 调参快照：TCP dial 与 UDP associate 都从这里取，热改对新建连接即时生效
-    let dt = DialTuning::snapshot(&tuning.read());
+    let dt = DialTuning::snapshot(&ctx.tuning.read());
 
     // UDP ASSOCIATE：分配中继 socket，回其地址，然后在 TCP 存活期间跑中继循环。
     // 注意：客户端常填 0.0.0.0:0（自己也不知道源地址），所以不能用 host 空判断拦。
     if target.cmd == Cmd::UdpAssociate {
-        return handle_udp_associate(socket, registry, selection, dt).await;
+        return handle_udp_associate(socket, ctx.registry, ctx.selection, dt).await;
     }
 
     if target.host.is_empty() {
@@ -159,8 +185,58 @@ async fn handle_one(
         }
     }
 
+    // 直连判定（跳过候选链）：
+    // - 回环/私网目标：语义对齐 TUN 数据面的私网安全网——这类地址只在
+    //   silverq 本机/局域网有意义，送进候选链会拨到节点自己的网络。
+    // - 国内域名：直连更快；域名形态必须先经真实 DNS 解析——系统解析在
+    //   fake-IP 环境返回假地址，按域名直连会被路由回自家隧道。
+    //   解析失败回退候选链（表命中但站点异常时仍有代理兜底）。
+    enum DirectDial {
+        None,
+        Host,
+        Ip(std::net::IpAddr),
+    }
+    let mut direct: DirectDial = if ctx.pinned.load(Ordering::Relaxed) {
+        // 钉住语义优先于直连判定：钉住 = 所有流量只走该节点、fail 就 fail，
+        // 直连旁路会破坏该语义（e2e pinned_* 回归锁定）。
+        DirectDial::None
+    } else if is_local_target(&target.host) {
+        DirectDial::Host
+    } else if ctx.china.matches(&target.host) {
+        match crate::proxy::dns::resolve_host(&target.host).await {
+            Some(ip) => DirectDial::Ip(ip),
+            None => {
+                tracing::info!(host = %target.host, "国内域名真实 DNS 解析失败，回退代理候选");
+                DirectDial::None
+            }
+        }
+    } else {
+        DirectDial::None
+    };
+
+    // 路由缓存决策（回环/国内/钉住不进缓存：那些是策略或本机语义，非性能选择）。
+    // 代理首响应超阈值的域名下次访问触发竞速：直连 + 候选链并行，TCP 先建连者胜。
+    let china_hit = ctx.china.matches(&target.host);
+    let cache_eligible =
+        !ctx.pinned.load(Ordering::Relaxed) && !is_local_target(&target.host) && !china_hit;
+    let mut race = false;
+    if cache_eligible && matches!(direct, DirectDial::None) {
+        match ctx.routes.decide(&target.host) {
+            crate::proxy::route::Decision::Direct => {
+                match crate::proxy::dns::resolve_host(&target.host).await {
+                    Some(ip) => direct = DirectDial::Ip(ip),
+                    None => ctx
+                        .routes
+                        .record(&target.host, Route::Direct, RouteOutcome::Failed),
+                }
+            }
+            crate::proxy::route::Decision::Race => race = true,
+            crate::proxy::route::Decision::Proxy => {}
+        }
+    }
+
     // 按当前选择顺序逐个尝试（best → 次优），dial 失败自动 fallback
-    let order = selection.read().await.clone();
+    let order = ctx.selection.read().await.clone();
     let metadata = Metadata {
         network: meow_common::Network::Tcp,
         host: target.host.clone().into(),
@@ -171,72 +247,204 @@ async fn handle_one(
     // 先在无锁情况下把候选 adapter 克隆出来（截断到 fallback 上限），
     // 避免 guard 跨 await
     let candidates: Vec<_> = {
-        let guard = registry.read();
+        let guard = ctx.registry.read();
         pick_candidates(&order, &guard, dt.fallback_attempts)
     };
     // 逐个 dial，**每个都带超时**。
     //
     // 没有这个超时的话，selection[0] 是死节点时 dial_tcp 会挂到内核 TCP 超时
     // （可达数十秒），fallback 根本轮不到下一个候选 —— 实测表现为请求卡满
-    // 客户端超时后失败，而后排明明有活节点。超时取测速超时的 2 倍：
-    // 测速能过说明这个节点建连一般在测速超时内完成，留 2 倍余量给抖动。
+    // 客户端超时后失败，而后排明明有活节点。超时与测速超时等值（早期是
+    // 2×，probe 放宽后每个死候选要烧 8s 学费，交互延迟代价太大，已改成等值，
+    // 见 DialTuning::dial 的文档）。
     // fallback 尝试上限来自配置（silverq.toml [data_plane].fallback_attempts，
     // PATCH /configs 可热改）。按 EWMA 顺序最多试 N 个候选：
     // 池子普遍半死时，大值能救回更多请求；但每个死候选都要烧一个 dial 超时，
     // 单请求最坏延迟随之上升。
-    let dt = DialTuning::snapshot(&tuning.read());
+    let dt = DialTuning::snapshot(&ctx.tuning.read());
     let dial_timeout = dt.dial();
-    let mut conn = None;
-    for adapter in &candidates {
-        match tokio::time::timeout(dial_timeout, adapter.dial_tcp(&metadata)).await {
-            Ok(Ok(c)) => {
-                conn = Some(c);
-                break;
-            }
-            Ok(Err(e)) => {
-                // info 级：死候选是运维必须能看到的信号（fallback 计数也靠它）
-                tracing::info!(tag = adapter.name(), "dial failed: {e}");
-            }
-            Err(_) => {
-                tracing::info!(
-                    tag = adapter.name(),
-                    "dial 超时 {dial_timeout:?}，换下一个候选"
-                );
+    let mut conn: Option<Box<dyn meow_common::conn::ProxyConn>> = None;
+    let mut used_route = Route::Proxy;
+    match direct {
+        // 强制直连：回环/私网按原样拨（localhost 解析交给系统，回环段不受
+        // fake-IP 影响）；国内域名拨已解析的真实 IP。
+        DirectDial::Host => {
+            let t = std::cmp::max(dial_timeout, dt.first_response());
+            conn = dial_direct(
+                (target.host.as_str(), target.port),
+                t,
+                format!("{}/{}", target.host, target.port),
+            )
+            .await
+            .map(|s| Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
+            used_route = Route::Direct;
+        }
+        DirectDial::Ip(ip) => {
+            let t = std::cmp::max(dial_timeout, dt.first_response());
+            conn = dial_direct(
+                (ip, target.port),
+                t,
+                format!("{}/{}", target.host, target.port),
+            )
+            .await
+            .map(|s| Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
+            used_route = Route::Direct;
+        }
+        DirectDial::None => {
+            if race {
+                // 竞速：直连与候选链并行，TCP 先建连者胜（慢路由域名的专属路径）
+                let label = format!("{}/{}", target.host, target.port);
+                let host = target.host.clone();
+                let port = target.port;
+                let direct_f = Box::pin(async move {
+                    match crate::proxy::dns::resolve_host(&host).await {
+                        Some(ip) => dial_direct((ip, port), dial_timeout, label).await,
+                        None => None,
+                    }
+                });
+                let proxy_f = Box::pin(async {
+                    for adapter in &candidates {
+                        match tokio::time::timeout(dial_timeout, adapter.dial_tcp(&metadata)).await
+                        {
+                            Ok(Ok(c)) => return Some(c),
+                            Ok(Err(e)) => {
+                                tracing::info!(tag = adapter.name(), "dial failed: {e}")
+                            }
+                            Err(_) => {
+                                tracing::info!(
+                                    tag = adapter.name(),
+                                    "dial 超时 {dial_timeout:?}，换下一个候选"
+                                )
+                            }
+                        }
+                    }
+                    None
+                });
+                match futures::future::select(direct_f, proxy_f).await {
+                    futures::future::Either::Left((res, proxy_f)) => {
+                        if let Some(s) = res {
+                            conn = Some(Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
+                            used_route = Route::Direct;
+                        } else if let Some(c) = proxy_f.await {
+                            conn = Some(c);
+                        }
+                    }
+                    futures::future::Either::Right((res, direct_f)) => {
+                        if let Some(c) = res {
+                            conn = Some(c);
+                        } else if let Some(s) = direct_f.await {
+                            conn = Some(Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
+                            used_route = Route::Direct;
+                        }
+                    }
+                }
+            } else {
+                for adapter in &candidates {
+                    match tokio::time::timeout(dial_timeout, adapter.dial_tcp(&metadata)).await {
+                        Ok(Ok(c)) => {
+                            conn = Some(c);
+                            break;
+                        }
+                        Ok(Err(e)) => {
+                            // info 级：死候选是运维必须能看到的信号（fallback 计数也靠它）
+                            tracing::info!(tag = adapter.name(), "dial failed: {e}");
+                        }
+                        Err(_) => {
+                            tracing::info!(
+                                tag = adapter.name(),
+                                "dial 超时 {dial_timeout:?}，换下一个候选"
+                            );
+                        }
+                    }
+                }
             }
         }
     }
-    let Some(conn) = conn else {
-        if target.proto == Proto::Http {
-            socket
-                .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
-                .await
-                .ok();
+    let conn: Box<dyn meow_common::conn::ProxyConn> = if let Some(c) = conn {
+        c
+    } else if !matches!(direct, DirectDial::None) || race {
+        // 强制直连 / 竞速全败：诚实失败。本机目标送进代理链没有意义；
+        // 竞速全败 = 直连与代理都不可达。
+        if cache_eligible {
+            if race {
+                ctx.routes
+                    .record(&target.host, Route::Proxy, RouteOutcome::Failed);
+            } else {
+                ctx.routes
+                    .record(&target.host, Route::Direct, RouteOutcome::Failed);
+            }
         }
-        tracing::warn!(
-            target = %format!("{}/{}", target.host, target.port),
-            "no live adapter in selection"
-        );
+        if target.proto == Proto::Http {
+            let _ = socket
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+                .await;
+        }
         return Ok(());
+    } else if ctx.pinned.load(Ordering::Relaxed) {
+        // 钉住语义是"只用这个节点"：所有代理候选失败时直连兜底会绕过钉住，
+        // 让钉死节点的请求悄悄走直连成功。钉住必须fail 就 fail。
+        tracing::info!("已钉住且候选全失败，不做直连兜底（遵守 pin 语义）");
+        if target.proto == Proto::Http {
+            let _ = socket
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+                .await;
+        }
+        return Ok(());
+    } else {
+        // 所有代理候选都失败：尝试直连兜底（TCP 直连目标端口）。
+        // 直连超时 = max(dial_timeout, first_response)
+        let direct_timeout = std::cmp::max(dial_timeout, dt.first_response());
+        match dial_direct(
+            (target.host.as_str(), target.port),
+            direct_timeout,
+            format!("{}/{}", target.host, target.port),
+        )
+        .await
+        {
+            Some(stream) => Box::new(stream),
+            None => {
+                if target.proto == Proto::Http {
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+                        .await;
+                }
+                return Ok(());
+            }
+        }
     };
     let _ = peer;
 
-    relay(socket, conn, dt.first_response()).await
+    let fr = relay(socket, conn, dt.first_response()).await;
+    if cache_eligible {
+        match fr {
+            Ok(Some(d)) => ctx
+                .routes
+                .record(&target.host, used_route, RouteOutcome::Responded(d)),
+            Ok(None) => ctx
+                .routes
+                .record(&target.host, used_route, RouteOutcome::Neutral),
+            Err(e) => {
+                ctx.routes
+                    .record(&target.host, used_route, RouteOutcome::Failed);
+                return Err(e);
+            }
+        }
+    } else {
+        fr?;
+    }
+    Ok(())
 }
 
 /// 双向中继，带"对端首次响应"超时。
-///
-/// **不能盲等首字节**：绝大多数协议是客户端先说话（TLS ClientHello、HTTP 请求），
-/// 服务端在收到请求前不会发任何数据。所以顺序必须是：
-/// 先把客户端第一批数据转发过去，**再**等对端回应——这样才能区分
-/// "黑洞节点不回"和"正常节点在等我们说话"。
-///
-/// 超时只作用于**首次**响应；之后进入无超时的常规双向拷贝，
-/// 免得长连接（SSH、WebSocket 长轮询）被误杀。
+/// Ok(Some(d)) = 有数据，d = 首响应耗时（从转发客户端首包起算，供路由缓存）；
+/// Ok(None) = 无数据结束（对端正常关闭/客户端早退）。
+/// 客户端侧早退的读写错误也以 Err 返回，会被上游计为路线 Failed——噪声
+/// 可接受（一次误标只多触发一次无害竞速）。
 async fn relay(
     socket: TcpStream,
     conn: Box<dyn meow_common::conn::ProxyConn>,
     first_response: Duration,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<Duration>, Box<dyn std::error::Error + Send + Sync>> {
     let (mut cr, mut cw) = tokio::io::split(socket);
     let (mut pr, mut pw) = tokio::io::split(conn);
 
@@ -244,14 +452,15 @@ async fn relay(
     let mut buf = vec![0u8; 16 * 1024];
     let n = cr.read(&mut buf).await?;
     if n == 0 {
-        return Ok(()); // 客户端直接关了
+        return Ok(None); // 客户端直接关了
     }
     pw.write_all(&buf[..n]).await?;
     pw.flush().await?;
 
     // 2. 等对端首次响应；超时 = 黑洞，让调用方感知
+    let t0 = std::time::Instant::now();
     let first = match tokio::time::timeout(first_response, pr.read(&mut buf)).await {
-        Ok(Ok(0)) => return Ok(()), // 对端正常关闭
+        Ok(Ok(0)) => return Ok(None), // 对端正常关闭
         Ok(Ok(n)) => n,
         Ok(Err(e)) => return Err(e.into()),
         Err(_) => {
@@ -265,7 +474,7 @@ async fn relay(
         tokio::io::copy(&mut cr, &mut pw),
         tokio::io::copy(&mut pr, &mut cw)
     );
-    Ok(())
+    Ok(Some(t0.elapsed()))
 }
 
 /// SOCKS5 握手协商：VER 已被调用方读掉，这里读 NMETHODS + METHODS，
@@ -448,6 +657,51 @@ pub async fn read_http_connect_target(
     })
 }
 
+/// 直连 TCP 目标（带超时）。None = 失败/超时（已记日志）。
+async fn dial_direct(
+    addr: impl tokio::net::ToSocketAddrs,
+    timeout: Duration,
+    label: String,
+) -> Option<TcpStream> {
+    match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
+        Ok(Ok(s)) => Some(s),
+        Ok(Err(e)) => {
+            tracing::warn!(target = %label, "直连失败: {e}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(target = %label, "直连超时");
+            None
+        }
+    }
+}
+
+/// 回环/私网目标判定：IP 字面量（loopback / RFC1918 私网 / 链路本地 /
+/// 未指定 / v6 唯一本地）或 `localhost`（含 `*.localhost`，RFC 6761）。
+/// 这类地址只在 silverq 本机或本机局域网内可达，送进代理候选链会被拨到
+/// 节点自己的 loopback/LAN——轻则死候选烧满超时后才直连兜底（实测本机
+/// 面板 12s+，浏览器早超时白屏），重则拿到节点侧的错误内容。
+/// 本地/回环/私网目标判定：这类目标永远直连，不进代理候选链。
+/// （pub(crate)：TUN 的 DIRECT 兜底反查真身后也要过同一道信任边界，
+/// 防 DNS 污染把私网地址喂进数据面。）
+pub(crate) fn is_local_target(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.is_unspecified()
+        }
+        Err(_) => false,
+    }
+}
+
 /// 处理 UDP ASSOCIATE：绑中继 socket → 回其地址 → 跑中继循环直到 TCP 断开。
 ///
 /// RFC 1928 要求 TCP 控制连接是 association 的生命周期锚点：TCP 一断，
@@ -525,4 +779,47 @@ async fn handle_udp_associate(
     let _ = shutdown_tx.send(());
     let _ = relay_task.await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_target;
+
+    #[test]
+    fn local_targets_are_detected() {
+        // 回环 / 私网 / 链路本地 / 未指定 / v6 唯一本地
+        for host in [
+            "127.0.0.1",
+            "127.8.8.8",
+            "::1",
+            "10.0.0.5",
+            "172.16.1.1",
+            "172.31.255.255",
+            "192.168.31.1",
+            "169.254.1.1",
+            "0.0.0.0",
+            "fd00::1",
+            "fe80::1",
+            "localhost",
+            "LocalHost",
+            "dash.localhost",
+        ] {
+            assert!(is_local_target(host), "{host} 应判定为本地目标");
+        }
+    }
+
+    #[test]
+    fn public_targets_are_not_local() {
+        // 公网 IP / 正常域名不能误判（否则所有代理流量都被强制直连）
+        for host in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "172.32.0.1",  // 不在 RFC1918
+            "192.169.0.1", // 不在 RFC1918
+            "www.gstatic.com",
+            "2001:4860::1", // 全球单播 v6
+        ] {
+            assert!(!is_local_target(host), "{host} 不应判定为本地目标");
+        }
+    }
 }

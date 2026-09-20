@@ -40,6 +40,7 @@
 | `pr_crg_review` | l1 | merge | FAIL | PR 讨论区需留有 CRG（code-review-graph）审查结论；若记录提到过问题/风险，需附修复/回应记录（Fix/采纳/驳回 + commit 或验证结论）。只统计 PR 创建后的评论（gh api 取数，取数失败输出"跳过、请人工核对"） |
 | `doc_sync` | l1 | pre-commit/push/merge | FAIL | 有 Cargo.toml 的功能 crate 必须配 README.md；域目录（crates/<domain>/）必须有 README；根 README.md 必须存在 |
 | `code_doc` | l1 | pre-commit/push/merge | WARN | 公共 API 缺 `///` rust doc、模块头缺 `//!`（只查本次 PR diff 触碰的 .rs，不追责存量） |
+| `diff_scope` | l1 | pre-commit/push/merge | WARN | 仿 ferrite 的 cargo metadata + path scope + git diff 动态测试：本 diff 文件按 scope（src/proxy、src/dataplane…）归类，跨 ≥2 个 scope 的单改动给 WARN，确认拆分或在 PR 里写清耦合 |
 
 ## 路径无关性（重要）
 

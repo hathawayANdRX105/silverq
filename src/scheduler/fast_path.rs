@@ -2,6 +2,7 @@
 //! Timeout results are heavily penalized and the node is moved toward the back of observation.
 use crate::scheduler::batch::Measurement;
 use crate::scheduler::node::Node;
+use std::time::Duration;
 
 /// 把一批测速结果写回节点池：成功的更新 EWMA，超时/失败的扣分后移。
 ///
@@ -29,4 +30,45 @@ pub fn apply_batch(nodes: &mut [Node], measurements: &[Measurement]) {
             }
         }
     }
+}
+
+/// 轮末淘汰 —— 两级 pipeline（次数硬指标 + 时间延长保活）：
+///
+/// 1. 连续失败 < `max_failures`：正常观察，不淘汰。
+/// 2. 连续失败 ≥ `max_failures` 且**从未测通**（samples==0）：立即摘除——
+///    密码错、协议死、被墙死都不会自愈，不存在"临时故障"，无保命价值。
+/// 3. 连续失败 ≥ `max_failures` 且**曾测通过**（samples>0）：延长保活——
+///    可能是临时故障，继续观察，直到连续失败持续满 `keep_alive` 才摘。
+///    期间测速成功一次即复活（consecutive_failures 清零、计时重置）。
+///
+/// `max_failures == 0` 禁用。`keep_alive == 0` 表示曾通过的也立即摘。
+/// 返回被摘的 tag 列表（日志用）。
+pub fn retire_stale(
+    nodes: &mut Vec<Node>,
+    max_failures: u32,
+    keep_alive: Duration,
+    min_pool: usize,
+) -> Vec<String> {
+    if max_failures == 0 {
+        return Vec::new();
+    }
+    let (mut kept, mut retired): (Vec<_>, Vec<_>) = nodes.drain(..).partition(|n| {
+        if n.consecutive_failures < max_failures {
+            return true; // 保留
+        }
+        match (n.samples, n.failing_since) {
+            (0, _) => false,                            // 从未测通的僵尸，立即摘
+            (_, None) => true, // 不应发生（failures>0 必有 failing_since），保守保留
+            (_, Some(t0)) => t0.elapsed() < keep_alive, // 曾通过：保活期内保留
+        }
+    });
+    // 地板保护：摘到低于 min_pool 时回填最可能活的（失败次数少 → samples 多）。
+    // 留着不摘的节点每轮仍会被探测，成功一次即复活；摘了只能等 reload 重灌。
+    if kept.len() < min_pool && !retired.is_empty() {
+        retired.sort_by_key(|n| (n.consecutive_failures, std::cmp::Reverse(n.samples)));
+        let need = (min_pool - kept.len()).min(retired.len());
+        kept.extend(retired.drain(..need));
+    }
+    *nodes = kept;
+    retired.into_iter().map(|n| n.tag).collect()
 }

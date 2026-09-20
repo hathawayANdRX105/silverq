@@ -9,6 +9,7 @@ fn vless_spec(tls: bool, transport: Option<silverq::proxy::nodespec::TransportSp
         protocol: silverq::proxy::nodespec::Protocol::Vless,
         server: "1.2.3.4".into(),
         port: 443,
+        dial_addr: None,
         vless: Some(silverq::proxy::nodespec::VlessSpec {
             uuid: "b85798ef-9edc-46a4-9a87-8da4499d36d0".into(),
             sni: Some("example.com".into()),
@@ -72,6 +73,30 @@ fn transport_chain_layer_count() {
     let spec = vless_spec(false, None);
     let v = spec.vless.as_ref().unwrap();
     assert!(build_transport(&spec, v).unwrap().is_empty());
+}
+
+/// 回归（2026-09-19 fake-IP 事故）：dial_addr 存在时 adapter 必须拨
+/// 预解析的 IP；未预解析时回退 server 原文，旧行为不变。
+#[test]
+fn build_proxy_dials_resolved_addr() {
+    let mut spec = vless_spec(false, None);
+    spec.server = "cdn.example.net".into();
+    spec.dial_addr = Some("203.0.113.7".into());
+    let proxy = build_proxy(&spec).expect("adapter builds");
+    assert_eq!(
+        proxy.addr(),
+        "203.0.113.7:443",
+        "拨号地址应使用预解析 IP 而非域名"
+    );
+
+    let mut spec = vless_spec(false, None);
+    spec.server = "cdn.example.net".into();
+    let proxy = build_proxy(&spec).expect("adapter builds");
+    assert_eq!(
+        proxy.addr(),
+        "cdn.example.net:443",
+        "无 dial_addr 回退 server 原文"
+    );
 }
 
 #[test]

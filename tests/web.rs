@@ -29,6 +29,9 @@ fn tuning_validation_clamps() {
         concurrency: 0,
         timeout_penalty: -5.0,
         fallback_attempts: 100,
+        retire_max_failures: 5000,
+        retire_keep_alive_secs: 7200,
+        retire_min_pool: 10,
     }
     .validated();
     assert_eq!(t.capacity, 50);
@@ -37,6 +40,7 @@ fn tuning_validation_clamps() {
     assert_eq!(t.timeout_ms, 500);
     assert_eq!(t.concurrency, 1);
     assert_eq!(t.timeout_penalty, 100.0);
+    assert_eq!(t.retire_max_failures, 1000);
     assert_eq!(t.fallback_attempts, 10);
 }
 

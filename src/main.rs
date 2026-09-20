@@ -74,7 +74,10 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
     );
 
     // 1. 加载节点
-    let specs = nodespec::load_nodes_yaml(&nodes)?;
+    let mut specs = nodespec::load_nodes_yaml(&nodes)?;
+    // TUN + fake-IP 环境下系统解析会返回假地址、把节点拨号劫进自家隧道
+    // （2026-09-19 事故根因）：构建 adapter 前用真实上游 DNS 预解析。
+    silverq::proxy::dns::resolve_dial_addrs(&mut specs).await;
     tracing::info!(count = specs.len(), "loaded nodes from {nodes}");
 
     // 2. registry（feature meow）→ measurer + 数据面 + ctl 共用
@@ -163,6 +166,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             pool.clone(),
             selection.clone(),
             nodes.clone(),
+            cfg_path.clone(),
             pinned.clone(),
             pin_target.clone(),
             tuning.clone(),
@@ -176,6 +180,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             pool.clone(),
             selection.clone(),
             nodes.clone(),
+            cfg_path.clone(),
             pinned.clone(),
             pin_target.clone(),
             tuning.clone(),
@@ -208,9 +213,28 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             let listen = eff.listen.clone();
             let inbound_sel = selection.clone();
             let inbound_reg = registry.clone();
+            // 国内域名直连表：SOCKS 入站路径的直连判定 + TUN 的 fake-IP 旁路
+            // （TUN 侧在 TunRuntime::new 里独立加载同一文件）。
+            let china_domains =
+                silverq::proxy::dns::load_china_domains(&silverq::proxy::dns::china_domains_path());
+            let china = Arc::new(silverq::proxy::dns::ChinaSet::new(&china_domains));
+            tracing::info!(count = china_domains.len(), "国内域名直连表加载");
+            let inb_china = china.clone();
+            // 域名级路由缓存（慢触发竞速）：SOCKS 入站专用，TUN 路径暂不接入
+            let routes = Arc::new(silverq::proxy::route::RouteCache::new());
+            let inb_routes = routes.clone();
+            let inb_tuning = tuning.clone();
             let inb2 = tokio::spawn(async move {
-                if let Err(e) =
-                    inbound::run(&listen, inbound_reg, inbound_sel, tuning.clone()).await
+                if let Err(e) = inbound::run(
+                    &listen,
+                    inbound_reg,
+                    inbound_sel,
+                    inb_tuning,
+                    pinned.clone(),
+                    inb_china,
+                    inb_routes,
+                )
+                .await
                 {
                     tracing::error!("inbound exited: {e}");
                 }
@@ -222,7 +246,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
                 let tun_sel = selection.clone();
                 let tun_reg = registry.clone();
                 Some(tokio::spawn(async move {
-                    if let Err(e) = tun::run(tun_config, tun_reg, tun_sel).await {
+                    if let Err(e) = tun::run(tun_config, tun_reg, tun_sel, tuning.clone()).await {
                         tracing::error!("TUN exited: {e}");
                     }
                 }))
@@ -380,17 +404,36 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
                     (Some(tag), true) => vec![tag.clone()],
                     _ => decision::select_top(&pool.read().await, t.capacity, t.timeout_penalty),
                 };
-                let mut sel_guard = selection.write().await;
-                if *sel_guard != desired {
-                    *sel_guard = desired.clone();
-                    drop(sel_guard);
-                    publish_selector_store(&desired, &selector_store);
+                // select_top 现在会排除从未测通的节点，整池都还没测出活节点时
+                // 返回空。空 desired 不能覆盖冷启动种子——否则首轮测速全失败时
+                // 数据面连"瞎选的候选"都没有，请求必死。保留种子等下一轮。
+                if !desired.is_empty() {
+                    let mut sel_guard = selection.write().await;
+                    if *sel_guard != desired {
+                        *sel_guard = desired.clone();
+                        drop(sel_guard);
+                        publish_selector_store(&desired, &selector_store);
+                    }
+                    last_selection = desired;
                 }
-                last_selection = desired;
             }
 
             persist::save(&pool.read().await);
             progress.batch_done(persist::now_secs() as i64);
+        }
+
+        // 轮末淘汰：从未测通且连续失败达阈值的节点摘出池子（0 = 禁用）。
+        // 摘除后下一批的 select_top / persist 自然瘦身；registry 留着的
+        // 死 adapter 由下一次 reload 重建时清掉（freenode-pool 每 15min reload）。
+        if t.retire_max_failures > 0 {
+            let keep = Duration::from_secs(t.retire_keep_alive_secs);
+            let mut guard = pool.write().await;
+            let retired =
+                fast_path::retire_stale(&mut guard, t.retire_max_failures, keep, t.retire_min_pool);
+            drop(guard);
+            if !retired.is_empty() {
+                tracing::info!(count = retired.len(), tags = ?retired, "淘汰节点（pipeline 双指标）");
+            }
         }
 
         tracing::info!(

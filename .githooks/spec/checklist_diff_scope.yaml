@@ -1,0 +1,58 @@
+# CK-DIFF-SCOPE: diff 范围感知检查 (仿 ferrite: cargo metadata + path scope + git diff 动态测试)
+# 检测: 本次 diff 触碰的源文件按 scope 归类; 跨多个 scope 的单改动给 WARN
+# 关键差异 (相对 ferrite): silverq 是单 crate + 平铺 src/, cargo metadata
+#   拿不到嵌套 crate 结构 —— scope 从 src/ 域目录推导 (与 gate 规则一致,
+#   见 SPEC_OVERVIEW 的"路径无关性": 不写死层级)。
+# 仿 ferrite "动态测试"语义: 只测 diff 触及路径 (mode: diff), 存量不追责。
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs", "**/Cargo.toml"]
+  paths_exclude: ["target/", ".wt/"]
+mode: diff
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      ROOT=$(git rev-parse --show-toplevel)
+      cd "$ROOT" || exit 2
+      BASE=$(git merge-base HEAD origin/master 2>/dev/null || git rev-parse HEAD~1 2>/dev/null || echo HEAD)
+      CHANGED=$(git diff --name-only "$BASE"...HEAD 2>/dev/null; git diff --name-only; git diff --cached --name-only)
+      CHANGED=$(printf '%s\n' "$CHANGED" | sort -u | grep -E '\.(rs|toml)$' || true)
+      if [ -z "$CHANGED" ]; then echo '[]'; exit 0; fi
+
+      # scope 归类 (silverq 平铺结构; tests/manifest/other 不参与跨域判定)
+      OUT=$(printf '%s\n' "$CHANGED" | while read -r f; do
+        [ -z "$f" ] && continue
+        case "$f" in
+          src/proxy/*)     echo proxy ;;
+          src/dataplane/*) echo dataplane ;;
+          src/scheduler/*) echo scheduler ;;
+          src/config/*)    echo config ;;
+          src/ctl/*)       echo ctl ;;
+          src/web/*)       echo web ;;
+          src/main.rs|src/lib.rs) echo core ;;
+          tests/*)         echo tests ;;
+          Cargo.toml)      echo manifest ;;
+          *)               echo other ;;
+        esac
+      done | sort | uniq -c | awk '$2 != "tests" && $2 != "other" && $2 != "manifest" {print $1" "$2}')
+
+      export OUT
+      printf '%s\n' "$CHANGED" | jq -R -s --arg out "$OUT" '
+        split("\n") | map(select(length > 0)) as $files
+        | ($out | split("\n") | map(select(length > 0) | split(" ") | {n: .[0] | tonumber, scope: .[1]})) as $per_scope
+        | if ($per_scope | length) < 2 then []
+          else [{
+            id: "DIFF-MULTI-SCOPE",
+            severity: "WARN",
+            path: ".",
+            line: 0,
+            message: ("本次 diff 跨 " + ($per_scope | length | tostring) + " 个 scope (" + ([$per_scope[] | .scope + ":" + (.n | tostring)] | join(", ")) + "), 文件共 " + ($files | length | tostring) + " 个 — 确认拆分或 PR 说明里写清耦合")
+          }]
+        end'
+optional: true
+timeout: 30

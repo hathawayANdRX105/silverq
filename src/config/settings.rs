@@ -45,6 +45,14 @@ pub struct SchedulerSection {
     /// 探测 URL（generate_204 风格）
     #[cfg_attr(not(feature = "meow"), allow(dead_code))] // meow 模式才发探测请求
     pub probe_url: String,
+    /// 淘汰硬指标：连续失败 ≥ N 触发淘汰检查（0 = 禁用）。
+    /// 从未测通的节点立即摘；曾测通过的进入延长保活。
+    pub retire_max_failures: u32,
+    /// 延长保活：曾测通过的节点连续失败持续满该时长（秒）才摘。
+    /// 0 = 曾通过的也立即摘。
+    pub retire_keep_alive_secs: u64,
+    /// 淘汰地板：摘除后池子不得低于该数（防全黑）。0 = 无地板。
+    pub retire_min_pool: usize,
 }
 
 impl Default for SchedulerSection {
@@ -57,6 +65,9 @@ impl Default for SchedulerSection {
             concurrency: crate::config::DEFAULT_CONCURRENCY,
             timeout_penalty: crate::config::DEFAULT_TIMEOUT_PENALTY,
             probe_url: crate::config::DEFAULT_PROBE_URL.to_string(),
+            retire_max_failures: crate::config::DEFAULT_RETIRE_MAX_FAILURES,
+            retire_keep_alive_secs: crate::config::DEFAULT_RETIRE_KEEP_ALIVE_SECS,
+            retire_min_pool: crate::config::DEFAULT_RETIRE_MIN_POOL,
         }
     }
 }
@@ -205,6 +216,9 @@ pub struct Effective {
     #[cfg_attr(not(feature = "meow"), allow(dead_code))] // web 面板仅 meow 模式
     pub web_listen: String,
     pub fallback_attempts: usize,
+    pub retire_max_failures: u32,
+    pub retire_keep_alive_secs: u64,
+    pub retire_min_pool: usize,
     pub ui_dir: String,
     pub state: String,
     pub ctl_sock: String,
@@ -267,6 +281,9 @@ pub struct RuntimeTuning {
     pub concurrency: usize,
     pub timeout_penalty: f64,
     pub fallback_attempts: usize,
+    pub retire_max_failures: u32,
+    pub retire_keep_alive_secs: u64,
+    pub retire_min_pool: usize,
 }
 
 impl RuntimeTuning {
@@ -279,6 +296,9 @@ impl RuntimeTuning {
             concurrency: eff.concurrency,
             timeout_penalty: eff.timeout_penalty,
             fallback_attempts: eff.fallback_attempts,
+            retire_max_failures: eff.retire_max_failures,
+            retire_keep_alive_secs: eff.retire_keep_alive_secs,
+            retire_min_pool: eff.retire_min_pool,
         }
         .validated()
     }
@@ -293,6 +313,9 @@ impl RuntimeTuning {
         self.concurrency = self.concurrency.clamp(1, 100);
         self.timeout_penalty = self.timeout_penalty.clamp(100.0, 30_000.0);
         self.fallback_attempts = self.fallback_attempts.clamp(1, 10);
+        self.retire_max_failures = self.retire_max_failures.clamp(0, 1000); // 0 = 禁用
+        self.retire_keep_alive_secs = self.retire_keep_alive_secs.clamp(0, 86400);
+        self.retire_min_pool = self.retire_min_pool.clamp(0, 500);
         self
     }
 }
@@ -322,6 +345,15 @@ impl Effective {
                 "SILVERQ_FALLBACK_ATTEMPTS",
                 fc.data_plane.fallback_attempts,
             ),
+            retire_max_failures: env_parsed_or(
+                "SILVERQ_RETIRE_MAX_FAILURES",
+                fc.scheduler.retire_max_failures,
+            ),
+            retire_keep_alive_secs: env_parsed_or(
+                "SILVERQ_RETIRE_KEEP_ALIVE_SECS",
+                fc.scheduler.retire_keep_alive_secs,
+            ),
+            retire_min_pool: env_parsed_or("SILVERQ_RETIRE_MIN_POOL", fc.scheduler.retire_min_pool),
             // TOML 里的 ~ 不经 shell，程序自己展开（paths 同款，别再忘）
             ui_dir: expand_home(env_or(
                 "SILVERQ_UI_DIR",
