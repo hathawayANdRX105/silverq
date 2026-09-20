@@ -85,6 +85,9 @@ impl ProxyWrapper {
     /// dst_ip 就拨它，meow-proxy direct.rs resolve_targets 第 1 步）；
     /// 与 inbound.rs 的 DirectDial::Host 路径等价——实验室实测全候选死时
     /// SOCKS 能救回 gstatic，反查前 TUN 不能。
+    ///
+    /// 信任边界：解析结果落私网/回环时不拨（DNS 污染场景），保持原
+    /// metadata 让请求失败——与 inbound.rs 的 is_local_target 同源。
     async fn dial_direct_tcp(
         &self,
         metadata: &Metadata,
@@ -92,11 +95,13 @@ impl ProxyWrapper {
     ) -> meow_common::Result<Box<dyn ProxyConn>> {
         let md = match self.real_host_of(metadata) {
             Some(host) => match crate::proxy::dns::resolve_host(&host).await {
-                Some(ip) => Metadata {
-                    dst_ip: Some(ip),
-                    ..metadata.clone()
-                },
-                None => metadata.clone(),
+                Some(ip) if !crate::dataplane::inbound::is_local_target(&ip.to_string()) => {
+                    Metadata {
+                        dst_ip: Some(ip),
+                        ..metadata.clone()
+                    }
+                }
+                _ => metadata.clone(),
             },
             None => metadata.clone(),
         };
@@ -108,7 +113,7 @@ impl ProxyWrapper {
         }
     }
 
-    /// DIRECT 兜底（UDP）：同 dial_direct_tcp 的反查逻辑。
+    /// DIRECT 兜底（UDP）：同 dial_direct_tcp 的反查与信任边界逻辑。
     async fn dial_direct_udp(
         &self,
         metadata: &Metadata,
@@ -116,11 +121,13 @@ impl ProxyWrapper {
     ) -> meow_common::Result<Box<dyn ProxyPacketConn>> {
         let md = match self.real_host_of(metadata) {
             Some(host) => match crate::proxy::dns::resolve_host(&host).await {
-                Some(ip) => Metadata {
-                    dst_ip: Some(ip),
-                    ..metadata.clone()
-                },
-                None => metadata.clone(),
+                Some(ip) if !crate::dataplane::inbound::is_local_target(&ip.to_string()) => {
+                    Metadata {
+                        dst_ip: Some(ip),
+                        ..metadata.clone()
+                    }
+                }
+                _ => metadata.clone(),
             },
             None => metadata.clone(),
         };
@@ -156,6 +163,11 @@ impl ProxyAdapter for ProxyWrapper {
     async fn dial_tcp(&self, metadata: &Metadata) -> meow_common::Result<Box<dyn ProxyConn>> {
         // 每 dial 现取快照：面板热改 timeout_ms / fallback_attempts 对新建
         // 连接即时生效（与 inbound.rs 的 SOCKS 路径同源）。
+        //
+        // 已知边界（不在本修复范围）：dial 超时只覆盖建连。「连得上但不下
+        // 蛋」的黑洞节点（AEAD 协议 dial_tcp 立刻返回 Ok）在 TUN 路径没有
+        // first_response 防护——relay 归 meow 引擎所有，插不进去；SOCKS 路径
+        // 有（inbound.rs relay 的首读超时）。
         let dt = DialTuning::snapshot(&self.tuning.read());
         let dial_timeout = dt.dial();
         for (i, adapter) in self.candidates.iter().enumerate() {
@@ -917,6 +929,52 @@ mod tests {
         assert!(
             !Arc::ptr_eq(&snap1, &snap2),
             "reload 重建 adapter 后应重建 route table，不能僵在旧 adapter"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sync_proxies_truncates_to_fallback_attempts() {
+        // 回归：候选链必须截断到 fallback_attempts（与 SOCKS 同 knob 同语义）。
+        // 933bce6 之前漏了截断——TUN 实际试满整条 selection（capacity=10），
+        // 加上 dial 超时后最坏 40s 才兜底，与配置语义不符。
+        let mut reg: HashMap<String, Arc<dyn ProxyAdapter>> = HashMap::new();
+        for name in ["a", "b", "c", "d", "e"] {
+            reg.insert(
+                name.into(),
+                Arc::new(NamedStubAdapter {
+                    name,
+                    health: ProxyHealth::new(),
+                }),
+            );
+        }
+        let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
+        let selection: SharedSelection = Arc::new(TokioRwLock::new(vec![
+            "a".into(),
+            "b".into(),
+            "c".into(),
+            "d".into(),
+            "e".into(),
+        ]));
+
+        let mut t = crate::config::settings::RuntimeTuning::from_eff(&default_eff());
+        t.fallback_attempts = 2;
+        let tuning: SharedTuning = Arc::new(parking_lot::RwLock::new(t));
+
+        let rt = TunRuntime::new(
+            registry,
+            selection,
+            tuning,
+            Some("198.18.0.0/15".into()),
+            vec![],
+        )
+        .expect("fake-ip pool init");
+        rt.sync_proxies().await;
+
+        let cur = rt.current_auto.read();
+        assert_eq!(
+            cur.as_ref().map(|(n, _)| n.len()),
+            Some(2usize),
+            "5 个候选 + fallback_attempts=2 → 只注册队首 2 个"
         );
     }
 

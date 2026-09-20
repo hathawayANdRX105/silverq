@@ -681,7 +681,10 @@ async fn dial_direct(
 /// 这类地址只在 silverq 本机或本机局域网内可达，送进代理候选链会被拨到
 /// 节点自己的 loopback/LAN——轻则死候选烧满超时后才直连兜底（实测本机
 /// 面板 12s+，浏览器早超时白屏），重则拿到节点侧的错误内容。
-fn is_local_target(host: &str) -> bool {
+/// 本地/回环/私网目标判定：这类目标永远直连，不进代理候选链。
+/// （pub(crate)：TUN 的 DIRECT 兜底反查真身后也要过同一道信任边界，
+/// 防 DNS 污染把私网地址喂进数据面。）
+pub(crate) fn is_local_target(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
         return true;
     }
