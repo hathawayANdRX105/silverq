@@ -6,3 +6,4 @@ pub mod factory;
 #[cfg(feature = "meow")]
 pub mod meow;
 pub mod nodespec;
+pub mod route;

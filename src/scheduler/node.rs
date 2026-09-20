@@ -179,7 +179,12 @@ impl Node {
     }
 
     /// 从另一个 Node 接管 EWMA 状态（配置热加载时保留分数）。
+    ///
+    /// `ewma` 必须接管：`select_top` 现在按 `ewma.is_finite()` 过滤节点，
+    /// reload 后新 Node 全是 INFINITY —— 不接管 = 整池被滤空 = selection
+    /// 清空 = 数据面无候选可拨（reload 一度把代理打成纯直连的回归）。
     pub fn adopt_score(&mut self, other: &Node) {
+        self.ewma = other.ewma;
         self.consecutive_failures = other.consecutive_failures;
         self.failing_since = other.failing_since;
         self.samples = other.samples;

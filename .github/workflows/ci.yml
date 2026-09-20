@@ -1,10 +1,13 @@
 name: CI
 
+# CI trigger：master/main 之外，所有 PR 的目标分支也必须跑——
+# 否则 stacked PR（如 fix/* → feat/* → master 链）的 checks 永远不出，
+# review 没有可引用的 CI 结论。push 同样放开到所有分支。
 on:
   push:
-    branches: [master, main]
+    branches: ['**']
   pull_request:
-    branches: [master, main]
+    branches: ['**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

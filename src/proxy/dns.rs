@@ -33,7 +33,7 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_CONCURRENCY: usize = 100;
 
 /// 上游列表：环境变量 `SILVERQ_RESOLVE_UPSTREAMS`（逗号分隔）可覆盖。
-fn upstreams() -> Vec<IpAddr> {
+pub fn upstreams() -> Vec<IpAddr> {
     let raw = std::env::var("SILVERQ_RESOLVE_UPSTREAMS").unwrap_or_default();
     let list: Vec<IpAddr> = raw
         .split(',')
@@ -52,6 +52,74 @@ fn upstreams() -> Vec<IpAddr> {
 }
 
 static QUERY_ID: AtomicU16 = AtomicU16::new(0x1a2b);
+
+/// 国内域名表路径：默认 `~/.config/silverq/rules/china-domains.txt`，
+/// 环境变量 `SILVERQ_CHINA_DOMAINS` 可覆盖。
+pub fn china_domains_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("SILVERQ_CHINA_DOMAINS") {
+        return std::path::PathBuf::from(p);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home)
+        .join(".config")
+        .join("silverq")
+        .join("rules")
+        .join("china-domains.txt")
+}
+
+/// 读国内域名表：一行一个域名，`#` 注释跳过。文件不存在/为空 → 空表
+/// （所有调用方对空表都是 no-op，不阻断启动）。
+pub fn load_china_domains(path: &std::path::Path) -> Vec<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 国内域名后缀集合：label 对齐的后缀匹配（`example.com` 命中自身与
+/// `*.example.com`，不命中 `notexample.com`）。11 万级条目下每次匹配
+/// 只做 O(域名 label 数) 次 HashSet 查找。
+pub struct ChinaSet {
+    patterns: Vec<String>,
+    suffixes: HashSet<String>,
+}
+
+impl ChinaSet {
+    pub fn new(patterns: &[String]) -> Self {
+        Self {
+            patterns: patterns.to_vec(),
+            suffixes: patterns.iter().cloned().collect(),
+        }
+    }
+
+    /// 原始 pattern 列表（TUN 侧喂给 meow-dns 的 Skipper）。
+    pub fn patterns(&self) -> &[String] {
+        &self.patterns
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.suffixes.is_empty()
+    }
+
+    pub fn matches(&self, host: &str) -> bool {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        let mut rest = host.as_str();
+        loop {
+            if self.suffixes.contains(rest) {
+                return true;
+            }
+            match rest.split_once('.') {
+                Some((_, tail)) => rest = tail,
+                None => return false,
+            }
+        }
+    }
+}
 
 /// 构造最小 DNS 查询报文（RD=1，单问题，IN class）。
 fn build_query(id: u16, name: &str, qtype: u16) -> Option<Vec<u8>> {
@@ -276,6 +344,31 @@ mod tests {
         assert!(build_query(1, "a..b", 1).is_none());
         assert!(build_query(1, "ok.example.", 1).is_none());
         assert!(build_query(1, &"x".repeat(64), 1).is_none());
+    }
+
+    #[test]
+    fn china_set_matches_suffix_not_substring() {
+        let cs = ChinaSet::new(&["example.com".into(), "baidu.com".into()]);
+        assert!(cs.matches("example.com"));
+        assert!(cs.matches("a.example.com"));
+        assert!(cs.matches("EXAMPLE.com."));
+        assert!(cs.matches("www.baidu.com"));
+        assert!(!cs.matches("notexample.com"), "子串不能误判为后缀命中");
+        assert!(!cs.matches("baidu.cn"));
+        assert!(!cs.matches("example.org"));
+    }
+
+    #[test]
+    fn load_china_domains_skips_comments_and_blank() {
+        let dir = std::env::temp_dir().join("silverq-china-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("domains.txt");
+        std::fs::write(&p, "a.com\n\n# comment\n b.com \n").unwrap();
+        assert_eq!(
+            load_china_domains(&p),
+            vec!["a.com".to_string(), "b.com".to_string()]
+        );
+        assert!(load_china_domains(&dir.join("missing.txt")).is_empty());
     }
 
     #[test]
