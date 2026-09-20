@@ -220,6 +220,9 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             let china = Arc::new(silverq::proxy::dns::ChinaSet::new(&china_domains));
             tracing::info!(count = china_domains.len(), "国内域名直连表加载");
             let inb_china = china.clone();
+            // 域名级路由缓存（慢触发竞速）：SOCKS 入站专用，TUN 路径暂不接入
+            let routes = Arc::new(silverq::proxy::route::RouteCache::new());
+            let inb_routes = routes.clone();
             let inb2 = tokio::spawn(async move {
                 if let Err(e) = inbound::run(
                     &listen,
@@ -228,6 +231,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
                     tuning.clone(),
                     pinned.clone(),
                     inb_china,
+                    inb_routes,
                 )
                 .await
                 {

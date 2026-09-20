@@ -4,6 +4,7 @@
 #![cfg(feature = "meow")]
 
 use crate::proxy::meow::Registry;
+use crate::proxy::route::{Route, RouteOutcome};
 use meow_common::Metadata;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -68,6 +69,7 @@ pub async fn run(
     tuning: SharedTuning,
     pinned: Arc<AtomicBool>,
     china: Arc<crate::proxy::dns::ChinaSet>,
+    routes: Arc<crate::proxy::route::RouteCache>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(listener_addr).await?;
     tracing::info!(
@@ -82,10 +84,17 @@ pub async fn run(
         let tuning = tuning.clone();
         let pinned = pinned.clone();
         let china = china.clone();
+        let routes = routes.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_one(socket, peer, &registry, &selection, tuning, pinned, &china).await
-            {
+            let ctx = ConnCtx {
+                registry: &registry,
+                selection: &selection,
+                tuning,
+                pinned,
+                china: &china,
+                routes: &routes,
+            };
+            if let Err(e) = handle_one(socket, peer, &ctx).await {
                 tracing::debug!(peer = %peer, "{e}");
             }
         });
@@ -112,14 +121,20 @@ pub struct Target {
     cmd: Cmd,
 }
 
+/// handle_one 的共享上下文（参数打包：7 个以上就被 clippy 拦了）。
+struct ConnCtx<'a> {
+    registry: &'a Registry,
+    selection: &'a SharedSelection,
+    tuning: SharedTuning,
+    pinned: Arc<AtomicBool>,
+    china: &'a crate::proxy::dns::ChinaSet,
+    routes: &'a crate::proxy::route::RouteCache,
+}
+
 async fn handle_one(
     mut socket: TcpStream,
     peer: SocketAddr,
-    registry: &Registry,
-    selection: &SharedSelection,
-    tuning: SharedTuning,
-    pinned: Arc<AtomicBool>,
-    china: &crate::proxy::dns::ChinaSet,
+    ctx: &ConnCtx<'_>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut peek = [0u8; 1];
     socket
@@ -143,12 +158,12 @@ async fn handle_one(
     };
 
     // 调参快照：TCP dial 与 UDP associate 都从这里取，热改对新建连接即时生效
-    let dt = DialTuning::snapshot(&tuning.read());
+    let dt = DialTuning::snapshot(&ctx.tuning.read());
 
     // UDP ASSOCIATE：分配中继 socket，回其地址，然后在 TCP 存活期间跑中继循环。
     // 注意：客户端常填 0.0.0.0:0（自己也不知道源地址），所以不能用 host 空判断拦。
     if target.cmd == Cmd::UdpAssociate {
-        return handle_udp_associate(socket, registry, selection, dt).await;
+        return handle_udp_associate(socket, ctx.registry, ctx.selection, dt).await;
     }
 
     if target.host.is_empty() {
@@ -181,13 +196,13 @@ async fn handle_one(
         Host,
         Ip(std::net::IpAddr),
     }
-    let direct: DirectDial = if pinned.load(Ordering::Relaxed) {
+    let mut direct: DirectDial = if ctx.pinned.load(Ordering::Relaxed) {
         // 钉住语义优先于直连判定：钉住 = 所有流量只走该节点、fail 就 fail，
         // 直连旁路会破坏该语义（e2e pinned_* 回归锁定）。
         DirectDial::None
     } else if is_local_target(&target.host) {
         DirectDial::Host
-    } else if china.matches(&target.host) {
+    } else if ctx.china.matches(&target.host) {
         match crate::proxy::dns::resolve_host(&target.host).await {
             Some(ip) => DirectDial::Ip(ip),
             None => {
@@ -199,8 +214,29 @@ async fn handle_one(
         DirectDial::None
     };
 
+    // 路由缓存决策（回环/国内/钉住不进缓存：那些是策略或本机语义，非性能选择）。
+    // 代理首响应超阈值的域名下次访问触发竞速：直连 + 候选链并行，TCP 先建连者胜。
+    let china_hit = ctx.china.matches(&target.host);
+    let cache_eligible =
+        !ctx.pinned.load(Ordering::Relaxed) && !is_local_target(&target.host) && !china_hit;
+    let mut race = false;
+    if cache_eligible && matches!(direct, DirectDial::None) {
+        match ctx.routes.decide(&target.host) {
+            crate::proxy::route::Decision::Direct => {
+                match crate::proxy::dns::resolve_host(&target.host).await {
+                    Some(ip) => direct = DirectDial::Ip(ip),
+                    None => ctx
+                        .routes
+                        .record(&target.host, Route::Direct, RouteOutcome::Failed),
+                }
+            }
+            crate::proxy::route::Decision::Race => race = true,
+            crate::proxy::route::Decision::Proxy => {}
+        }
+    }
+
     // 按当前选择顺序逐个尝试（best → 次优），dial 失败自动 fallback
-    let order = selection.read().await.clone();
+    let order = ctx.selection.read().await.clone();
     let metadata = Metadata {
         network: meow_common::Network::Tcp,
         host: target.host.clone().into(),
@@ -211,7 +247,7 @@ async fn handle_one(
     // 先在无锁情况下把候选 adapter 克隆出来（截断到 fallback 上限），
     // 避免 guard 跨 await
     let candidates: Vec<_> = {
-        let guard = registry.read();
+        let guard = ctx.registry.read();
         pick_candidates(&order, &guard, dt.fallback_attempts)
     };
     // 逐个 dial，**每个都带超时**。
@@ -224,9 +260,10 @@ async fn handle_one(
     // PATCH /configs 可热改）。按 EWMA 顺序最多试 N 个候选：
     // 池子普遍半死时，大值能救回更多请求；但每个死候选都要烧一个 dial 超时，
     // 单请求最坏延迟随之上升。
-    let dt = DialTuning::snapshot(&tuning.read());
+    let dt = DialTuning::snapshot(&ctx.tuning.read());
     let dial_timeout = dt.dial();
     let mut conn: Option<Box<dyn meow_common::conn::ProxyConn>> = None;
+    let mut used_route = Route::Proxy;
     match direct {
         // 强制直连：回环/私网按原样拨（localhost 解析交给系统，回环段不受
         // fake-IP 影响）；国内域名拨已解析的真实 IP。
@@ -239,6 +276,7 @@ async fn handle_one(
             )
             .await
             .map(|s| Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
+            used_route = Route::Direct;
         }
         DirectDial::Ip(ip) => {
             let t = std::cmp::max(dial_timeout, dt.first_response());
@@ -249,23 +287,73 @@ async fn handle_one(
             )
             .await
             .map(|s| Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
+            used_route = Route::Direct;
         }
         DirectDial::None => {
-            for adapter in &candidates {
-                match tokio::time::timeout(dial_timeout, adapter.dial_tcp(&metadata)).await {
-                    Ok(Ok(c)) => {
-                        conn = Some(c);
-                        break;
+            if race {
+                // 竞速：直连与候选链并行，TCP 先建连者胜（慢路由域名的专属路径）
+                let label = format!("{}/{}", target.host, target.port);
+                let host = target.host.clone();
+                let port = target.port;
+                let direct_f = Box::pin(async move {
+                    match crate::proxy::dns::resolve_host(&host).await {
+                        Some(ip) => dial_direct((ip, port), dial_timeout, label).await,
+                        None => None,
                     }
-                    Ok(Err(e)) => {
-                        // info 级：死候选是运维必须能看到的信号（fallback 计数也靠它）
-                        tracing::info!(tag = adapter.name(), "dial failed: {e}");
+                });
+                let proxy_f = Box::pin(async {
+                    for adapter in &candidates {
+                        match tokio::time::timeout(dial_timeout, adapter.dial_tcp(&metadata)).await
+                        {
+                            Ok(Ok(c)) => return Some(c),
+                            Ok(Err(e)) => {
+                                tracing::info!(tag = adapter.name(), "dial failed: {e}")
+                            }
+                            Err(_) => {
+                                tracing::info!(
+                                    tag = adapter.name(),
+                                    "dial 超时 {dial_timeout:?}，换下一个候选"
+                                )
+                            }
+                        }
                     }
-                    Err(_) => {
-                        tracing::info!(
-                            tag = adapter.name(),
-                            "dial 超时 {dial_timeout:?}，换下一个候选"
-                        );
+                    None
+                });
+                match futures::future::select(direct_f, proxy_f).await {
+                    futures::future::Either::Left((res, proxy_f)) => {
+                        if let Some(s) = res {
+                            conn = Some(Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
+                            used_route = Route::Direct;
+                        } else if let Some(c) = proxy_f.await {
+                            conn = Some(c);
+                        }
+                    }
+                    futures::future::Either::Right((res, direct_f)) => {
+                        if let Some(c) = res {
+                            conn = Some(c);
+                        } else if let Some(s) = direct_f.await {
+                            conn = Some(Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
+                            used_route = Route::Direct;
+                        }
+                    }
+                }
+            } else {
+                for adapter in &candidates {
+                    match tokio::time::timeout(dial_timeout, adapter.dial_tcp(&metadata)).await {
+                        Ok(Ok(c)) => {
+                            conn = Some(c);
+                            break;
+                        }
+                        Ok(Err(e)) => {
+                            // info 级：死候选是运维必须能看到的信号（fallback 计数也靠它）
+                            tracing::info!(tag = adapter.name(), "dial failed: {e}");
+                        }
+                        Err(_) => {
+                            tracing::info!(
+                                tag = adapter.name(),
+                                "dial 超时 {dial_timeout:?}，换下一个候选"
+                            );
+                        }
                     }
                 }
             }
@@ -273,16 +361,25 @@ async fn handle_one(
     }
     let conn: Box<dyn meow_common::conn::ProxyConn> = if let Some(c) = conn {
         c
-    } else if !matches!(direct, DirectDial::None) {
-        // 强制直连失败：诚实失败。这类目标送进代理链没有意义（本机目标
-        // 会被拨到节点侧），也不落 pin/候选。
+    } else if !matches!(direct, DirectDial::None) || race {
+        // 强制直连 / 竞速全败：诚实失败。本机目标送进代理链没有意义；
+        // 竞速全败 = 直连与代理都不可达。
+        if cache_eligible {
+            if race {
+                ctx.routes
+                    .record(&target.host, Route::Proxy, RouteOutcome::Failed);
+            } else {
+                ctx.routes
+                    .record(&target.host, Route::Direct, RouteOutcome::Failed);
+            }
+        }
         if target.proto == Proto::Http {
             let _ = socket
                 .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
                 .await;
         }
         return Ok(());
-    } else if pinned.load(Ordering::Relaxed) {
+    } else if ctx.pinned.load(Ordering::Relaxed) {
         // 钉住语义是"只用这个节点"：所有代理候选失败时直连兜底会绕过钉住，
         // 让钉死节点的请求悄悄走直连成功。钉住必须fail 就 fail。
         tracing::info!("已钉住且候选全失败，不做直连兜底（遵守 pin 语义）");
@@ -316,15 +413,37 @@ async fn handle_one(
     };
     let _ = peer;
 
-    relay(socket, conn, dt.first_response()).await
+    let fr = relay(socket, conn, dt.first_response()).await;
+    if cache_eligible {
+        match fr {
+            Ok(Some(d)) => ctx
+                .routes
+                .record(&target.host, used_route, RouteOutcome::Responded(d)),
+            Ok(None) => ctx
+                .routes
+                .record(&target.host, used_route, RouteOutcome::Neutral),
+            Err(e) => {
+                ctx.routes
+                    .record(&target.host, used_route, RouteOutcome::Failed);
+                return Err(e);
+            }
+        }
+    } else {
+        fr?;
+    }
+    Ok(())
 }
 
 /// 双向中继，带"对端首次响应"超时。
+/// Ok(Some(d)) = 有数据，d = 首响应耗时（从转发客户端首包起算，供路由缓存）；
+/// Ok(None) = 无数据结束（对端正常关闭/客户端早退）。
+/// 客户端侧早退的读写错误也以 Err 返回，会被上游计为路线 Failed——噪声
+/// 可接受（一次误标只多触发一次无害竞速）。
 async fn relay(
     socket: TcpStream,
     conn: Box<dyn meow_common::conn::ProxyConn>,
     first_response: Duration,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<Duration>, Box<dyn std::error::Error + Send + Sync>> {
     let (mut cr, mut cw) = tokio::io::split(socket);
     let (mut pr, mut pw) = tokio::io::split(conn);
 
@@ -332,14 +451,15 @@ async fn relay(
     let mut buf = vec![0u8; 16 * 1024];
     let n = cr.read(&mut buf).await?;
     if n == 0 {
-        return Ok(()); // 客户端直接关了
+        return Ok(None); // 客户端直接关了
     }
     pw.write_all(&buf[..n]).await?;
     pw.flush().await?;
 
     // 2. 等对端首次响应；超时 = 黑洞，让调用方感知
+    let t0 = std::time::Instant::now();
     let first = match tokio::time::timeout(first_response, pr.read(&mut buf)).await {
-        Ok(Ok(0)) => return Ok(()), // 对端正常关闭
+        Ok(Ok(0)) => return Ok(None), // 对端正常关闭
         Ok(Ok(n)) => n,
         Ok(Err(e)) => return Err(e.into()),
         Err(_) => {
@@ -353,7 +473,7 @@ async fn relay(
         tokio::io::copy(&mut cr, &mut pw),
         tokio::io::copy(&mut pr, &mut cw)
     );
-    Ok(())
+    Ok(Some(t0.elapsed()))
 }
 
 /// SOCKS5 握手协商：VER 已被调用方读掉，这里读 NMETHODS + METHODS，
