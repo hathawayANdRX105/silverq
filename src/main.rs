@@ -223,12 +223,13 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             // 域名级路由缓存（慢触发竞速）：SOCKS 入站专用，TUN 路径暂不接入
             let routes = Arc::new(silverq::proxy::route::RouteCache::new());
             let inb_routes = routes.clone();
+            let inb_tuning = tuning.clone();
             let inb2 = tokio::spawn(async move {
                 if let Err(e) = inbound::run(
                     &listen,
                     inbound_reg,
                     inbound_sel,
-                    tuning.clone(),
+                    inb_tuning,
                     pinned.clone(),
                     inb_china,
                     inb_routes,
@@ -245,7 +246,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
                 let tun_sel = selection.clone();
                 let tun_reg = registry.clone();
                 Some(tokio::spawn(async move {
-                    if let Err(e) = tun::run(tun_config, tun_reg, tun_sel).await {
+                    if let Err(e) = tun::run(tun_config, tun_reg, tun_sel, tuning.clone()).await {
                         tracing::error!("TUN exited: {e}");
                     }
                 }))

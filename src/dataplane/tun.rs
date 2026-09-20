@@ -6,11 +6,12 @@
 #![cfg(all(feature = "meow", feature = "meow-listener"))]
 
 use crate::config::settings::Effective;
+use crate::dataplane::inbound::{DialTuning, SharedTuning};
 use crate::proxy::meow::Registry;
 
 use meow_common::{
-    AdapterType, DelayHistory, DnsMode, Metadata, Proxy, ProxyAdapter, ProxyConn, ProxyHealth,
-    ProxyPacketConn, TunnelMode,
+    AdapterType, DelayHistory, DnsMode, MeowError, Metadata, Proxy, ProxyAdapter, ProxyConn,
+    ProxyHealth, ProxyPacketConn, TunnelMode,
 };
 use meow_dns::fakeip::{MemoryStore, Pool, Skipper, SkipperMode, Store};
 use meow_dns::resolver::Resolver;
@@ -34,16 +35,35 @@ use tracing::{info, warn};
 /// 全部失败再退 DIRECT。与 SOCKS5 入站（inbound.rs 的 fallback_attempts）
 /// 对齐——否则 TUN 只用 selection[0] 单点，节点池半死时每 5 秒切出口
 /// 都会卡一批连接（实测 gstatic 0.07s↔20s 抖动）。
+///
+/// 每个候选 dial 都包 `timeout(dt.dial())`：黑洞节点（SYN 丢弃、不回 RST）
+/// 的 dial 永不返回，没有超时则候选链永远不前进、请求挂到客户端超时
+/// （2026-09-20 实验室复现：TUN 每请求挂 10s+，同期 SOCKS 路径一直有超时）。
 struct ProxyWrapper {
     candidates: Vec<Arc<dyn ProxyAdapter>>,
     direct: Arc<dyn ProxyAdapter>,
+    tuning: SharedTuning,
+    /// TUN resolver 的 fake-IP store：DIRECT 兜底时反查 fake-IP → 域名，
+    /// 再用真实上游 DNS 解出真身 IP（见 dial_direct_tcp/dial_direct_udp）。
+    /// SOCKS 流量天生不带假地址，没有这层也能直连；TUN 必须反查。
+    fakeip_store: Option<Arc<dyn Store>>,
 }
 
 impl ProxyWrapper {
     /// `candidates` 至少含一个元素；空时等价于纯 DIRECT（由 sync_proxies
     /// 保证「空 selection」路径构造 direct-only wrapper，见下方）。
-    fn new(candidates: Vec<Arc<dyn ProxyAdapter>>, direct: Arc<dyn ProxyAdapter>) -> Self {
-        Self { candidates, direct }
+    fn new(
+        candidates: Vec<Arc<dyn ProxyAdapter>>,
+        direct: Arc<dyn ProxyAdapter>,
+        tuning: SharedTuning,
+        fakeip_store: Option<Arc<dyn Store>>,
+    ) -> Self {
+        Self {
+            candidates,
+            direct,
+            tuning,
+            fakeip_store,
+        }
     }
 
     fn primary_name(&self) -> &str {
@@ -51,6 +71,65 @@ impl ProxyWrapper {
             .first()
             .map(|a| a.name())
             .unwrap_or("DIRECT")
+    }
+
+    /// fake-IP 反查：store 里有的假地址换回域名，没有的原样返回。
+    fn real_host_of(&self, metadata: &Metadata) -> Option<String> {
+        let store = self.fakeip_store.as_ref()?;
+        let ip = metadata.dst_ip?;
+        store.get_by_ip(ip).map(|h| h.to_string())
+    }
+
+    /// DIRECT 兜底（TCP）：dst_ip 是 fake-IP 时先反查域名、经真实上游 DNS
+    /// 解出真身再拨。直接拨假地址只会路由回 TUN 秒失败（DirectAdapter 见
+    /// dst_ip 就拨它，meow-proxy direct.rs resolve_targets 第 1 步）；
+    /// 与 inbound.rs 的 DirectDial::Host 路径等价——实验室实测全候选死时
+    /// SOCKS 能救回 gstatic，反查前 TUN 不能。
+    async fn dial_direct_tcp(
+        &self,
+        metadata: &Metadata,
+        timeout: Duration,
+    ) -> meow_common::Result<Box<dyn ProxyConn>> {
+        let md = match self.real_host_of(metadata) {
+            Some(host) => match crate::proxy::dns::resolve_host(&host).await {
+                Some(ip) => Metadata {
+                    dst_ip: Some(ip),
+                    ..metadata.clone()
+                },
+                None => metadata.clone(),
+            },
+            None => metadata.clone(),
+        };
+        match tokio::time::timeout(timeout, self.direct.dial_tcp(&md)).await {
+            Ok(r) => r,
+            Err(_) => Err(MeowError::Io(std::io::Error::other(format!(
+                "DIRECT fallback dial timed out after {timeout:?}"
+            )))),
+        }
+    }
+
+    /// DIRECT 兜底（UDP）：同 dial_direct_tcp 的反查逻辑。
+    async fn dial_direct_udp(
+        &self,
+        metadata: &Metadata,
+        timeout: Duration,
+    ) -> meow_common::Result<Box<dyn ProxyPacketConn>> {
+        let md = match self.real_host_of(metadata) {
+            Some(host) => match crate::proxy::dns::resolve_host(&host).await {
+                Some(ip) => Metadata {
+                    dst_ip: Some(ip),
+                    ..metadata.clone()
+                },
+                None => metadata.clone(),
+            },
+            None => metadata.clone(),
+        };
+        match tokio::time::timeout(timeout, self.direct.dial_udp(&md)).await {
+            Ok(r) => r,
+            Err(_) => Err(MeowError::Io(std::io::Error::other(format!(
+                "DIRECT fallback dial timed out after {timeout:?}"
+            )))),
+        }
     }
 }
 
@@ -75,10 +154,14 @@ impl ProxyAdapter for ProxyWrapper {
             .unwrap_or(true)
     }
     async fn dial_tcp(&self, metadata: &Metadata) -> meow_common::Result<Box<dyn ProxyConn>> {
+        // 每 dial 现取快照：面板热改 timeout_ms / fallback_attempts 对新建
+        // 连接即时生效（与 inbound.rs 的 SOCKS 路径同源）。
+        let dt = DialTuning::snapshot(&self.tuning.read());
+        let dial_timeout = dt.dial();
         for (i, adapter) in self.candidates.iter().enumerate() {
-            match adapter.dial_tcp(metadata).await {
-                Ok(c) => return Ok(c),
-                Err(e) => {
+            match tokio::time::timeout(dial_timeout, adapter.dial_tcp(metadata)).await {
+                Ok(Ok(c)) => return Ok(c),
+                Ok(Err(e)) => {
                     // 非末位候选的失败是运维信号（记录主候选方便定位）；
                     // 只有全链失败才升级为 warn 并兜底 DIRECT。
                     if i + 1 < self.candidates.len() {
@@ -96,15 +179,39 @@ impl ProxyAdapter for ProxyWrapper {
                         );
                     }
                 }
+                Err(_) => {
+                    // 黑洞节点：TCP SYN 被丢弃时 dial 永不返回。这层超时是
+                    // 候选链能继续前进的唯一前提（裸 await 会挂死请求）。
+                    if i + 1 < self.candidates.len() {
+                        warn!(
+                            tag = adapter.name(),
+                            next = self.candidates[i + 1].name(),
+                            timeout = ?dial_timeout,
+                            "dial 超时，换下一个候选"
+                        );
+                    } else {
+                        warn!(
+                            tag = adapter.name(),
+                            timeout = ?dial_timeout,
+                            "all candidates failed (dial timeout), falling back to DIRECT"
+                        );
+                    }
+                }
             }
         }
-        self.direct.dial_tcp(metadata).await
+        // DIRECT 兜底同样包超时：黑洞场景下直连也可能只发 SYN 不收 ACK。
+        // 超时取 max(dial, first_response)，与 inbound.rs 的 direct_timeout 一致。
+        // fake-IP 目标先反查真身（见 dial_direct_tcp）。
+        let t = std::cmp::max(dial_timeout, dt.first_response());
+        self.dial_direct_tcp(metadata, t).await
     }
     async fn dial_udp(&self, metadata: &Metadata) -> meow_common::Result<Box<dyn ProxyPacketConn>> {
+        let dt = DialTuning::snapshot(&self.tuning.read());
+        let dial_timeout = dt.dial();
         for (i, adapter) in self.candidates.iter().enumerate() {
-            match adapter.dial_udp(metadata).await {
-                Ok(c) => return Ok(c),
-                Err(e) => {
+            match tokio::time::timeout(dial_timeout, adapter.dial_udp(metadata)).await {
+                Ok(Ok(c)) => return Ok(c),
+                Ok(Err(e)) => {
                     if i + 1 < self.candidates.len() {
                         warn!(
                             err = %e,
@@ -120,9 +227,26 @@ impl ProxyAdapter for ProxyWrapper {
                         );
                     }
                 }
+                Err(_) => {
+                    if i + 1 < self.candidates.len() {
+                        warn!(
+                            tag = adapter.name(),
+                            next = self.candidates[i + 1].name(),
+                            timeout = ?dial_timeout,
+                            "dial 超时，换下一个候选"
+                        );
+                    } else {
+                        warn!(
+                            tag = adapter.name(),
+                            timeout = ?dial_timeout,
+                            "all candidates failed (dial timeout), falling back to DIRECT"
+                        );
+                    }
+                }
             }
         }
-        self.direct.dial_udp(metadata).await
+        let t = std::cmp::max(dial_timeout, dt.first_response());
+        self.dial_direct_udp(metadata, t).await
     }
     fn health(&self) -> &ProxyHealth {
         self.candidates
@@ -189,6 +313,9 @@ struct TunRuntime {
     tunnel: Tunnel,
     registry: Registry,
     selection: SharedSelection,
+    /// 共享调参：ProxyWrapper 每个 dial 现取快照（timeout_ms 派生 dial 超时、
+    /// fallback_attempts 截断候选链）。面板热改对 TUN 数据面即时生效。
+    tuning: SharedTuning,
     /// 当前已注册到 Tunnel 的 "silverq-auto"：tag + 注册时使用的 adapter。
     /// reload 会重建同 tag 的 adapter（新 Arc），光比 tag 发现不了 →
     /// TUN 出口会僵在旧配置上，热加载失效（见 sync_proxies）。
@@ -200,6 +327,9 @@ struct TunRuntime {
     /// 用户配置的不走 TUN 的 CIDR（来自 `[tun].exclude_cidrs`），
     /// 在 `init_rules` 时生成 IpCidrRule → DIRECT。
     exclude_cidrs: Vec<String>,
+    /// fake-IP store 句柄（与 resolver 内 Pool 共享同一 store）：
+    /// ProxyWrapper 的 DIRECT 兜底靠它反查假地址 → 域名。
+    fakeip_store: Option<Arc<dyn Store>>,
 }
 
 impl TunRuntime {
@@ -207,6 +337,7 @@ impl TunRuntime {
     fn new(
         registry: Registry,
         selection: SharedSelection,
+        tuning: SharedTuning,
         fake_ip_cidr: Option<String>,
         exclude_cidrs: Vec<String>,
     ) -> Result<Self, String> {
@@ -235,7 +366,7 @@ impl TunRuntime {
         // ponytail: 内存 LRU 容量 4096（与 meow 的 DnsCache 默认同量级）；
         // 池子本身按 CIDR 范围循环分配，LRU 只是 host↔ip 映射的淘汰上限。
         let store = Arc::new(MemoryStore::new(4096)) as Arc<dyn Store>;
-        let pool = Pool::new(ipnet::IpNet::V4(fake_ip_range), store)
+        let pool = Pool::new(ipnet::IpNet::V4(fake_ip_range), Arc::clone(&store))
             .map_err(|e| format!("fake-ip pool init failed: {e}"))?;
         resolver.set_fakeip_v4(Arc::new(pool));
         // 国内域名 fake-IP 旁路（BlackList：命中即真实解析）——国内流量在
@@ -260,9 +391,11 @@ impl TunRuntime {
             tunnel,
             registry,
             selection,
+            tuning,
             current_auto: RwLock::new(None),
             direct,
             exclude_cidrs,
+            fakeip_store: Some(store),
         })
     }
 
@@ -274,11 +407,16 @@ impl TunRuntime {
 
         // 整条 selection 都是候选（不只是首个）：dial 时逐个尝试，与
         // SOCKS5 入站的 fallback_attempts 对齐。registry 可能缺条目
-        //（reload 时序），按序收集存在的 adapter。
-        let candidates: Vec<Arc<dyn ProxyAdapter>> = selection
+        // （reload 时序），按序收集存在的 adapter。
+        let mut candidates: Vec<Arc<dyn ProxyAdapter>> = selection
             .iter()
             .filter_map(|tag| registry.get(tag).map(Arc::clone))
             .collect();
+        // 截断到 fallback_attempts：此前漏了这步，TUN 实际试满整条 selection
+        // （capacity=10）。每候选 dial 超时 timeout_ms，不截断 = 最坏 40s 才
+        // 兜底；与 SOCKS 同 knob 同语义（队首 + 两个次优，可调）。
+        let dt = DialTuning::snapshot(&self.tuning.read());
+        candidates.truncate(dt.fallback_attempts);
         let new_names: Vec<String> = candidates.iter().map(|a| a.name().to_string()).collect();
         let new_tag = candidates.first().map(|a| a.name().to_string());
 
@@ -305,6 +443,8 @@ impl TunRuntime {
         let direct_wrapped = Arc::new(ProxyWrapper::new(
             vec![Arc::clone(&self.direct)],
             Arc::clone(&self.direct),
+            self.tuning.clone(),
+            self.fakeip_store.clone(),
         )) as Arc<dyn Proxy>;
         proxies.insert(SmolStr::new("DIRECT"), direct_wrapped);
 
@@ -313,6 +453,8 @@ impl TunRuntime {
                 let wrapped = Arc::new(ProxyWrapper::new(
                     candidates.clone(),
                     Arc::clone(&self.direct),
+                    self.tuning.clone(),
+                    self.fakeip_store.clone(),
                 )) as Arc<dyn Proxy>;
                 proxies.insert(SmolStr::new("silverq-auto"), wrapped);
                 info!(tag = %tag, count = candidates.len(), "TUN silverq-auto proxy updated");
@@ -378,6 +520,7 @@ pub async fn run(
     config: TunConfig,
     registry: Registry,
     selection: SharedSelection,
+    tuning: SharedTuning,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(
         device = config.device.as_deref().unwrap_or("auto"),
@@ -411,6 +554,7 @@ pub async fn run(
     let runtime = Arc::new(TunRuntime::new(
         registry.clone(),
         selection.clone(),
+        tuning,
         Some(fake_ip_cidr.clone()),
         config.exclude_cidrs.clone(),
     )?);
@@ -470,8 +614,8 @@ pub async fn run(
 mod tests {
     use super::*;
     use crate::config::settings::FileConfig;
-    use meow_common::MeowError;
     use meow_proxy::direct::DirectAdapter;
+    use std::net::IpAddr;
     use std::time::Duration;
 
     // ---- helpers ----
@@ -493,7 +637,15 @@ mod tests {
     fn direct_wrapper() -> ProxyWrapper {
         let inner: Arc<dyn ProxyAdapter> = Arc::new(DirectAdapter::new());
         let direct: Arc<dyn ProxyAdapter> = Arc::new(DirectAdapter::new());
-        ProxyWrapper::new(vec![inner], direct)
+        ProxyWrapper::new(vec![inner], direct, test_tuning(), None)
+    }
+
+    /// 测试用共享调参：默认值（timeout_ms 4000 / fallback_attempts 3）。
+    /// 需要小超时的用例构造后原地改字段（RuntimeTuning 字段均 pub）。
+    fn test_tuning() -> SharedTuning {
+        Arc::new(parking_lot::RwLock::new(
+            crate::config::settings::RuntimeTuning::from_eff(&default_eff()),
+        ))
     }
 
     // ---- A1/A2: TunConfig::from_effective 映射 ----
@@ -571,9 +723,14 @@ mod tests {
             fake_ip_cidr: Some("not-a-cidr".into()),
             exclude_cidrs: vec![],
         };
-        let err = run(config, empty_registry(), Arc::new(TokioRwLock::new(vec![])))
-            .await
-            .unwrap_err();
+        let err = run(
+            config,
+            empty_registry(),
+            Arc::new(TokioRwLock::new(vec![])),
+            test_tuning(),
+        )
+        .await
+        .unwrap_err();
         assert!(
             err.to_string().contains("invalid fake_ip_cidr"),
             "应报 invalid fake_ip_cidr，实际: {err}"
@@ -590,6 +747,7 @@ mod tests {
         let rt = TunRuntime::new(
             empty_registry(),
             Arc::new(TokioRwLock::new(vec![])),
+            test_tuning(),
             Some("198.18.0.0/15".into()),
             vec![],
         )
@@ -621,8 +779,14 @@ mod tests {
         let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
         let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
 
-        let rt = TunRuntime::new(registry, selection, Some("198.18.0.0/15".into()), vec![])
-            .expect("fake-ip pool init");
+        let rt = TunRuntime::new(
+            registry,
+            selection,
+            test_tuning(),
+            Some("198.18.0.0/15".into()),
+            vec![],
+        )
+        .expect("fake-ip pool init");
 
         assert!(
             rt.tunnel.proxy("silverq-auto").is_none(),
@@ -657,8 +821,14 @@ mod tests {
         let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
         let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
 
-        let rt = TunRuntime::new(registry, selection, Some("198.18.0.0/15".into()), vec![])
-            .expect("fake-ip pool init");
+        let rt = TunRuntime::new(
+            registry,
+            selection,
+            test_tuning(),
+            Some("198.18.0.0/15".into()),
+            vec![],
+        )
+        .expect("fake-ip pool init");
         rt.sync_proxies().await;
         let snap1 = rt.tunnel.route_snapshot();
 
@@ -689,6 +859,7 @@ mod tests {
         let rt = TunRuntime::new(
             registry,
             selection.clone(),
+            test_tuning(),
             Some("198.18.0.0/15".into()),
             vec![],
         )
@@ -728,6 +899,7 @@ mod tests {
         let rt = TunRuntime::new(
             registry.clone(),
             selection,
+            test_tuning(),
             Some("198.18.0.0/15".into()),
             vec![],
         )
@@ -767,6 +939,7 @@ mod tests {
         let rt = TunRuntime::new(
             registry.clone(),
             selection.clone(),
+            test_tuning(),
             Some("198.18.0.0/15".into()),
             vec![],
         )
@@ -799,8 +972,14 @@ mod tests {
         // 期望状态与当前都是 None → 跳过，不每 5s 空转重建路由表。
         let registry: Registry = empty_registry();
         let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["not-there".into()]));
-        let rt = TunRuntime::new(registry, selection, Some("198.18.0.0/15".into()), vec![])
-            .expect("fake-ip pool init");
+        let rt = TunRuntime::new(
+            registry,
+            selection,
+            test_tuning(),
+            Some("198.18.0.0/15".into()),
+            vec![],
+        )
+        .expect("fake-ip pool init");
 
         rt.sync_proxies().await;
         let snap1 = rt.tunnel.route_snapshot();
@@ -897,7 +1076,7 @@ mod tests {
             health: ProxyHealth::new(),
         });
         let direct: Arc<dyn ProxyAdapter> = Arc::new(DirectAdapter::new());
-        let wrapper = ProxyWrapper::new(vec![failing], direct);
+        let wrapper = ProxyWrapper::new(vec![failing], direct, test_tuning(), None);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -925,12 +1104,173 @@ mod tests {
         );
     }
 
+    /// dial 永远挂起的假 adapter：模拟黑洞节点（SYN 丢弃、dial 不返回）。
+    struct HangingAdapter {
+        health: ProxyHealth,
+    }
+
+    #[async_trait::async_trait]
+    impl ProxyAdapter for HangingAdapter {
+        fn name(&self) -> &str {
+            "hanging"
+        }
+        fn adapter_type(&self) -> AdapterType {
+            AdapterType::Socks5
+        }
+        fn addr(&self) -> &str {
+            ""
+        }
+        fn support_udp(&self) -> bool {
+            true
+        }
+        async fn dial_tcp(&self, _metadata: &Metadata) -> meow_common::Result<Box<dyn ProxyConn>> {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Err(MeowError::Io(std::io::Error::other("unreachable")))
+        }
+        async fn dial_udp(
+            &self,
+            _metadata: &Metadata,
+        ) -> meow_common::Result<Box<dyn ProxyPacketConn>> {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Err(MeowError::Io(std::io::Error::other("unreachable")))
+        }
+        fn health(&self) -> &ProxyHealth {
+            &self.health
+        }
+    }
+
+    fn loopback_metadata(port: u16) -> Metadata {
+        Metadata {
+            dst_ip: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
+            dst_port: port,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dial_timeout_advances_candidate_chain() {
+        // 回归（2026-09-20 实验室复现）：候选[0] 是黑洞节点（dial 永不返回），
+        // 旧实现裸 await → 候选链永远不前进 → 请求挂到客户端超时（实测 TUN
+        // 每请求 10s+ 卡死，同期 SOCKS 路径有超时不受影响）。
+        // 新实现：dial 超时后必须换到候选[1] 并成功。
+        let mut t = crate::config::settings::RuntimeTuning::from_eff(&default_eff());
+        t.timeout_ms = 50;
+        let tuning: SharedTuning = Arc::new(parking_lot::RwLock::new(t));
+
+        let hanging: Arc<dyn ProxyAdapter> = Arc::new(HangingAdapter {
+            health: ProxyHealth::new(),
+        });
+        // 候选[1] 用真 DirectAdapter：连本地监听即成功。
+        let direct: Arc<dyn ProxyAdapter> = Arc::new(DirectAdapter::new());
+        // 兜底 direct 故意用挂起 adapter：若候选链没前进到 [1]，这扇门不开。
+        let hanging_direct: Arc<dyn ProxyAdapter> = Arc::new(HangingAdapter {
+            health: ProxyHealth::new(),
+        });
+        let wrapper = ProxyWrapper::new(vec![hanging, direct], hanging_direct, tuning, None);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept_handle = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let result = wrapper.dial_tcp(&loopback_metadata(addr.port())).await;
+        accept_handle.abort();
+        assert!(
+            result.is_ok(),
+            "候选[0] dial 挂起时应超时换到候选[1] 并成功，实际: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dial_timeout_bounds_all_candidates_hang() {
+        // 全链 + DIRECT 兜底都挂起（全黑洞）时，dial_tcp 必须在有界时间内
+        // 返回 Err，而不是挂死请求。兜底超时 = max(dial, first_response)。
+        let mut t = crate::config::settings::RuntimeTuning::from_eff(&default_eff());
+        t.timeout_ms = 50; // dial 50ms，first_response 200ms → 兜底 200ms
+        let tuning: SharedTuning = Arc::new(parking_lot::RwLock::new(t));
+
+        let wrapper = ProxyWrapper::new(
+            vec![
+                Arc::new(HangingAdapter {
+                    health: ProxyHealth::new(),
+                }) as Arc<dyn ProxyAdapter>,
+                Arc::new(HangingAdapter {
+                    health: ProxyHealth::new(),
+                }) as Arc<dyn ProxyAdapter>,
+            ],
+            Arc::new(HangingAdapter {
+                health: ProxyHealth::new(),
+            }),
+            tuning,
+            None,
+        );
+
+        // 500ms 足够覆盖 2×50ms 候选 + 200ms 兜底；修复前这里会挂死。
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            wrapper.dial_tcp(&loopback_metadata(443)),
+        )
+        .await;
+        assert!(
+            matches!(&result, Ok(Err(_))),
+            "全黑洞时应在有界时间内返回 Err，实际超时或挂死"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_real_host_of_reverse_lookup() {
+        // pure：store 里有映射的假地址 → 换回域名；没有映射的（真实 IP 或
+        // 未命中）→ None（DIRECT 兜底原样拨，不误伤真直连流量）。
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new(64));
+        let fake_ip: IpAddr = "198.18.0.5".parse().unwrap();
+        store.put("www.gstatic.com", fake_ip);
+
+        let wrapper = ProxyWrapper::new(
+            vec![Arc::new(FailingAdapter {
+                health: ProxyHealth::new(),
+            })],
+            Arc::new(DirectAdapter::new()),
+            test_tuning(),
+            Some(store),
+        );
+
+        let md = Metadata {
+            dst_ip: Some(fake_ip),
+            dst_port: 443,
+            host: "www.gstatic.com".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            wrapper.real_host_of(&md).as_deref(),
+            Some("www.gstatic.com"),
+            "store 里的假地址应反查出域名"
+        );
+
+        let real = Metadata {
+            dst_ip: Some("1.1.1.1".parse::<IpAddr>().unwrap()),
+            dst_port: 443,
+            ..Default::default()
+        };
+        assert_eq!(
+            wrapper.real_host_of(&real),
+            None,
+            "真实 IP 不在 store 里，不应反查"
+        );
+    }
+
     #[tokio::test]
     async fn test_init_rules_includes_private_network_excludes() {
         // 5 私网(硬编码) + 1 用户 CIDR + 1 FinalRule = 7 条，顺序固定。
         let rt = TunRuntime::new(
             empty_registry(),
             Arc::new(TokioRwLock::new(vec![])),
+            test_tuning(),
             Some("198.18.0.0/15".into()),
             vec!["224.0.0.0/4".into()],
         )
@@ -967,6 +1307,7 @@ mod tests {
         let rt = TunRuntime::new(
             empty_registry(),
             Arc::new(TokioRwLock::new(vec![])),
+            test_tuning(),
             Some("198.18.0.0/15".into()),
             vec!["not-a-cidr".into()],
         )
@@ -992,8 +1333,14 @@ mod tests {
         let registry: Registry = Arc::new(parking_lot::RwLock::new(reg));
         let selection: SharedSelection = Arc::new(TokioRwLock::new(vec!["direct-a".into()]));
 
-        let rt = TunRuntime::new(registry, selection, Some("198.18.0.0/15".into()), vec![])
-            .expect("fake-ip pool init");
+        let rt = TunRuntime::new(
+            registry,
+            selection,
+            test_tuning(),
+            Some("198.18.0.0/15".into()),
+            vec![],
+        )
+        .expect("fake-ip pool init");
         assert!(rt.tunnel.proxy("DIRECT").is_none(), "sync 前不应有 DIRECT");
         rt.sync_proxies().await;
         assert!(
@@ -1023,7 +1370,13 @@ mod tests {
             exclude_cidrs: vec![],
         };
         let mut handle = tokio::spawn(async move {
-            let _ = run(config, empty_registry(), Arc::new(TokioRwLock::new(vec![]))).await;
+            let _ = run(
+                config,
+                empty_registry(),
+                Arc::new(TokioRwLock::new(vec![])),
+                test_tuning(),
+            )
+            .await;
         });
         tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -1052,7 +1405,12 @@ mod tests {
         };
         let res = tokio::time::timeout(
             Duration::from_secs(3),
-            run(config, empty_registry(), Arc::new(TokioRwLock::new(vec![]))),
+            run(
+                config,
+                empty_registry(),
+                Arc::new(TokioRwLock::new(vec![])),
+                test_tuning(),
+            ),
         )
         .await;
         assert!(res.is_ok(), "run 应在 3s 内返回，而非永久挂起");
