@@ -26,12 +26,16 @@
 | serve 数据面组装 / 启动通路 | src/main.rs |
 
 排除（管道）：`config`（配置解析）、`proxy/factory`（NodeSpec→proxy 装配）、
-`dataplane/tun`（未实现占位）、`scheduler/node`（节点内部模型）。
+`dataplane/tun`（用户主动不用，移除不感知——见快照备注）、`scheduler/node`（节点内部模型）。
 
-## 快照（v0.12.16）
+## 快照（v0.12.24）
 
 - major = 0（用户确认，无 breaking）
 - minor = 12（上表 12 项功能域）
-- patch = 16（master 全历史 fix 提交累计）
+- patch = 24（master 全历史 fix 提交累计）
+
+> v0.12.24 备注：`dataplane/tun` 排除理由「未实现占位」已失效（TUN 于 #4 实现并在
+> master，用户主动关闭不用）。本次按「移除后用户是否察觉 → 用户不用即不察觉」仍计管道，
+> minor 维持 12；下次发版如用户重新启用 TUN 需重判。
 
 重新清点：新增功能域加一行 +1；移除 -1；patch 重跑命令。改 Cargo.toml `version` + 本文件快照。
