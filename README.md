@@ -32,7 +32,10 @@ select_top(N)  纯 EWMA 取前 N（无迟滞轮次）
 - **分批并发**：节点池按当前排名分批测速，`buffer_unordered(concurrency)`，不阻塞在最慢节点。
 - **快慢分离**：测速（周期全池离线）与切换（只读已算好的 EWMA）完全解耦，卡顿隔离。
 - **超时扣分后移**：死/慢节点拿不到前排。
-- **节点淘汰（pipeline 双指标）**：连续失败 ≥ `retire_max_failures`（默认 5）触发检查——从未测通的节点立即摘除（从未通过真实握手不会自愈）；曾测通过的进入延长保活，连续失败连续满 `retire_keep_alive_secs`（默认 3600s）才摘。期间成功一次即复活。可面板热改 + `silverq config-reload` 重读配置。
+- **节点淘汰（pipeline 双指标 + 地板）**：连续失败 ≥ `retire_max_failures`（默认 5）触发检查——从未测通的节点立即摘除（从未通过真实握手不会自愈）；曾测通过的进入延长保活，连续失败连续满 `retire_keep_alive_secs`（默认 3600s）才摘。期间成功一次即复活。`retire_min_pool`（默认 10，0=禁用）兜底防摘到 0 全黑。可面板热改 + `silverq config-reload` 重读配置。
+- **回环/私网/国内直连判定**（SOCKS 入站）：pin 优先，之后回环/私网目标原样直连、国内域名（`china-domains.txt`，11 万条后缀表）经真实 DNS 解析成 IP 后直连，其余走候选链。避免每个死候选烧 4s、国内绕远、私网目标被拨到节点侧 loopback。
+- **域名级竞速（慢触发 + 滞回）**：某域名代理首响应 > 2s 才标记 slow，下次访问并行竞速（直连 + 代理候选，TCP 先建连者胜）；接管需滞回（新路线快过旧路线一半），TTL 5 分钟。无脑全域竞速会给每个域名加探测成本，故只对慢域名启用。已知盲区：纯 TCP 竞速分不出「TCP 通、TLS 断」——直连 relay 失败计 `direct_fails`，连续 2 次剔除回代理。TUN 路径未接入（首响应信号在 meow 引擎内部）。
+- **节点 dial 真实 DNS 预解析**：节点服务器域名经固定上游（223.5.5.5 / 119.29.29.29，`SILVERQ_RESOLVE_UPSTREAMS` 可覆盖）预解析写 `NodeSpec.dial_addr`，adapter 拨号用真实 IP。修复 TUN + fake-IP 环境下「拨节点变成经候选链拨节点」的自指递归（2026-09-19 事故：健康检查幸存 14-30 → 0-1）。解析失败回退系统解析，只降级不丢节点。
 
 ## 使用
 
@@ -55,6 +58,8 @@ silverq select auto           # 取消钉住，恢复自动
 | `SILVERQ_CTL_SOCK` | `~/.local/state/silverq/ctl.sock` | 控制通道 socket |
 | `SILVERQ_SELECTOR_STORE` | `~/.local/state/silverq-selector.json` | 外部 meow kernel 读的 selector store |
 | `SILVERQ_STATE` | `~/.local/state/silverq/scores.json` | EWMA 分数存档 |
+| `SILVERQ_RESOLVE_UPSTREAMS` | `223.5.5.5,119.29.29.29` | 节点 dial / 国内直连解析用的真实上游 DNS（逗号分隔） |
+| `SILVERQ_CHINA_DOMAINS` | `~/.config/silverq/rules/china-domains.txt` | 国内域名后缀表（缺失 = 空表 = 无直连判定） |
 
 无 `meow` feature 时用 `NoopMeasurer` 空跑（自测调度逻辑）：`cargo run -- serve nodes.yaml`
 
@@ -71,7 +76,9 @@ src/
 │                      # decision.rs（select_top）、fast_path.rs（即时发布）、
 │                      # persist.rs（EWMA 存档）；mod.rs（调度进度计数）
 ├── proxy/             # nodespec.rs（节点 YAML 模型）、factory.rs（NodeSpec→meow
-│                      # adapter）、meow.rs（MeowMeasurer）——后两者 meow feature
+│                      # adapter）、meow.rs（MeowMeasurer）、dns.rs（零依赖 UDP DNS
+│                      # 客户端 + 国内域名表 ChinaSet）、route.rs（域名级竞速缓存）
+│                      # ——meow feature
 ├── dataplane/         # inbound.rs（SOCKS5/HTTP-CONNECT TCP）、udp.rs（UDP 中继）、
 │                      # tun.rs（TUN 透明代理，meow-tun feature）——meow feature
 ├── web/               # mod.rs（内嵌面板 + JSON API）——meow feature
@@ -80,9 +87,9 @@ src/
 
 ## 已验证 / 已知范围
 
-### 自动化测试（52 项，`cargo test --features meow`）
+### 自动化测试（106 项，`cargo test --features meow`）
 
-41 单测 + 11 e2e。测试按源文件划分放在 `tests/`（`decision.rs`/`inbound.rs`/… 与 `src/`
+41 lib 单测 + 65 集成测试。测试按源文件划分放在 `tests/`（`decision.rs`/`inbound.rs`/… 与 `src/`
 模块一一对应）。依赖 meow 的测试文件带 `#![cfg(feature = "meow")]`，纯 `cargo test`
 也能跑非协议部分。e2e 真起 `silverq serve` 进程、用真 SOCKS5 / HTTP-CONNECT 客户端打流量，
 目标是本地 echo 服务、探测端点也在本地 —— **全程回环，不依赖外网**，CI 可稳定跑。
@@ -146,12 +153,16 @@ ui_dir = "~/.local/share/silverq/ui"   # zashboard 静态目录
 
 ## 已知范围
 
-- **TUN 已实现（v0.2.0，`meow-tun` feature）**：基于 meow-listener 的 listener-tun。
+- **TUN 已实现（`meow-tun` feature）**：基于 meow-listener 的 listener-tun。
   fake-IP 路由（`TunRouteScope::FakeIp` 只接管 fake-IP 段，真实 IP 不回环，
   故节点服务器 IP 不会绕回 TUN；若观察到异常，在 `[tun].exclude_cidrs` 加
   `节点IP/32`），规则分流（私网 + 用户 `exclude_cidrs` → DIRECT，末尾
-  FinalRule → silverq-auto），节点 dial 失败自动回退 DIRECT。建设备需要 root
-  或 `CAP_NET_ADMIN`；只有 release 里的 `silverq-tun-*` 产物带这个 feature。
+  FinalRule → silverq-auto）。出口候选链每个 dial 包超时（与测速超时等值，
+  黑洞节点 SYN 丢弃时不会挂死请求——2026-09-20 修复，修复前级联停顿可达
+  一个健康检查周期），候选数截断到 `fallback_attempts`，全部失败后反查
+  fake-IP → 真实 DNS 解真身走 DIRECT（解析结果过私网/回环判定，失败关闭）。
+  建设备需要 root 或 `CAP_NET_ADMIN`；只有 release 里的 `silverq-tun-*`
+  产物带这个 feature。**当前部署未启用**（`[tun].enabled = false`）。
 - **ws / grpc 已支持**（VLESS）：层序为 TLS 贴 TCP、ws/grpc 叠其上，明文 ws 节点
   （`tls: false`）也可接。trojan 的 transport 还没接（其 adapter 无 TransportChain 入口）。
 - **黑洞节点已处理**：建连后加了「首次响应超时」（测速超时 ×4）。顺序是先把客户端
@@ -167,7 +178,6 @@ ui_dir = "~/.local/share/silverq/ui"   # zashboard 静态目录
   TransportChain 入口。真实池里因此跳过 4 个 trojan+ws 节点。
 - **UDP 不做分片重组**。
 - SOCKS5 inbound **无认证**，默认只绑 `127.0.0.1`。改绑 `0.0.0.0` 等于开放代理。
-- EWMA 分数**进程重启后清零**（`reload` 不丢，只有重启丢）。
 - 冷启动：真实池 217 节点跑完一轮约 90s。已用"配置顺序播种 + 每批发布中间结果 +
   **交错分批**（已测与未测混测，见 `measurement_order`）"把活节点发现时间从
   "整轮跑完才出现"降到 45s 内。头几秒仍可能选到死节点（靠 fallback 兜）。
