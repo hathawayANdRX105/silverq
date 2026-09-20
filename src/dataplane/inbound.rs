@@ -254,8 +254,9 @@ async fn handle_one(
     //
     // 没有这个超时的话，selection[0] 是死节点时 dial_tcp 会挂到内核 TCP 超时
     // （可达数十秒），fallback 根本轮不到下一个候选 —— 实测表现为请求卡满
-    // 客户端超时后失败，而后排明明有活节点。超时取测速超时的 2 倍：
-    // 测速能过说明这个节点建连一般在测速超时内完成，留 2 倍余量给抖动。
+    // 客户端超时后失败，而后排明明有活节点。超时与测速超时等值（早期是
+    // 2×，probe 放宽后每个死候选要烧 8s 学费，交互延迟代价太大，已改成等值，
+    // 见 DialTuning::dial 的文档）。
     // fallback 尝试上限来自配置（silverq.toml [data_plane].fallback_attempts，
     // PATCH /configs 可热改）。按 EWMA 顺序最多试 N 个候选：
     // 池子普遍半死时，大值能救回更多请求；但每个死候选都要烧一个 dial 超时，

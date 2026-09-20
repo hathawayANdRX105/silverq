@@ -23,6 +23,9 @@ pub const ROUTE_TTL: Duration = Duration::from_secs(300);
 /// 直连连续失败多少次后移除缓存（TLS 盲区缓解：TCP 通但 TLS 死的直连
 /// 会在应用层反复失败，靠失败计数把它踢出）。
 const DIRECT_FAILS_TO_DROP: u32 = 2;
+/// 缓存条目上限。过期只在 decide/record 访问该 host 时惰性清理，浏览器
+/// 流量里大量一次性域名不会被复查——不主动清扫则长跑进程内存只涨不消。
+const MAX_ENTRIES: usize = 8192;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Route {
@@ -92,6 +95,14 @@ impl RouteCache {
     pub fn record(&self, host: &str, route: Route, outcome: RouteOutcome) {
         let mut m = self.entries.lock();
         let now = Instant::now();
+        // 超限清扫：先丢过期，仍超限整体清空。缓存是建议性的——最坏代价
+        // 只是几个域名重走一次观察期，换来内存有界。
+        if m.len() >= MAX_ENTRIES {
+            m.retain(|_, e| e.until > now);
+            if m.len() >= MAX_ENTRIES {
+                m.clear();
+            }
+        }
         let e = m.entry(host.to_string()).or_insert(Entry {
             route,
             last_fr: Duration::ZERO,
@@ -207,5 +218,40 @@ mod tests {
         m.get_mut("t.com").unwrap().until = Instant::now() - Duration::from_secs(1);
         drop(m);
         assert!(matches!(c.decide("t.com"), Decision::Proxy));
+    }
+
+    /// 一次性域名（浏览器流量）不会被复查 → 惰性过期覆盖不到。
+    /// 不清扫则长跑进程内存只涨不消：超限必须主动丢。
+    #[test]
+    fn entries_stay_bounded_under_one_shot_hosts() {
+        let c = RouteCache::new();
+        for i in 0..MAX_ENTRIES + 64 {
+            c.record(&format!("one-shot-{i}.com"), Route::Proxy, responded(10));
+        }
+        assert!(
+            c.entries.lock().len() <= MAX_ENTRIES,
+            "缓存条目数必须不超过上限"
+        );
+    }
+
+    /// 超限清扫优先丢过期条目：活的观察期条目不该被整体清空误伤。
+    #[test]
+    fn purge_prefers_expired_entries() {
+        let c = RouteCache::new();
+        for i in 0..MAX_ENTRIES {
+            c.record(&format!("h{i}.com"), Route::Proxy, responded(10));
+        }
+        // 全设为过期，再写入一个触发清扫
+        {
+            let mut m = c.entries.lock();
+            let past = Instant::now() - Duration::from_secs(1);
+            for e in m.values_mut() {
+                e.until = past;
+            }
+        }
+        c.record("fresh.com", Route::Proxy, responded(10));
+        let m = c.entries.lock();
+        assert_eq!(m.len(), 1, "过期条目应被清掉，只剩新写入的");
+        assert!(m.contains_key("fresh.com"));
     }
 }
