@@ -227,7 +227,7 @@ async fn handle_one(
     // 代理首响应超阈值的域名下次访问触发竞速：直连 + 候选链并行，TCP 先建连者胜。
     let china_hit = ctx.china.matches(&target.host);
     let cache_eligible =
-        !ctx.pinned.load(Ordering::Relaxed) && !is_local_target(&target.host) && !china_hit;
+        route_cache_eligible(&target.host, ctx.pinned.load(Ordering::Relaxed), china_hit);
     let mut race = false;
     if cache_eligible && matches!(direct, DirectDial::None) {
         match ctx.routes.decide(&target.host) {
@@ -787,6 +787,16 @@ pub fn is_local_target(host: &str) -> bool {
     }
 }
 
+/// 域名级路线决策（直连 / 竞速 / 代理）是否适用于该目标。
+///
+/// IP 字面量目标没有"域名 → 路线"这一层：DNS 无可解析，路线缓存里的
+/// Direct/Race 记录对它是无意义的。更实际的是，客户端发来的公网 IPv6
+/// 目标在本机只有私网 v6 时盲拨必然 `Network is unreachable`，白白烧掉
+/// 一次直连尝试（竞速场景还会拖慢整条路径）。这类目标一律交给候选链。
+fn route_cache_eligible(host: &str, pinned: bool, china_hit: bool) -> bool {
+    !pinned && !is_local_target(host) && !china_hit && host.parse::<std::net::IpAddr>().is_err()
+}
+
 /// 处理 UDP ASSOCIATE：绑中继 socket → 回其地址 → 跑中继循环直到 TCP 断开。
 ///
 /// RFC 1928 要求 TCP 控制连接是 association 的生命周期锚点：TCP 一断，
@@ -868,7 +878,7 @@ async fn handle_udp_associate(
 
 #[cfg(test)]
 mod tests {
-    use super::is_local_target;
+    use super::{is_local_target, route_cache_eligible};
 
     #[test]
     fn local_targets_are_detected() {
@@ -898,13 +908,35 @@ mod tests {
         // 公网 IP / 正常域名不能误判（否则所有代理流量都被强制直连）
         for host in [
             "8.8.8.8",
-            "1.1.1.1",
-            "172.32.0.1",  // 不在 RFC1918
-            "192.169.0.1", // 不在 RFC1918
-            "www.gstatic.com",
-            "2001:4860::1", // 全球单播 v6
+            "240e:97d:10:1402::1:42",
+            "2001:4860::1",
+            "::ffff:8.8.8.8",
         ] {
             assert!(!is_local_target(host), "{host} 不应判定为本地目标");
         }
+    }
+
+    #[test]
+    fn ip_literals_opt_out_of_route_decisions() {
+        // 客户端发来的 IP 字面量（尤其公网 IPv6）在本机缺该地址族连通性时
+        // 盲拨必然 Network is unreachable；它们没有"域名→路线"这一层，
+        // 路线缓存不该对它们做直连/竞速决策。
+        for host in [
+            "8.8.8.8",
+            "240e:97d:10:1402::1:42",
+            "2001:4860::1",
+            "[::ffff:8.8.8.8]",
+        ] {
+            assert!(
+                !route_cache_eligible(host, false, false),
+                "{host} 不应进入域名级路线决策"
+            );
+        }
+        // 域名正常参与（未钉住、非国内、非本地）。
+        assert!(route_cache_eligible("www.gstatic.com", false, false));
+        // 三类既有旁路保持不变。
+        assert!(!route_cache_eligible("www.baidu.com", false, true)); // 国内
+        assert!(!route_cache_eligible("www.gstatic.com", true, false)); // 钉住
+        assert!(!route_cache_eligible("localhost", false, false)); // 本地
     }
 }
