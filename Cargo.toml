@@ -1,6 +1,6 @@
 [package]
 name = "silverq"
-version = "0.12.24"
+version = "0.12.25"
 edition = "2021"
 description = "silverq — stability-first proxy node scheduler (EWMA + batch concurrent testing + fast/slow path separation)"
 license = "MIT"
