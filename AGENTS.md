@@ -78,7 +78,7 @@ CPU 密集型命令（编译/测试/装包）一律 `cpulimit -l 65 -i --` 前�
 
 | 场景 | 文档 |
 |---|---|
-| 发新版本（版本号怎么算、tag、Release 核对） | `.agent/tasks/versioning.md`（流程）+ 根 `VERSIONING.md`（功能域清单真相源） |
+| 发新版本（版本号怎么算、tag、Release 核对） | `.agent/tasks/versioning.md`（流程 + 功能域清单） |
 | TUN 历史排查结论、实验室用法、部署拓扑 | `todo/tun-handover.md`（已冻结，TUN 不做了，仅作史料） |
 | 数据面/TUN 实验（不动宿主机） | `~/.local/bin/silverq-lab.sh`（容器 netns 完整透明链路） |
 | 提交/推送/合并被拦 | `.githooks/GATE_HANDBOOK.md` + `.githooks/spec/SPEC_OVERVIEW.md` |
