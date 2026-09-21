@@ -190,7 +190,9 @@ async fn http_connect_drains_headers_exactly() {
 async fn http_proxy_absolute_uri_target() {
     let (mut client, mut server) = pair().await;
     client
-        .write_all(b"ET http://example.com:8080/path?a=1 HTTP/1.1\r\nHost: example.com:8080\r\n\r\n")
+        .write_all(
+            b"ET http://example.com:8080/path?a=1 HTTP/1.1\r\nHost: example.com:8080\r\n\r\n",
+        )
         .await
         .unwrap();
 
@@ -208,10 +210,21 @@ async fn http_proxy_absolute_uri_target() {
 /// 无端口的绝对 URI：http 默认 80，https 默认 443。
 #[tokio::test]
 async fn http_proxy_default_ports() {
-    for (req, first, expect_host, expect_port) in [
-        ("ET http://example.com/ HTTP/1.1\r\n\r\n", b'H', "example.com", 80u16),
-        ("ET https://example.com/ HTTP/1.1\r\n\r\n", b'H', "example.com", 443u16),
-    ] {
+    let cases: Vec<(&[u8], u8, &str, u16)> = vec![
+        (
+            b"ET http://example.com/path HTTP/1.1\r\n\r\n" as &[u8],
+            b'G',
+            "example.com",
+            80,
+        ),
+        (
+            b"ET https://example.com/path HTTP/1.1\r\n\r\n" as &[u8],
+            b'G',
+            "example.com",
+            443,
+        ),
+    ];
+    for (req, first, expect_host, expect_port) in cases {
         let (mut client, mut server) = pair().await;
         client.write_all(req).await.unwrap();
         let target = read_http_connect_target(&mut server, first).await.unwrap();

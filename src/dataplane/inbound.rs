@@ -716,6 +716,7 @@ pub async fn read_http_connect_target(
 fn split_host_port(s: &str, default_port: u16) -> Option<(String, u16)> {
     if let Some(rest) = s.strip_prefix('[') {
         // IPv6 字面量：[addr] 或 [addr]:port
+        let (addr, tail) = rest.split_once(']')?;
         let port = match tail.strip_prefix(':') {
             Some(p) => p.parse::<u16>().ok()?,
             None => default_port,
