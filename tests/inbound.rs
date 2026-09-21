@@ -177,27 +177,103 @@ async fn http_connect_drains_headers_exactly() {
     assert_eq!(target.host, "example.com");
     assert_eq!(target.port, 443);
 
+    assert!(target.replay.is_empty(), "CONNECT 不回放任何字节");
     // 关键断言：socket 里剩下的必须正好是隧道数据，没有残留头部字节
     let mut rest = [0u8; 9];
     server.read_exact(&mut rest).await.unwrap();
     assert_eq!(&rest, b"\x16\x03\x01TUNNEL", "头部残留会污染隧道数据");
 }
 
+/// 透明 HTTP 代理：绝对 URI 的 authority 才是转发目标，路径留在回放里。
+/// `curl -x http://127.0.0.1:17321 http://example.com:8080/x` 走这条路径。
 #[tokio::test]
-async fn http_non_connect_method_rejected() {
+async fn http_proxy_absolute_uri_target() {
     let (mut client, mut server) = pair().await;
     client
-        .write_all(b"ET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        .write_all(b"ET http://example.com:8080/path?a=1 HTTP/1.1\r\nHost: example.com:8080\r\n\r\n")
         .await
         .unwrap();
 
     let target = read_http_connect_target(&mut server, b'G').await.unwrap();
-    assert!(target.host.is_empty(), "非 CONNECT 不应产生转发目标");
+    assert_eq!(target.host, "example.com");
+    assert_eq!(target.port, 8080);
+    // 回放 = 请求行 + 全部头部（精确到空行），路径留在回放里带给上游
+    assert_eq!(
+        target.replay,
+        b"GET http://example.com:8080/path?a=1 HTTP/1.1\r\nHost: example.com:8080\r\n\r\n",
+        "回放必须精确等于读走的字节，多一个少一个都会破坏上游收到的请求"
+    );
+}
+
+/// 无端口的绝对 URI：http 默认 80，https 默认 443。
+#[tokio::test]
+async fn http_proxy_default_ports() {
+    for (req, first, expect_host, expect_port) in [
+        ("ET http://example.com/ HTTP/1.1\r\n\r\n", b'H', "example.com", 80u16),
+        ("ET https://example.com/ HTTP/1.1\r\n\r\n", b'H', "example.com", 443u16),
+    ] {
+        let (mut client, mut server) = pair().await;
+        client.write_all(req).await.unwrap();
+        let target = read_http_connect_target(&mut server, first).await.unwrap();
+        assert_eq!(target.host, expect_host);
+        assert_eq!(target.port, expect_port);
+    }
+}
+
+/// 回归一个真实安全漏洞形态：`http://127.0.0.1:8090@evil.com/` 的主机是
+/// evil.com（userinfo 在最后一个 @ 之后）。按首个 @ 切分会把 host 当成
+/// 127.0.0.1:8090，is_local_target 判为回环直连——攻击者借"代理"把请求
+/// 伪装成本地目标，绕过代理策略直达本机服务。
+#[tokio::test]
+async fn http_proxy_userinfo_after_last_at_is_not_the_host() {
+    let (mut client, mut server) = pair().await;
+    client
+        .write_all(b"ET http://127.0.0.1:8090@evil.com/ HTTP/1.1\r\n\r\n")
+        .await
+        .unwrap();
+
+    let target = read_http_connect_target(&mut server, b'G').await.unwrap();
+    assert_eq!(target.host, "evil.com", "userinfo 不是主机");
+    assert!(!is_local_target(&target.host), "不能被判成回环直连");
+}
+
+/// 回放之后必须只剩正文：POST 的 Content-Length 正文留在 socket 里，
+/// 由后续中继带走，头部一个字节都不能多读。
+#[tokio::test]
+async fn http_proxy_replay_stops_at_blank_line() {
+    let (mut client, mut server) = pair().await;
+    client
+        .write_all(b"OST http://example.com/submit HTTP/1.1\r\nContent-Length: 5\r\n\r\nBODY!")
+        .await
+        .unwrap();
+
+    let target = read_http_connect_target(&mut server, b'P').await.unwrap();
+    assert_eq!(target.host, "example.com");
+    assert!(target.replay.ends_with(b"\r\n\r\n"));
+    assert!(!target.replay.contains(&b'B'));
+
+    let mut rest = [0u8; 5];
+    server.read_exact(&mut rest).await.unwrap();
+    assert_eq!(&rest, b"BODY!", "正文必须完整留在 socket 里");
+}
+
+/// 相对 URI（`GET /path HTTP/1.1`）：对端不是代理客户端，400 拒绝。
+/// 不做 Host 头兜底——配置成代理的客户端永远发绝对 URI，YAGNI。
+#[tokio::test]
+async fn http_relative_uri_rejected_with_400() {
+    let (mut client, mut server) = pair().await;
+    client
+        .write_all(b"ET /path HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .unwrap();
+
+    let target = read_http_connect_target(&mut server, b'G').await.unwrap();
+    assert!(target.host.is_empty(), "相对 URI 不应产生转发目标");
 
     let mut buf = vec![0u8; 32];
     let n = client.read(&mut buf).await.unwrap();
     assert!(
-        String::from_utf8_lossy(&buf[..n]).contains("405"),
-        "应回 405"
+        String::from_utf8_lossy(&buf[..n]).contains("400"),
+        "应回 400 而不是 405（405 会让客户端误以为方法不允许而重试）"
     );
 }
