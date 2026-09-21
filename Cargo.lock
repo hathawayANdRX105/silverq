@@ -2731,17 +2731,20 @@ dependencies = [
  "meow-trie",
  "meow-tunnel",
  "parking_lot",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha1 0.10.7",
  "smol_str",
  "tokio",
+ "tokio-rustls",
  "tokio-test",
  "tokio-util",
  "toml",
  "tracing",
  "tracing-subscriber",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

@@ -11,6 +11,7 @@ fn ok(tag: &str, ms: f64) -> Measurement {
     Measurement {
         tag: tag.into(),
         delay_ms: Some(ms),
+        bw_bps: None,
     }
 }
 
@@ -18,6 +19,7 @@ fn timeout(tag: &str) -> Measurement {
     Measurement {
         tag: tag.into(),
         delay_ms: None,
+        bw_bps: None,
     }
 }
 
@@ -104,16 +106,28 @@ fn penalty_never_pollutes_measured_latency_and_recovers_instantly() {
         pool[0].score()
     );
 
-    // 一次成功立刻完全恢复 —— 不需要多轮把膨胀分数洗回来
+    // 一次成功立刻清零**罚分**（consecutive_failures），不需要多轮洗回来。
+    // 稳定性窗口保留近期失败是刻意的：它看长期成功率，正是
+    // consecutive_failures「一次成功就清零」掩盖的间歇性劣化盲区——
+    // 所以这里的恢复是「罚分瞬时清零 + 稳定性逐步爬回」，不是分数回到 ewma。
     apply_batch(&mut pool, &[ok("flaky", 100.0)]);
+    assert_eq!(pool[0].consecutive_failures, 0, "罚分必须一次成功即清零");
+    assert!(
+        pool[0].score() < 100.0 / 0.05,
+        "稳定性地板兜底：全失败窗口下一次成功，分数不该仍顶在 20 倍：score={}",
+        pool[0].score()
+    );
+    // 持续成功把窗口填满后，分数回到纯延迟
+    for _ in 0..16 {
+        apply_batch(&mut pool, &[ok("flaky", 100.0)]);
+    }
     assert_eq!(
         pool[0].score(),
         pool[0].ewma,
-        "一次成功后排序分数必须等于实测延迟，score={} ewma={}",
+        "窗口填满成功后排序分数必须等于实测延迟，score={} ewma={}",
         pool[0].score(),
         pool[0].ewma
     );
-    assert_eq!(pool[0].consecutive_failures, 0);
 }
 
 /// 两级 pipeline：次数硬指标 + 时间延长保活。

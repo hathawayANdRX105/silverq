@@ -130,6 +130,12 @@ struct NodeJson<'a> {
     last_probe_secs: u64,
     /// 延迟历史 (unix秒, 毫秒)，面板画图。只含成功测速。
     history: Vec<(u64, u64)>,
+    /// 吞吐（bytes/sec）。null = 还没跑过吞吐批。
+    /// 延迟和吞吐独立排序维度：握手快的节点可能只有 1Mbit。
+    bw_bps: Option<u64>,
+    /// 探测成功率（0..1，滚动窗口）。做 score 的分母，
+    /// 面板展示「为什么这个快节点排得靠后」。
+    stability: f64,
     /// 是否在当前 selection 里
     active: bool,
     /// 是否是当前首选
@@ -221,6 +227,8 @@ async fn status_json(state: &CtlState) -> String {
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or(u64::MAX),
             history: n.history.iter().map(|(t, ms)| (*t, *ms as u64)).collect(),
+            bw_bps: n.bw_bps().map(|b| b as u64),
+            stability: n.stability(),
             active: selection.contains(&n.tag),
             primary: selection.first().map(|s| s == &n.tag).unwrap_or(false),
         })
@@ -446,6 +454,11 @@ fn configs_json(state: &CtlState) -> String {
             "retire_max_failures": t.retire_max_failures,
             "retire_min_pool": t.retire_min_pool,
             "retire_keep_alive_secs": t.retire_keep_alive_secs,
+            // 吞吐感知调度（延迟探针看不到带宽，另开一条有限字节下载探测）
+            "bw_interval_rounds": t.bw_interval_rounds,
+            "bw_timeout_ms": t.bw_timeout_ms,
+            "bw_max_bytes": t.bw_max_bytes,
+            "bw_penalty_per_efold_ms": t.bw_penalty_per_efold_ms,
         },
     });
     payload.to_string()
@@ -488,6 +501,18 @@ fn apply_config_patch(state: &CtlState, body: &str) -> String {
     }
     if let Some(n) = get("retire_keep_alive_secs").and_then(|x| x.as_u64()) {
         t.retire_keep_alive_secs = n;
+    }
+    if let Some(n) = get("bw_interval_rounds").and_then(|x| x.as_u64()) {
+        t.bw_interval_rounds = n as u32;
+    }
+    if let Some(n) = get("bw_timeout_ms").and_then(|x| x.as_u64()) {
+        t.bw_timeout_ms = n;
+    }
+    if let Some(n) = get("bw_max_bytes").and_then(|x| x.as_u64()) {
+        t.bw_max_bytes = n;
+    }
+    if let Some(n) = get("bw_penalty_per_efold_ms").and_then(|x| x.as_f64()) {
+        t.bw_penalty_per_efold_ms = n;
     }
     *state.tuning.write() = t.validated();
     NO_CONTENT.into()

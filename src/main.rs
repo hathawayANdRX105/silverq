@@ -100,9 +100,10 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
     let measurer: Arc<dyn Measurer> = {
         #[cfg(feature = "meow")]
         {
-            Arc::new(meow::MeowMeasurer::with_probe(
+            Arc::new(meow::MeowMeasurer::with_bw_probe(
                 registry.clone(),
                 eff.probe_url.clone(),
+                eff.bw_probe_url.clone(),
             ))
         }
         #[cfg(not(feature = "meow"))]
@@ -366,6 +367,8 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
     // 改成"跑一轮 → sleep(间隔)"：冷启动首轮立即（sleep 在轮末，语义同
     // interval 的首 tick 立即），间隔每轮从共享调参现读，热改即时生效。
     let mut last_selection: Vec<String> = Vec::new();
+    // 轮计数器：吞吐批每 bw_interval_rounds 轮跑一次（每轮现读，热改即时生效）。
+    let mut round_no: u32 = 0;
 
     loop {
         let t = tuning.read().clone();
@@ -374,7 +377,12 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
         // 详见 decision::measurement_order 的文档（含为什么必须交错）。
         let batches = {
             let guard = pool.read().await;
-            decision::measurement_order(&guard, t.batch_size, t.timeout_penalty)
+            decision::measurement_order(
+                &guard,
+                t.batch_size,
+                t.timeout_penalty,
+                t.bw_penalty_per_efold_ms,
+            )
         };
         let round_started = std::time::Instant::now();
         progress.round_begin(batches.len());
@@ -396,30 +404,67 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
             // 随后本批的旧结果就把刚钉住的节点覆盖掉。
             // 实测：先缩小窗口（写锁内复查 pinned）仍有 2/5 概率被盖回 10 个候选；
             // 只有把计算也纳入临界区才彻底消除。
-            {
-                // selection 的唯一写者。pinned 时强制为 pin_target，
-                // 否则按 EWMA 选前 N。单写者消除了与 ctl/web 的双写竞争。
-                let target = pin_target.lock().clone();
-                let desired = match (&target, pinned.load(Ordering::Relaxed)) {
-                    (Some(tag), true) => vec![tag.clone()],
-                    _ => decision::select_top(&pool.read().await, t.capacity, t.timeout_penalty),
-                };
-                // select_top 现在会排除从未测通的节点，整池都还没测出活节点时
-                // 返回空。空 desired 不能覆盖冷启动种子——否则首轮测速全失败时
-                // 数据面连"瞎选的候选"都没有，请求必死。保留种子等下一轮。
-                if !desired.is_empty() {
-                    let mut sel_guard = selection.write().await;
-                    if *sel_guard != desired {
-                        *sel_guard = desired.clone();
-                        drop(sel_guard);
-                        publish_selector_store(&desired, &selector_store);
-                    }
-                    last_selection = desired;
-                }
-            }
+            // selection 的唯一写者（pinned 时强制 pin_target，否则按分数选前 N）
+            // —— 单写者消除与 ctl/web 的双写竞争，详见 reselect 注释。
+            reselect(
+                &pool,
+                &selection,
+                &pin_target,
+                &pinned,
+                &t,
+                &selector_store,
+                &mut last_selection,
+            )
+            .await;
 
             persist::save(&pool.read().await);
             progress.batch_done(persist::now_secs() as i64);
+        }
+
+        // 吞吐批：只跑当前 selection，每 bw_interval_rounds 轮一次。
+        // 延迟探针（generate_204）看不到带宽——握手 700ms 但只有 1Mbit 的
+        // 节点延迟分数比握手 900ms 但 20Mbit 的漂亮，真实页面却慢 4 倍。
+        // 不对全池跑：512KB × 40 节点 × 每轮 ≈ 80MB/轮探测流量，免费节点
+        // 撑不住，也跟用户真实流量抢带宽。pinned 时 selection 只有一个节点，
+        // 分数不影响选择，省下这次下载。
+        round_no = round_no.wrapping_add(1);
+        if t.bw_interval_rounds > 0
+            && round_no.is_multiple_of(t.bw_interval_rounds)
+            && !pinned.load(Ordering::Relaxed)
+        {
+            let bw_nodes: Vec<Node> = {
+                let sel = selection.read().await.clone();
+                let guard = pool.read().await;
+                sel.iter()
+                    .filter_map(|tag| guard.iter().find(|n| &n.tag == tag).cloned())
+                    .collect()
+            };
+            if !bw_nodes.is_empty() {
+                let results = batch::run_bw_batch(
+                    measurer.as_ref(),
+                    bw_nodes,
+                    t.bw_timeout_ms,
+                    t.bw_max_bytes,
+                    t.concurrency,
+                )
+                .await;
+                {
+                    let mut guard = pool.write().await;
+                    fast_path::apply_batch(&mut guard, &results);
+                }
+                // 吞吐分数改变排序，重算一次 selection。
+                reselect(
+                    &pool,
+                    &selection,
+                    &pin_target,
+                    &pinned,
+                    &t,
+                    &selector_store,
+                    &mut last_selection,
+                )
+                .await;
+                persist::save(&pool.read().await);
+            }
         }
 
         // 轮末淘汰：从未测通且连续失败达阈值的节点摘出池子（0 = 禁用）。
@@ -445,6 +490,42 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
         let iv = tuning.read().interval_secs;
         tokio::time::sleep(Duration::from_secs(iv)).await;
     }
+}
+
+/// 算 selection 并发布（共享选择 + meow SelectorStore）。
+///
+/// pinned 时强制为 pin_target，否则按分数选前 N。**desired 为空时不动**：
+/// select_top 会排除从未测通的节点，整池还没测出活节点时返回空，此时覆盖
+/// 冷启动种子会让数据面连"瞎选的候选"都没有，请求必死——保留种子等下一轮。
+async fn reselect(
+    pool: &Arc<RwLock<Vec<Node>>>,
+    selection: &SharedSelection,
+    pin_target: &Arc<parking_lot::Mutex<Option<String>>>,
+    pinned: &AtomicBool,
+    t: &settings::RuntimeTuning,
+    selector_store: &str,
+    last_selection: &mut Vec<String>,
+) {
+    let target = pin_target.lock().clone();
+    let desired = match (&target, pinned.load(Ordering::Relaxed)) {
+        (Some(tag), true) => vec![tag.clone()],
+        _ => decision::select_top(
+            &pool.read().await,
+            t.capacity,
+            t.timeout_penalty,
+            t.bw_penalty_per_efold_ms,
+        ),
+    };
+    if desired.is_empty() {
+        return;
+    }
+    let mut sel_guard = selection.write().await;
+    if *sel_guard != desired {
+        *sel_guard = desired.clone();
+        drop(sel_guard);
+        publish_selector_store(&desired, selector_store);
+    }
+    *last_selection = desired;
 }
 
 /// 切换执行器：写共享选择（数据面用）+ meow SelectorStore（外部 kernel 用）。

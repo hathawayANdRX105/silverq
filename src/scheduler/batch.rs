@@ -7,6 +7,10 @@ use tokio::time::timeout;
 pub struct Measurement {
     pub tag: String,
     pub delay_ms: Option<f64>, // None = timeout / failure
+    /// 带宽采样（bytes/sec）。None = 未探测或探测失败。
+    /// 与延迟独立：一个节点可以握手快（低延迟）但带宽只有 1Mbit，
+    /// 只测延迟会把这类「快但慢」的节点排在队首。
+    pub bw_bps: Option<f64>,
 }
 
 /// Trait for performing delay measurement on a node.
@@ -17,6 +21,13 @@ pub struct Measurement {
 pub trait Measurer: Send + Sync {
     /// Timeout nodes will be heavily penalized and moved to the back.
     async fn measure(&self, node: &Node, timeout_ms: u64) -> Option<f64>;
+
+    /// 有限字节下载探测：返回 bytes/sec。None = 失败/超时。
+    ///
+    /// 只在 selection 内的节点上跑（每 N 轮一次），不对全池跑：
+    /// 512KB × 40 节点 × 每轮 = 80MB/轮探测流量，免费节点撑不住，
+    /// 也会跟用户真实流量抢带宽。
+    async fn measure_bw(&self, node: &Node, timeout_ms: u64, max_bytes: u64) -> Option<f64>;
 }
 
 /// 空测速器：默认（无 meow feature）模式用，恒定返回 100ms。
@@ -29,6 +40,9 @@ pub struct NoopMeasurer;
 impl Measurer for NoopMeasurer {
     async fn measure(&self, _node: &Node, _timeout_ms: u64) -> Option<f64> {
         Some(100.0)
+    }
+    async fn measure_bw(&self, _node: &Node, _timeout_ms: u64, _max_bytes: u64) -> Option<f64> {
+        None // 无 meow 时不做带宽探测；score 里带宽项保持 0（不奖不罚）
     }
 }
 
@@ -79,10 +93,12 @@ pub async fn run_batch_owned<M: Measurer + ?Sized>(
                 Ok(Some(delay)) => Measurement {
                     tag: node.tag.clone(),
                     delay_ms: Some(delay),
+                    bw_bps: None,
                 },
                 _ => Measurement {
                     tag: node.tag.clone(),
                     delay_ms: None,
+                    bw_bps: None,
                 },
             }
         })
@@ -91,4 +107,35 @@ pub async fn run_batch_owned<M: Measurer + ?Sized>(
         .await;
 
     results
+}
+
+/// 对 selection 内的节点跑有限字节下载，测吞吐（bytes/sec）。
+///
+/// 与延迟批分离：延迟批全池每轮跑，吞吐批只跑 selection 且每 N 轮一次
+/// （`bw_interval_rounds`）。结果经 `apply_bw_batch` 写回节点的对数域 EWMA。
+pub async fn run_bw_batch<M: Measurer + ?Sized>(
+    measurer: &M,
+    nodes: Vec<Node>,
+    timeout_ms: u64,
+    max_bytes: u64,
+    concurrency: usize,
+) -> Vec<Measurement> {
+    stream::iter(nodes)
+        .map(|node| async move {
+            let bps = timeout(
+                Duration::from_millis(timeout_ms),
+                measurer.measure_bw(&node, timeout_ms, max_bytes),
+            )
+            .await
+            .ok()
+            .flatten();
+            Measurement {
+                tag: node.tag.clone(),
+                delay_ms: None,
+                bw_bps: bps,
+            }
+        })
+        .buffer_unordered(concurrency)
+        .collect()
+        .await
 }

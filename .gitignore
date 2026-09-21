@@ -7,3 +7,5 @@ __pycache__/
 
 # 本地任务书（agent 流程文档，与 kime 仓库同约定，不入库）
 .agent/
+.todo/
+.wt/
