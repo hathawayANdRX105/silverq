@@ -953,10 +953,10 @@ mod tests {
         // 失配、站点被错误地送进代理候选链。
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let (mut tx, (mut rx, _)) = tokio::join!(
-            async { TcpStream::connect(addr).await.unwrap() },
-            async { listener.accept().await.unwrap() },
-        );
+        let (mut tx, (mut rx, _)) =
+            tokio::join!(async { TcpStream::connect(addr).await.unwrap() }, async {
+                listener.accept().await.unwrap()
+            },);
         // ATYP=0x03（域名），长度 16
         let domain = b"www.bilibili.com";
         let mut req = vec![0x05, 0x01, 0x00, 0x03, domain.len() as u8];
