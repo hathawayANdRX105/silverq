@@ -1,7 +1,7 @@
 name: Build artifact
 
-# 手动触发：构建 meow-tun 二进制 → 冒烟 → 上传 workflow artifact，仅供本地部署取用。
-# 与 release.yml 的区别：不打 tag、不发 GitHub Release。
+# 手动触发：构建 meow-tun 二进制 → UPX 压缩 → 冒烟 → 上传 workflow artifact。
+# 与 release.yml 的区别：不打 tag、不发 GitHub Release，仅供本地部署取用。
 # 触发方式：gh workflow run build-artifact.yml --ref <branch>
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ env:
 
 jobs:
   build:
-    name: build meow-tun (no UPX)
+    name: build meow-tun + UPX
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,10 +34,12 @@ jobs:
 
       - name: 构建 meow-tun（release，性能最优 profile）
         # profile.release 已含 lto=fat / codegen-units=1 / opt-level=3 / strip。
-        # 不做 UPX：UPX --best --lzma 压过的二进制在本机 serve 启动约 10s 后
-        # 静默退出（无 panic），而同一 commit 未压缩的本地构建稳定运行；
-        # 长跑吞吐型 daemon 不值得为 10MB 体积冒这个险。
         run: cargo build --release --features meow-tun
+
+      - name: UPX 压缩
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq upx-ucl
+          upx --best --lzma target/release/silverq
 
       - name: 冒烟（--version / --help 正常）
         run: |
