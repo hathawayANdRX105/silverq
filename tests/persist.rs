@@ -106,6 +106,8 @@ fn stale_snapshot_is_rejected() {
             Score {
                 ewma: 42.0,
                 samples: 5,
+                bw_log: None,
+                bw_samples: 0,
             },
         )]),
     };
@@ -114,6 +116,46 @@ fn stale_snapshot_is_rejected() {
     let mut pool = vec![Node::new("a", "1.1.1.1", 443)];
     assert_eq!(load_from(&path, &mut pool), 0, "过期存档必须被拒");
     assert!(pool[0].score().is_infinite());
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// 带宽分数必须跟延迟一起 round-trip：重启后吞吐感知排序不能回退到
+/// 「未测过」的乐观初值，否则每轮都要重跑 512KB 下载才能排回真实顺序。
+/// 顺带守住 Option<f64> 的 JSON 边界——INFINITY 走 JSON 会变成 null，
+/// 序列化/反序列化路径必须被测一次。
+#[test]
+fn roundtrip_restores_bandwidth() {
+    let path = tmp_state("bw");
+
+    let mut pool = vec![
+        Node::new("fast", "1.1.1.1", 443),
+        Node::new("slow", "2.2.2.2", 443),
+    ];
+    pool[0].update(120.0);
+    pool[1].update(130.0);
+    pool[0].update_bw(262_144.0); // 256KB/s
+    pool[1].update_bw(16_384.0); // 16KB/s
+    save_to(&path, &pool);
+
+    // 全新池（延迟仍是 INFINITY）：恢复只看存档本身，不要求新池先有数据
+    let mut fresh = vec![
+        Node::new("fast", "1.1.1.1", 443),
+        Node::new("slow", "2.2.2.2", 443),
+    ];
+    assert_eq!(load_from(&path, &mut fresh), 2);
+
+    // 吞吐分数必须回来：快节点 ln 尺度上领先慢节点 ln(16)≈2.77
+    let (f, sl) = (fresh[0].bw_bps().unwrap(), fresh[1].bw_bps().unwrap());
+    assert!(
+        (f - 262_144.0).abs() / 262_144.0 < 0.02,
+        "快节点带宽应恢复，got {f}"
+    );
+    assert!(
+        (sl - 16_384.0).abs() / 16_384.0 < 0.02,
+        "慢节点带宽应恢复，got {sl}"
+    );
+    assert!(f > sl * 10.0);
 
     let _ = std::fs::remove_file(path);
 }

@@ -1,6 +1,6 @@
 use silverq::scheduler::decision::*;
 use silverq::scheduler::node::Node;
-use silverq::scheduler::node::DEFAULT_FAILURE_PENALTY_MS;
+use silverq::scheduler::node::{DEFAULT_BW_PENALTY_PER_EFOLD_MS, DEFAULT_FAILURE_PENALTY_MS};
 
 fn measured(tag: &str, ms: f64) -> Node {
     let mut n = Node::new(tag, "1.1.1.1", 443);
@@ -17,17 +17,33 @@ fn select_top_orders_by_score_and_respects_capacity() {
         measured("mid", 200.0),
     ];
     assert_eq!(
-        select_top(&pool, 2, DEFAULT_FAILURE_PENALTY_MS),
+        select_top(
+            &pool,
+            2,
+            DEFAULT_FAILURE_PENALTY_MS,
+            DEFAULT_BW_PENALTY_PER_EFOLD_MS
+        ),
         vec!["fast", "mid"]
     );
     // 从未测通的节点不进 selection：进去只是占 active 名额让数据面 dial 必死节点
     assert_eq!(
-        select_top(&pool, 10, DEFAULT_FAILURE_PENALTY_MS),
+        select_top(
+            &pool,
+            10,
+            DEFAULT_FAILURE_PENALTY_MS,
+            DEFAULT_BW_PENALTY_PER_EFOLD_MS
+        ),
         vec!["fast", "mid", "slow"],
         "capacity 超活节点数时只给活的，不拿没测过的凑数"
     );
     assert!(
-        !select_top(&pool, 4, DEFAULT_FAILURE_PENALTY_MS).contains(&"never".to_string()),
+        !select_top(
+            &pool,
+            4,
+            DEFAULT_FAILURE_PENALTY_MS,
+            DEFAULT_BW_PENALTY_PER_EFOLD_MS
+        )
+        .contains(&"never".to_string()),
         "从未测通的节点绝不能出现在 selection"
     );
 }
@@ -38,7 +54,13 @@ fn select_top_all_unmeasured_returns_empty() {
     let pool: Vec<Node> = (0..5)
         .map(|i| Node::new(format!("u{i}"), "2.2.2.2", 443))
         .collect();
-    assert!(select_top(&pool, 10, DEFAULT_FAILURE_PENALTY_MS).is_empty());
+    assert!(select_top(
+        &pool,
+        10,
+        DEFAULT_FAILURE_PENALTY_MS,
+        DEFAULT_BW_PENALTY_PER_EFOLD_MS
+    )
+    .is_empty());
 }
 
 /// 曾测通但当前连续失败的节点仍保留资格（罚分在 score 里算，靠后但不除名），
@@ -49,7 +71,12 @@ fn select_top_keeps_failing_but_once_alive_nodes() {
     dead_now.penalize();
     dead_now.penalize();
     let pool = vec![dead_now, Node::new("fresh", "2.2.2.2", 443)];
-    let sel = select_top(&pool, 5, DEFAULT_FAILURE_PENALTY_MS);
+    let sel = select_top(
+        &pool,
+        5,
+        DEFAULT_FAILURE_PENALTY_MS,
+        DEFAULT_BW_PENALTY_PER_EFOLD_MS,
+    );
     assert_eq!(sel, vec!["was-alive"]);
 }
 
@@ -65,7 +92,12 @@ fn first_batch_mixes_known_and_unmeasured() {
         pool.push(Node::new(format!("u{i}"), "2.2.2.2", 443));
     }
 
-    let batches = measurement_order(&pool, 4, DEFAULT_FAILURE_PENALTY_MS);
+    let batches = measurement_order(
+        &pool,
+        4,
+        DEFAULT_FAILURE_PENALTY_MS,
+        DEFAULT_BW_PENALTY_PER_EFOLD_MS,
+    );
     let first: Vec<&str> = batches[0].iter().map(|n| n.tag.as_str()).collect();
 
     assert!(
@@ -87,7 +119,12 @@ fn every_node_is_measured_exactly_once() {
         pool.push(Node::new(format!("u{i}"), "2.2.2.2", 443));
     }
 
-    let batches = measurement_order(&pool, 3, DEFAULT_FAILURE_PENALTY_MS);
+    let batches = measurement_order(
+        &pool,
+        3,
+        DEFAULT_FAILURE_PENALTY_MS,
+        DEFAULT_BW_PENALTY_PER_EFOLD_MS,
+    );
     let mut seen: Vec<String> = batches
         .iter()
         .flat_map(|b| b.iter().map(|n| n.tag.clone()))
@@ -102,13 +139,23 @@ fn handles_all_unmeasured_and_all_known() {
     let all_new: Vec<Node> = (0..7)
         .map(|i| Node::new(format!("u{i}"), "1.1.1.1", 443))
         .collect();
-    let b = measurement_order(&all_new, 3, DEFAULT_FAILURE_PENALTY_MS);
+    let b = measurement_order(
+        &all_new,
+        3,
+        DEFAULT_FAILURE_PENALTY_MS,
+        DEFAULT_BW_PENALTY_PER_EFOLD_MS,
+    );
     assert_eq!(b.iter().map(|x| x.len()).sum::<usize>(), 7);
 
     let all_known: Vec<Node> = (0..5)
         .map(|i| measured(&format!("k{i}"), i as f64 * 10.0 + 1.0))
         .collect();
-    let b = measurement_order(&all_known, 2, DEFAULT_FAILURE_PENALTY_MS);
+    let b = measurement_order(
+        &all_known,
+        2,
+        DEFAULT_FAILURE_PENALTY_MS,
+        DEFAULT_BW_PENALTY_PER_EFOLD_MS,
+    );
     assert_eq!(b.iter().map(|x| x.len()).sum::<usize>(), 5);
 }
 
@@ -132,7 +179,12 @@ fn reload_adopts_scores_so_selection_survives() {
             n.adopt_score(o);
         }
     }
-    let top = select_top(&new_pool, 10, DEFAULT_FAILURE_PENALTY_MS);
+    let top = select_top(
+        &new_pool,
+        10,
+        DEFAULT_FAILURE_PENALTY_MS,
+        DEFAULT_BW_PENALTY_PER_EFOLD_MS,
+    );
     assert_eq!(
         top,
         vec!["a".to_string(), "b".to_string()],

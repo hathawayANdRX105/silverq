@@ -70,8 +70,25 @@ optional = true
 
 [features]
 default = []
-meow = ["meow-proxy", "meow-common", "meow-transport"]
+meow = ["meow-proxy", "meow-common", "meow-transport", "tokio-rustls", "rustls", "webpki-roots"]
 meow-tun = ["meow", "meow-listener", "meow-tunnel", "meow-dns", "meow-trie", "meow-rules", "ipnet", "smol_str"]
+
+[dependencies.tokio-rustls]
+version = "0.26"
+optional = true
+default-features = false
+features = ["ring", "tls12"]
+
+# tokio-rustls 0.26 的 ring feature 不再传递 rustls 自身的 ring，需显式开。
+[dependencies.rustls]
+version = "0.23"
+optional = true
+default-features = false
+features = ["ring", "tls12", "std"]
+
+[dependencies.webpki-roots]
+version = "0.26"
+optional = true
 
 [dev-dependencies]
 tokio-test = "0.4"

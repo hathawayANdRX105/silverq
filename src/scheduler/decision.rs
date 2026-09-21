@@ -12,11 +12,16 @@ use crate::scheduler::node::Node;
 /// 烧掉 fallback 槽位后还是兜底直连。池子半死时这会把死节点成批塞进队首
 /// （实测 789 池只剩 3 个活节点时，剩 7 个名额被 nodes.yaml 开头的手工 VLESS
 /// 死节点占走）。活节点不够 capacity 就少给，不拿死节点凑。
-pub fn select_top(nodes: &[Node], capacity: usize, penalty_ms: f64) -> Vec<String> {
+pub fn select_top(
+    nodes: &[Node],
+    capacity: usize,
+    penalty_ms: f64,
+    bw_penalty_per_efold_ms: f64,
+) -> Vec<String> {
     let mut ranked: Vec<_> = nodes.iter().filter(|n| n.ewma.is_finite()).collect();
     ranked.sort_by(|a, b| {
-        a.score_with(penalty_ms)
-            .partial_cmp(&b.score_with(penalty_ms))
+        a.score_with(penalty_ms, bw_penalty_per_efold_ms)
+            .partial_cmp(&b.score_with(penalty_ms, bw_penalty_per_efold_ms))
             .unwrap()
     });
     ranked
@@ -32,12 +37,17 @@ pub fn select_top(nodes: &[Node], capacity: usize, penalty_ms: f64) -> Vec<Strin
 /// 为什么要交错：初始时所有节点分数都是 `INFINITY`，纯按分数排序等于配置顺序，
 /// 活节点若排在池子后部会很久测不到。实测真实池 217 节点时，50s 内测了 99 个
 /// 全失败，而同时 sing-box 已测出 7 个活节点 —— 它们都排在后面还没轮到。
-pub fn measurement_order(nodes: &[Node], batch_size: usize, penalty_ms: f64) -> Vec<Vec<Node>> {
+pub fn measurement_order(
+    nodes: &[Node],
+    batch_size: usize,
+    penalty_ms: f64,
+    bw_penalty_per_efold_ms: f64,
+) -> Vec<Vec<Node>> {
     let (mut known, unmeasured): (Vec<Node>, Vec<Node>) =
         nodes.iter().cloned().partition(|n| n.samples > 0);
     known.sort_by(|a, b| {
-        a.score_with(penalty_ms)
-            .partial_cmp(&b.score_with(penalty_ms))
+        a.score_with(penalty_ms, bw_penalty_per_efold_ms)
+            .partial_cmp(&b.score_with(penalty_ms, bw_penalty_per_efold_ms))
             .unwrap()
     });
 

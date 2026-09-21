@@ -43,9 +43,18 @@ pub struct SchedulerSection {
     /// 超时扣分幅度（毫秒）
     pub timeout_penalty: f64,
     /// 探测 URL（generate_204 风格）
-    #[cfg_attr(not(feature = "meow"), allow(dead_code))] // meow 模式才发探测请求
     pub probe_url: String,
-    /// 淘汰硬指标：连续失败 ≥ N 触发淘汰检查（0 = 禁用）。
+    /// 带宽探测 URL（有限字节下载端点，generate_204 无 body 不能用）。
+    #[cfg_attr(not(feature = "meow"), allow(dead_code))]
+    pub bw_probe_url: String,
+    /// 带宽探测每 N 轮延迟测速跑一次（1 = 每轮）。
+    pub bw_interval_rounds: u32,
+    /// 带宽探测单节点超时（ms）。
+    pub bw_timeout_ms: u64,
+    /// 带宽探测最多读取字节数（读满即断开，控流量）。
+    pub bw_max_bytes: u64,
+    /// 每降低 e 倍吞吐相当于加多少 ms 延迟（融合权重，见 Node::score_with）。
+    pub bw_penalty_per_efold_ms: f64,
     /// 从未测通的节点立即摘；曾测通过的进入延长保活。
     pub retire_max_failures: u32,
     /// 延长保活：曾测通过的节点连续失败持续满该时长（秒）才摘。
@@ -65,6 +74,11 @@ impl Default for SchedulerSection {
             concurrency: crate::config::DEFAULT_CONCURRENCY,
             timeout_penalty: crate::config::DEFAULT_TIMEOUT_PENALTY,
             probe_url: crate::config::DEFAULT_PROBE_URL.to_string(),
+            bw_probe_url: crate::config::DEFAULT_BW_PROBE_URL.to_string(),
+            bw_interval_rounds: crate::config::DEFAULT_BW_INTERVAL_ROUNDS,
+            bw_timeout_ms: crate::config::DEFAULT_BW_TIMEOUT_MS,
+            bw_max_bytes: crate::config::DEFAULT_BW_MAX_BYTES,
+            bw_penalty_per_efold_ms: crate::config::DEFAULT_BW_PENALTY_PER_EFOLD_MS,
             retire_max_failures: crate::config::DEFAULT_RETIRE_MAX_FAILURES,
             retire_keep_alive_secs: crate::config::DEFAULT_RETIRE_KEEP_ALIVE_SECS,
             retire_min_pool: crate::config::DEFAULT_RETIRE_MIN_POOL,
@@ -212,8 +226,14 @@ pub struct Effective {
     pub timeout_penalty: f64,
     #[cfg_attr(not(feature = "meow"), allow(dead_code))] // meow 模式才发探测请求
     pub probe_url: String,
+    #[cfg_attr(not(feature = "meow"), allow(dead_code))]
+    pub bw_probe_url: String,
+    pub bw_interval_rounds: u32,
+    pub bw_timeout_ms: u64,
+    pub bw_max_bytes: u64,
+    pub bw_penalty_per_efold_ms: f64,
     pub listen: String,
-    #[cfg_attr(not(feature = "meow"), allow(dead_code))] // web 面板仅 meow 模式
+    /// Web 面板监听（无认证，只绑回环）
     pub web_listen: String,
     pub fallback_attempts: usize,
     pub retire_max_failures: u32,
@@ -271,9 +291,12 @@ fn env_parsed_or<T: std::str::FromStr>(key: &str, v: T) -> T {
 ///
 /// 从 `Effective` 播种，运行期经 `PATCH /configs` 热改；**不写回 silverq.toml**
 /// —— 程序改写用户带注释的 TOML 是破坏性的，持久化仍以手改文件为准，
-/// 面板上会提示"重启后回落到文件值"。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RuntimeTuning {
+    pub bw_interval_rounds: u32,
+    pub bw_timeout_ms: u64,
+    pub bw_max_bytes: u64,
+    pub bw_penalty_per_efold_ms: f64,
     pub capacity: usize,
     pub batch_size: usize,
     pub interval_secs: u64,
@@ -289,6 +312,10 @@ pub struct RuntimeTuning {
 impl RuntimeTuning {
     pub fn from_eff(eff: &Effective) -> Self {
         Self {
+            bw_interval_rounds: eff.bw_interval_rounds,
+            bw_timeout_ms: eff.bw_timeout_ms,
+            bw_max_bytes: eff.bw_max_bytes,
+            bw_penalty_per_efold_ms: eff.bw_penalty_per_efold_ms,
             capacity: eff.capacity,
             batch_size: eff.batch_size,
             interval_secs: eff.interval_secs,
@@ -306,6 +333,8 @@ impl RuntimeTuning {
     /// 夹到安全范围。并发 < 批大小时批内排队（buffer_unordered 语义），
     /// 这里不强制并发 ≥ batch，只保证非零与上限，让用户自己权衡。
     pub fn validated(mut self) -> Self {
+        self.bw_interval_rounds = self.bw_interval_rounds.clamp(1, 60);
+        self.bw_timeout_ms = self.bw_timeout_ms.clamp(1000, 30_000);
         self.capacity = self.capacity.clamp(1, 50);
         self.batch_size = self.batch_size.clamp(1, 100);
         self.interval_secs = self.interval_secs.clamp(5, 3600);
@@ -334,6 +363,17 @@ impl Effective {
             concurrency: env_parsed_or("SILVERQ_CONCURRENCY", fc.scheduler.concurrency),
             timeout_penalty: env_parsed_or("SILVERQ_TIMEOUT_PENALTY", fc.scheduler.timeout_penalty),
             probe_url: env_or("SILVERQ_PROBE_URL", fc.scheduler.probe_url.clone()),
+            bw_probe_url: env_or("SILVERQ_BW_PROBE_URL", fc.scheduler.bw_probe_url.clone()),
+            bw_interval_rounds: env_parsed_or(
+                "SILVERQ_BW_INTERVAL_ROUNDS",
+                fc.scheduler.bw_interval_rounds,
+            ),
+            bw_timeout_ms: env_parsed_or("SILVERQ_BW_TIMEOUT_MS", fc.scheduler.bw_timeout_ms),
+            bw_max_bytes: env_parsed_or("SILVERQ_BW_MAX_BYTES", fc.scheduler.bw_max_bytes),
+            bw_penalty_per_efold_ms: env_parsed_or(
+                "SILVERQ_BW_PENALTY_PER_EFOLD_MS",
+                fc.scheduler.bw_penalty_per_efold_ms,
+            ),
             listen: env_or("SILVERQ_LISTEN", fc.data_plane.listen.clone()),
             web_listen: std::env::var("SILVERQ_WEB_LISTEN").unwrap_or_else(|_| {
                 fc.data_plane

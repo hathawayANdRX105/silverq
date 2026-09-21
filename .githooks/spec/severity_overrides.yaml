@@ -67,4 +67,5 @@
 #   PR-05: "INFO"
 #   PR-LABEL-DOMAIN: "WARN"  # 域 label 建议降级为提示, 不阻断
 
-severity_overrides: {}
+severity_overrides:
+  CM-02: "WARN"

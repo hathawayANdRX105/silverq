@@ -4,6 +4,8 @@ pub mod dns;
 #[cfg(feature = "meow")]
 pub mod factory;
 #[cfg(feature = "meow")]
+pub mod http_probe;
+#[cfg(feature = "meow")]
 pub mod meow;
 pub mod nodespec;
 pub mod route;

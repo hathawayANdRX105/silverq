@@ -38,6 +38,25 @@ pub const DEFAULT_TUN_EXCLUDE_CIDRS: &[&str] = &[
 #[cfg_attr(not(feature = "meow"), allow(dead_code))]
 pub const DEFAULT_PROBE_URL: &str = "https://www.gstatic.com/generate_204";
 
+/// 带宽探测端点：必须能下发有限字节 body（generate_204 无 body，不能用）。
+/// cloudflare __down 按 `bytes=` 参数精确下发，是公开稳定的下载端点。
+#[cfg_attr(not(feature = "meow"), allow(dead_code))]
+pub const DEFAULT_BW_PROBE_URL: &str = "https://speed.cloudflare.com/__down?bytes=524288";
+
+/// 带宽探测每 N 轮延迟测速跑一次。3 ≈ 4.5min（90s/轮）：
+/// 每轮跑会让 selection 节点持续多背 512KB×N 的探测流量。
+pub const DEFAULT_BW_INTERVAL_ROUNDS: u32 = 3;
+
+/// 带宽探测单节点超时（ms）。比延迟探测长——要真下载数据，
+/// 1Mbit 节点拉 512KB 需 4s，4s 超时会让慢节点永远测不到带宽（永远乐观）。
+pub const DEFAULT_BW_TIMEOUT_MS: u64 = 8000;
+
+/// 带宽探测最多读取的字节数，读满即断开。
+pub const DEFAULT_BW_MAX_BYTES: u64 = 524288; // 512 KiB
+
+/// 每降低 e 倍（≈2.72x）吞吐，排序上相当于加多少 ms 延迟（见 Node::score_with）。
+pub const DEFAULT_BW_PENALTY_PER_EFOLD_MS: f64 = 1500.0;
+
 fn env_parsed<T: std::str::FromStr>(key: &str, default: T) -> T {
     std::env::var(key)
         .ok()

@@ -28,10 +28,10 @@ const MAX_AGE_SECS: u64 = 6 * 3600;
 /// 存档格式版本。
 ///
 /// v1 的 `ewma` 掺了失败罚分（`ewma += 3000`），不是纯实测延迟；
-/// 现在 `ewma` 只由成功测速写入，罚分单独记在 `consecutive_failures`。
-/// 读到非当前版本一律丢弃重测 —— 把 v1 的 7512ms 当真实延迟恢复，
+/// v2 的 `ewma` 干净了，但没有带宽分数；v3 加上 `bw_log`/`bw_samples`。
+/// 读取非当前版本一律丢弃重测 —— 把 v1 的 7512ms 当真实延迟恢复，
 /// 会让一个 1.5s 的活节点长期排在后面。
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -48,6 +48,11 @@ pub struct Snapshot {
 pub struct Score {
     pub ewma: f64,
     pub samples: u32,
+    /// ln(bytes/s)。None = 从未测过吞吐（不恢复带宽分数，保持乐观初值）。
+    /// 用 Option 而非 f64：JSON 里 INFINITY 会写成 null、读回来变成 NaN，
+    /// Option 让「未测过」有明确表示，不靠特殊浮点值约定。
+    pub bw_log: Option<f64>,
+    pub bw_samples: u32,
 }
 
 /// 存档路径（`SILVERQ_STATE` 可覆盖）。
@@ -91,6 +96,12 @@ pub fn save_to(path: &std::path::Path, nodes: &[Node]) {
                     Score {
                         ewma: n.ewma,
                         samples: n.samples,
+                        bw_log: if n.bw_samples > 0 && n.bw_log.is_finite() {
+                            Some(n.bw_log)
+                        } else {
+                            None
+                        },
+                        bw_samples: n.bw_samples,
                     },
                 )
             })
@@ -161,6 +172,9 @@ pub fn load_from(path: &std::path::Path, nodes: &mut [Node]) -> usize {
         if let Some(s) = snapshot.scores.get(&n.tag) {
             if s.ewma.is_finite() && s.samples > 0 {
                 n.restore_score(s.ewma, s.samples);
+                if let Some(bw_log) = s.bw_log {
+                    n.restore_bw(bw_log, s.bw_samples);
+                }
                 restored += 1;
             }
         }

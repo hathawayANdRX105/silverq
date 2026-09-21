@@ -241,7 +241,12 @@ async fn do_reload(state: &CtlState, path_arg: Option<&str>) -> Result<String, S
     *state.nodes_path.lock() = path.clone();
     if !state.pinned.load(Ordering::Relaxed) {
         let t = state.tuning.read().clone();
-        let top = crate::scheduler::decision::select_top(&pool, t.capacity, t.timeout_penalty);
+        let top = crate::scheduler::decision::select_top(
+            &pool,
+            t.capacity,
+            t.timeout_penalty,
+            t.bw_penalty_per_efold_ms,
+        );
         *state.selection.write().await = top.clone();
         return Ok(format!("reloaded {path} ({top:?})"));
     }
@@ -279,6 +284,7 @@ async fn do_select(state: &CtlState, arg: Option<&str>) -> Result<String, String
             &state.pool.read().await,
             t.capacity,
             t.timeout_penalty,
+            t.bw_penalty_per_efold_ms,
         );
         *state.selection.write().await = top.clone();
         return Ok(format!("auto (unpinned, {top:?})"));
