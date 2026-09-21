@@ -44,7 +44,7 @@ fn full_example_parses() {
 [scheduler]
 capacity = 8
 interval_secs = 20
-probe_url = "http://127.0.0.1:1/"
+probe_urls = ["http://127.0.0.1:1/", "http://127.0.0.1:2/"]
 
 [data_plane]
 listen = "127.0.0.1:19999"
@@ -56,6 +56,11 @@ state = "/tmp/s.json"
     );
     let cfg = load(&p).unwrap();
     assert_eq!(cfg.scheduler.capacity, 8);
+    // 多目标探测：列表顺序保留，供 measure() 逐个握手。
+    assert_eq!(
+        cfg.scheduler.probe_urls,
+        vec!["http://127.0.0.1:1/", "http://127.0.0.1:2/"]
+    );
     assert_eq!(cfg.data_plane.listen, "127.0.0.1:19999");
     assert_eq!(cfg.data_plane.fallback_attempts, 2);
     assert_eq!(cfg.paths.state, "/tmp/s.json");

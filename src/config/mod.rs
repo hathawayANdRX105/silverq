@@ -72,13 +72,25 @@ fn env_parsed<T: std::str::FromStr>(key: &str, default: T) -> T {
 
 /// 解析探测目标列表：逗号分隔（SILVERQ_PROBE_URL=a,b），空则回落默认单目标。
 pub fn probe_urls() -> Vec<String> {
-    match std::env::var("SILVERQ_PROBE_URL") {
-        Ok(v) if !v.trim().is_empty() => v
-            .split(',')
-            .map(|x| x.trim().to_string())
-            .filter(|x| !x.is_empty())
-            .collect(),
-        _ => vec![DEFAULT_PROBE_URL.to_string()],
+    split_probe_urls(&std::env::var("SILVERQ_PROBE_URL").unwrap_or_default())
+}
+
+/// 纯函数：把 env 值切成探测目标列表。
+/// - 空串/全空白 → 回落默认单目标（旧配置与未设置 env 的行为不变）
+/// - 逗号分隔，逐项去空白，丢弃空项（"a,,b" → [a,b]）
+///
+/// 抽成纯函数是因为这里最容易写错：若把空项留下来，measure() 会去拨一个
+/// 空 URL 的目标，整池节点被判废。split_probe_urls 单测直接守住这条线。
+pub fn split_probe_urls(raw: &str) -> Vec<String> {
+    let items: Vec<String> = raw
+        .split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect();
+    if items.is_empty() {
+        vec![DEFAULT_PROBE_URL.to_string()]
+    } else {
+        items
     }
 }
 
@@ -87,4 +99,39 @@ pub fn probe_urls() -> Vec<String> {
 #[cfg_attr(not(feature = "meow"), allow(dead_code))]
 pub fn fallback_attempts() -> usize {
     env_parsed("SILVERQ_FALLBACK_ATTEMPTS", 3)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_probe_urls_single() {
+        assert_eq!(
+            split_probe_urls("https://www.gstatic.com/generate_204"),
+            vec!["https://www.gstatic.com/generate_204"]
+        );
+    }
+
+    #[test]
+    fn split_probe_urls_multiple_trims_and_drops_empties() {
+        // SNI 白名单检测的实际配置形态：两个目标，带空白和空项
+        assert_eq!(
+            split_probe_urls(" https://a/generate_204 , https://b/generate_204 , "),
+            vec!["https://a/generate_204", "https://b/generate_204"]
+        );
+        // 中间空项必须丢弃，否则 measure() 会去拨空 URL，整池误判废
+        assert_eq!(
+            split_probe_urls("https://a/,,https://b/"),
+            vec!["https://a/", "https://b/"]
+        );
+    }
+
+    #[test]
+    fn split_probe_urls_empty_falls_back_to_default() {
+        // 未设置 env 或写空：行为必须等价于旧的单目标配置
+        assert_eq!(split_probe_urls(""), vec![DEFAULT_PROBE_URL]);
+        assert_eq!(split_probe_urls("   "), vec![DEFAULT_PROBE_URL]);
+        assert_eq!(split_probe_urls(",,,,"), vec![DEFAULT_PROBE_URL]);
+    }
 }
