@@ -107,11 +107,13 @@ enum Proto {
     Http,
 }
 
-/// SOCKS5 命令。HTTP-CONNECT 永远是 Connect。
+/// SOCKS5 命令。HTTP-CONNECT 是 Connect；透明 HTTP 代理（GET/POST 绝对 URI）
+/// 是 HttpProxy——后者不回协议应答，上游响应直接流回客户端。
 #[derive(PartialEq, Clone, Copy)]
 enum Cmd {
     Connect,
     UdpAssociate,
+    HttpProxy,
 }
 
 pub struct Target {
@@ -119,6 +121,10 @@ pub struct Target {
     pub port: u16,
     proto: Proto,
     cmd: Cmd,
+    /// 已从客户端读走、隧道建立后需原样回放给上游的字节。
+    /// CONNECT / SOCKS5 / 透明代理三者里只有透明代理非空（请求行+全部头部，
+    /// 精确到空行），其余协议握手本身不含有效载荷。
+    pub replay: Vec<u8>,
 }
 
 /// handle_one 的共享上下文（参数打包：7 个以上就被 clippy 拦了）。
@@ -178,16 +184,19 @@ async fn handle_one(
                 .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
                 .await?
         }
-        Proto::Http => {
+        // CONNECT：隧道已建立，回 200 后开始双向裸拷贝。
+        Proto::Http if target.cmd == Cmd::Connect => {
             socket
                 .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 .await?
         }
+        // 透明 HTTP 代理：不回协议应答——请求行+头部已随隧道回放给上游，
+        // 源站的响应会直接流回客户端；这里写 200 会插进响应流造成污染。
+        Proto::Http => {}
     }
 
     // 直连判定（跳过候选链）：
     // - 回环/私网目标：语义对齐 TUN 数据面的私网安全网——这类地址只在
-    //   silverq 本机/局域网有意义，送进候选链会拨到节点自己的网络。
     // - 国内域名：直连更快；域名形态必须先经真实 DNS 解析——系统解析在
     //   fake-IP 环境返回假地址，按域名直连会被路由回自家隧道。
     //   解析失败回退候选链（表命中但站点异常时仍有代理兜底）。
@@ -414,7 +423,7 @@ async fn handle_one(
     };
     let _ = peer;
 
-    let fr = relay(socket, conn, dt.first_response()).await;
+    let fr = relay(socket, conn, dt.first_response(), target.replay).await;
     if cache_eligible {
         match fr {
             Ok(Some(d)) => ctx
@@ -436,45 +445,57 @@ async fn handle_one(
 }
 
 /// 双向中继，带"对端首次响应"超时。
-/// Ok(Some(d)) = 有数据，d = 首响应耗时（从转发客户端首包起算，供路由缓存）；
+/// Ok(Some(d)) = 有数据，d = 首响应耗时（从读取上游首响起到收到首字节，供路由缓存）；
 /// Ok(None) = 无数据结束（对端正常关闭/客户端早退）。
 /// 客户端侧早退的读写错误也以 Err 返回，会被上游计为路线 Failed——噪声
 /// 可接受（一次误标只多触发一次无害竞速）。
+/// `replay` = 已从客户端读走、需在隧道建立后先回放给上游的字节（透明 HTTP
+/// 代理的请求行+头部；CONNECT / SOCKS5 为空）。
 async fn relay(
     socket: TcpStream,
     conn: Box<dyn meow_common::conn::ProxyConn>,
     first_response: Duration,
+    replay: Vec<u8>,
 ) -> Result<Option<Duration>, Box<dyn std::error::Error + Send + Sync>> {
     let (mut cr, mut cw) = tokio::io::split(socket);
     let (mut pr, mut pw) = tokio::io::split(conn);
 
-    // 1. 先转发客户端的第一批数据（不等就永远收不到响应）
-    let mut buf = vec![0u8; 16 * 1024];
-    let n = cr.read(&mut buf).await?;
-    if n == 0 {
-        return Ok(None); // 客户端直接关了
+    // 1. 回放已读走的客户端字节（透明代理的请求行+头部），再让两个方向并发跑。
+    //    不能先阻塞读客户端首包：HTTP 代理的 GET 没有正文，客户端发完头部就
+    //    等响应，serial read→write→read 会死锁；POST 的正文也要等上游读走
+    //    头部后才继续发。回放必须放在并发拷贝之前——上游没收到请求行就不会回。
+    if !replay.is_empty() {
+        pw.write_all(&replay).await?;
+        pw.flush().await?;
     }
-    pw.write_all(&buf[..n]).await?;
-    pw.flush().await?;
 
-    // 2. 等对端首次响应；超时 = 黑洞，让调用方感知
+    // 2. 两个方向并发，任一方向结束即拆隧道（select! 而非 join!：join! 要
+    //    等两边都完，黑洞节点的客户端侧会挂到客户端自己超时，比改前更差；
+    //    丢掉未完的一侧 ≈ 旧的即时 RST 拆除语义）。
+    let mut up_buf = vec![0u8; 16 * 1024];
     let t0 = std::time::Instant::now();
-    let first = match tokio::time::timeout(first_response, pr.read(&mut buf)).await {
-        Ok(Ok(0)) => return Ok(None), // 对端正常关闭
-        Ok(Ok(n)) => n,
-        Ok(Err(e)) => return Err(e.into()),
-        Err(_) => {
-            return Err(format!("对端 {first_response:?} 内无响应（黑洞节点）").into());
-        }
+    let up = async {
+        // 先等上游首次响应（超时 = 黑洞，让调用方感知），再转常规拷贝
+        let first = match tokio::time::timeout(first_response, pr.read(&mut up_buf)).await {
+            Ok(Ok(0)) => return Ok(None), // 对端正常关闭
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                return Err(format!("对端 {first_response:?} 内无响应（黑洞节点）").into());
+            }
+        };
+        cw.write_all(&up_buf[..first]).await?;
+        let d = t0.elapsed();
+        tokio::io::copy(&mut pr, &mut cw).await?;
+        Ok(Some(d))
     };
-    cw.write_all(&buf[..first]).await?;
+    let down = tokio::io::copy(&mut cr, &mut pw);
 
-    // 3. 首次响应已到，进入常规无超时双向拷贝
-    let _ = tokio::join!(
-        tokio::io::copy(&mut cr, &mut pw),
-        tokio::io::copy(&mut pr, &mut cw)
-    );
-    Ok(Some(t0.elapsed()))
+    tokio::select! {
+        r = up => r,
+        // 客户端侧先结束：拆隧道，不区分正常关闭与错误（误标可接受）
+        _ = down => Ok(None),
+    }
 }
 
 /// SOCKS5 握手协商：VER 已被调用方读掉，这里读 NMETHODS + METHODS，
@@ -517,6 +538,7 @@ pub async fn read_socks5_target(
                 port: 0,
                 proto: Proto::Socks5,
                 cmd: Cmd::Connect,
+                replay: vec![],
             });
         }
     };
@@ -554,6 +576,7 @@ pub async fn read_socks5_target(
                 port: 0,
                 proto: Proto::Socks5,
                 cmd,
+                replay: vec![],
             });
         }
     };
@@ -576,46 +599,56 @@ pub async fn read_socks5_target(
         port,
         proto: Proto::Socks5,
         cmd,
+        replay: vec![],
     })
 }
 
+/// 解析 HTTP 代理请求：CONNECT 或透明代理（GET/POST 绝对 URI）。
+///
+/// 读走的原始字节全部累积进 `replay`：透明代理模式下请求行+头部要原样
+/// 回放给上游（上游看到的是一个完整的 HTTP 请求）；CONNECT 模式不需要回放，
+/// 但读路径必须统一——头部必须精确读到空行为止，残留字节会被拷进隧道，
+/// 污染客户端 TLS ClientHello。
 pub async fn read_http_connect_target(
     socket: &mut TcpStream,
     first_byte: u8,
 ) -> Result<Target, Box<dyn std::error::Error + Send + Sync>> {
     // 首字节已被调用方消耗，补回后读完方法行
-    let mut line = String::from(first_byte as char);
+    let mut raw: Vec<u8> = vec![first_byte];
     let mut b = [0u8; 1];
     loop {
         socket.read_exact(&mut b).await.map_err(|e| e.to_string())?;
-        line.push(b[0] as char);
+        raw.push(b[0]);
         if b[0] == b'\n' {
             break;
         }
-        if line.len() > 1024 {
-            return Ok(Target {
-                host: String::new(),
-                port: 0,
-                proto: Proto::Http,
-                cmd: Cmd::Connect,
-            });
+        if raw.len() > 1024 {
+            return Ok(bad_request(socket).await);
         }
     }
 
-    // 读完剩余头部，直到空行（CRLF CRLF）。
-    // 必须精确停在空行后：残留字节会被拷进隧道，污染客户端 TLS ClientHello。
+    // 请求行：METHOD SP REQUEST-TARGET SP HTTP-VERSION
+    let line = String::from_utf8_lossy(&raw).into_owned();
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return Ok(bad_request(socket).await);
+    }
+    let is_connect = parts[0].eq_ignore_ascii_case("CONNECT");
+
+    // 读完剩余头部，直到空行（CRLF CRLF），全部累积进 raw
     let mut header_bytes = 0usize;
     loop {
         let mut cur = Vec::with_capacity(64);
         loop {
             socket.read_exact(&mut b).await.map_err(|e| e.to_string())?;
             header_bytes += 1;
+            raw.push(b[0]);
             if b[0] == b'\n' {
                 break;
             }
             cur.push(b[0]);
             if header_bytes > 16 * 1024 {
-                return Err("http connect: headers too large".into());
+                return Err("http: headers too large".into());
             }
         }
         // 空行（只剩 \r 或什么都没有）= 头部结束
@@ -623,38 +656,90 @@ pub async fn read_http_connect_target(
             break;
         }
         if header_bytes > 16 * 1024 {
-            return Err("http connect: headers too large".into());
+            return Err("http: headers too large".into());
         }
     }
 
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 2 || !parts[0].eq_ignore_ascii_case("CONNECT") {
-        socket
-            .write_all(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
-            .await
-            .ok();
+    if is_connect {
+        // CONNECT host:port —— 目标是 authority，默认 443
+        let (host, port) = match split_host_port(parts[1], 443) {
+            Some(v) => v,
+            None => return Ok(bad_request(socket).await),
+        };
         return Ok(Target {
-            host: String::new(),
-            port: 0,
+            host,
+            port,
             proto: Proto::Http,
             cmd: Cmd::Connect,
+            replay: vec![],
         });
     }
 
-    let (host, port) = match parts[1].rsplit_once(':') {
-        Some((h, p)) => (
-            h.trim_end_matches(']').to_string(),
-            p.parse::<u16>().map_err(|_| "bad port")?,
-        ),
-        None => (parts[1].to_string(), 443),
+    // 透明代理：REQUEST-TARGET 必须是绝对 URI（`scheme://authority/path`）。
+    // 浏览器/curl 配成 HTTP 代理时永远发绝对 URI；相对 URI（`GET /path`）
+    // 说明对端以为在跟源站说话，不是代理客户端，直接 400。
+    let uri = parts[1];
+    let scheme_end = match uri.find("://") {
+        Some(i) => i,
+        None => return Ok(bad_request(socket).await),
     };
+    let https = uri[..scheme_end].eq_ignore_ascii_case("https");
+    let after = &uri[scheme_end + 3..];
+    let authority = after.find(['/', '?', '#']).map_or(after, |i| &after[..i]);
+    // `http://127.0.0.1:8090@evil.com/` 的主机是 evil.com，不是回环——
+    // 若按首个 @ 切分，is_local_target 会被骗成直连本地，绕过代理策略。
+    let host_part = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let default_port = if https { 443 } else { 80 };
+    let (host, port) = match split_host_port(host_part, default_port) {
+        Some(v) => v,
+        None => return Ok(bad_request(socket).await),
+    };
+    if host.is_empty() {
+        return Ok(bad_request(socket).await);
+    }
 
     Ok(Target {
         host,
         port,
         proto: Proto::Http,
-        cmd: Cmd::Connect,
+        cmd: Cmd::HttpProxy,
+        replay: raw,
     })
+}
+
+/// 从 `host[:port]` 或绝对 URI 的 authority 段拆出主机与端口；
+/// 无端口时取 `default_port`。支持 `[::1]:443` / `[::1]` 形式的 IPv6 字面量。
+/// None = 端口不是合法 u16（或 IPv6 字面量缺右括号）。
+fn split_host_port(s: &str, default_port: u16) -> Option<(String, u16)> {
+    if let Some(rest) = s.strip_prefix('[') {
+        // IPv6 字面量：[addr] 或 [addr]:port
+        let (addr, tail) = rest.split_once(']')?;
+        let port = match tail.strip_prefix(':') {
+            Some(p) => p.parse::<u16>().ok()?,
+            None => default_port,
+        };
+        Some((addr.to_string(), port))
+    } else {
+        match s.rsplit_once(':') {
+            Some((h, p)) => Some((h.to_string(), p.parse::<u16>().ok()?)),
+            None => Some((s.to_string(), default_port)),
+        }
+    }
+}
+
+/// 回 `400 Bad Request` 并返回空 Target（调用方凭空 host 终止处理）。
+async fn bad_request(socket: &mut TcpStream) -> Target {
+    socket
+        .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+        .await
+        .ok();
+    Target {
+        host: String::new(),
+        port: 0,
+        proto: Proto::Http,
+        cmd: Cmd::Connect,
+        replay: vec![],
+    }
 }
 
 /// 直连 TCP 目标（带超时）。None = 失败/超时（已记日志）。
@@ -682,9 +767,9 @@ async fn dial_direct(
 /// 节点自己的 loopback/LAN——轻则死候选烧满超时后才直连兜底（实测本机
 /// 面板 12s+，浏览器早超时白屏），重则拿到节点侧的错误内容。
 /// 本地/回环/私网目标判定：这类目标永远直连，不进代理候选链。
-/// （pub(crate)：TUN 的 DIRECT 兜底反查真身后也要过同一道信任边界，
-/// 防 DNS 污染把私网地址喂进数据面。）
-pub(crate) fn is_local_target(host: &str) -> bool {
+/// （pub：集成测试要断言"userinfo 不能骗过回环判定"；TUN 的 DIRECT 兜底
+/// 反查真身后也走同一道信任边界，防 DNS 污染把私网地址喂进数据面。）
+pub fn is_local_target(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
         return true;
     }
