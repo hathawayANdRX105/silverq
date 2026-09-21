@@ -36,6 +36,12 @@ pub const DEFAULT_TUN_EXCLUDE_CIDRS: &[&str] = &[
 /// gstatic generate_204：无 body、稳定，适合做延迟探测。
 /// 仅 meow feature 下用到（真实探测），默认模式的 NoopMeasurer 不发请求。
 #[cfg_attr(not(feature = "meow"), allow(dead_code))]
+/// 探测目标清单（SNI 白名单检测）：默认只用 gstatic，用户可在配置里追加。
+///
+/// 单目标探测的盲区：部分免费节点按 SNI 白名单放行——gstatic/cloudflare 这类
+/// 热门端点握手正常，冷门域名在 Client Hello 阶段就被 RST/EOF。调度器会把这类
+/// 节点当健康的选进来，真实业务却连不上（connect.linux.do / api.pie-xian.com
+/// 踩过）。多目标要求全部通过才记延迟，拦截型节点自然沉底。
 pub const DEFAULT_PROBE_URL: &str = "https://www.gstatic.com/generate_204";
 
 /// 带宽探测端点：必须能下发有限字节 body（generate_204 无 body，不能用）。
@@ -64,10 +70,16 @@ fn env_parsed<T: std::str::FromStr>(key: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
-/// 探测 URL（`SILVERQ_PROBE_URL`）。仅 meow feature 下调用。
-#[cfg_attr(not(feature = "meow"), allow(dead_code))]
-pub fn probe_url() -> String {
-    std::env::var("SILVERQ_PROBE_URL").unwrap_or_else(|_| DEFAULT_PROBE_URL.to_string())
+/// 解析探测目标列表：逗号分隔（SILVERQ_PROBE_URL=a,b），空则回落默认单目标。
+pub fn probe_urls() -> Vec<String> {
+    match std::env::var("SILVERQ_PROBE_URL") {
+        Ok(v) if !v.trim().is_empty() => v
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect(),
+        _ => vec![DEFAULT_PROBE_URL.to_string()],
+    }
 }
 
 /// fallback 尝试上限（`SILVERQ_FALLBACK_ATTEMPTS`）。

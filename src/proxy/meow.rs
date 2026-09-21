@@ -27,7 +27,7 @@ pub type Registry = Arc<RwLock<HashMap<String, Arc<dyn ProxyAdapter>>>>;
 /// registry 与数据面 inbound 共享；可用 [`replace`] 在运行时换 adapter。
 pub struct MeowMeasurer {
     registry: Registry,
-    probe_url: String,
+    probe_urls: Vec<String>,
     bw_probe_url: String,
 }
 
@@ -36,7 +36,7 @@ impl MeowMeasurer {
     pub fn new(registry: Registry) -> Self {
         Self {
             registry,
-            probe_url: crate::config::probe_url(),
+            probe_urls: crate::config::probe_urls(),
             bw_probe_url: crate::config::DEFAULT_BW_PROBE_URL.to_string(),
         }
     }
@@ -44,20 +44,24 @@ impl MeowMeasurer {
     /// 生产入口：探测 URL 来自 silverq.toml / env。
     /// 超时不存副本 —— 每次测速由 batch 传参，配置面板热改即时生效
     /// （早先存副本再 min() 合并，热改调大超时会被旧副本盖住）。
-    pub fn with_probe(registry: Registry, probe_url: String) -> Self {
+    pub fn with_probe(registry: Registry, probe_urls: Vec<String>) -> Self {
         Self {
             registry,
-            probe_url,
+            probe_urls,
             bw_probe_url: crate::config::DEFAULT_BW_PROBE_URL.to_string(),
         }
     }
 
     /// 带宽探测 URL 单独传入：它与延迟探测是不同端点（generate_204 无 body，
     /// 带宽探测需要一个能下发有限字节的端点）。
-    pub fn with_bw_probe(registry: Registry, probe_url: String, bw_probe_url: String) -> Self {
+    pub fn with_bw_probe(
+        registry: Registry,
+        probe_urls: Vec<String>,
+        bw_probe_url: String,
+    ) -> Self {
         Self {
             registry,
-            probe_url,
+            probe_urls,
             bw_probe_url,
         }
     }
@@ -71,19 +75,29 @@ impl Measurer for MeowMeasurer {
             guard.get(&node.tag).cloned()
         }?;
 
-        // meow 协议感知探测：建立真实连接 + 握手 + HTTP GET，返回延迟 ms。
-        // 成功返回 Some(delay)；超时/失败返回 None（silverq 按超时扣分后移）。
-        match meow_proxy::health::url_test(
-            adapter.as_ref(),
-            &self.probe_url,
-            Some("200,204"),
-            Duration::from_millis(timeout_ms),
-        )
-        .await
-        {
-            Ok(delay) => Some(delay as f64),
-            Err(_) => None,
+        // 多目标探测：所有 probe_urls 都必须握手 + 拿到 2xx/3xx。
+        // 单目标会漏掉 SNI 白名单节点：它们放行 gstatic 这类热门端点，
+        // 却在冷门域名的 Client Hello 阶段 RST/EOF。任一目标失败 → None，
+        // 让拦截型节点在 EWMA 里沉底而不是顶到队首。
+        let mut worst: Option<f64> = None;
+        for url in &self.probe_urls {
+            match meow_proxy::health::url_test(
+                adapter.as_ref(),
+                url,
+                Some("200,204"),
+                Duration::from_millis(timeout_ms),
+            )
+            .await
+            {
+                Ok(delay) => {
+                    // 取最慢目标：延迟预算按最坏情况算，避免选中
+                    // 「gstatic 快但真实域名慢」的节点。
+                    worst = Some(worst.map_or(delay as f64, |w| w.max(delay as f64)));
+                }
+                Err(_) => return None,
+            }
         }
+        worst
     }
 
     async fn measure_bw(&self, node: &Node, _timeout_ms: u64, max_bytes: u64) -> Option<f64> {

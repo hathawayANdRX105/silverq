@@ -102,7 +102,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
         {
             Arc::new(meow::MeowMeasurer::with_bw_probe(
                 registry.clone(),
-                eff.probe_url.clone(),
+                eff.probe_urls.clone(),
                 eff.bw_probe_url.clone(),
             ))
         }
@@ -171,7 +171,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             pinned.clone(),
             pin_target.clone(),
             tuning.clone(),
-            eff.probe_url.clone(),
+            eff.probe_urls.clone(),
             eff.ui_dir.clone(),
             protocols.clone(),
             progress.clone(),
@@ -185,7 +185,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             pinned.clone(),
             pin_target.clone(),
             tuning.clone(),
-            eff.probe_url.clone(),
+            eff.probe_urls.clone(),
             eff.ui_dir.clone(),
             protocols.clone(),
             progress.clone(),
