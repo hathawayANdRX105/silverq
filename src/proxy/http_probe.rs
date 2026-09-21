@@ -25,12 +25,11 @@ pub struct ProbeUrl {
 
 /// 解析 `scheme://host[:port]/path?query`。非法输入返回 None。
 pub fn parse_probe_url(url: &str) -> Option<ProbeUrl> {
-    let (https, rest) = match url.strip_prefix("https://") {
-        Some(r) => (true, r),
-        None => match url.strip_prefix("http://") {
-            Some(r) => (false, r),
-            None => return None,
-        },
+    let (https, rest) = if let Some(r) = url.strip_prefix("https://") {
+        (true, r)
+    } else {
+        let r = url.strip_prefix("http://")?;
+        (false, r)
     };
     if rest.is_empty() {
         return None;

@@ -335,6 +335,8 @@ impl RuntimeTuning {
     pub fn validated(mut self) -> Self {
         self.bw_interval_rounds = self.bw_interval_rounds.clamp(1, 60);
         self.bw_timeout_ms = self.bw_timeout_ms.clamp(1000, 30_000);
+        self.bw_max_bytes = self.bw_max_bytes.clamp(16 * 1024, 8 * 1024 * 1024);
+        self.bw_penalty_per_efold_ms = self.bw_penalty_per_efold_ms.clamp(0.0, 10_000.0);
         self.capacity = self.capacity.clamp(1, 50);
         self.batch_size = self.batch_size.clamp(1, 100);
         self.interval_secs = self.interval_secs.clamp(5, 3600);

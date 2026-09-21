@@ -210,8 +210,9 @@ impl Node {
     /// 「该快追还是该稳」的问题，无需另造一套。输入取对数后 EWMA 的语义
     /// 从算术平均变成几何平均，对重尾分布正确。
     pub fn update_bw(&mut self, bps: f64) {
-        if !(bps > 0.0) {
-            return; // bps <= 0 对数域无定义，静默丢弃
+        // bps <= 0 或 NaN 对数域无定义，静默丢弃
+        if !bps.is_finite() || bps <= 0.0 {
+            return;
         }
         let x = bps.ln();
         if self.bw_samples == 0 {
@@ -290,6 +291,7 @@ impl Node {
     ///   淹没另一方；归一化为「每 e 倍吞吐差 = N ms 延迟」后量纲统一。
     /// - **未测过带宽的节点带宽项为 0**（不奖不罚）：首轮靠延迟+稳定性
     ///   排序，下一轮带宽数据进来再修正——乐观初值，SW-UCB 的探索精神。
+    ///
     /// 同 `score()`，罚分幅度可指定（配置里的 `timeout_penalty` 与 `bw_penalty_per_efold_ms`）。
     pub fn score_with(&self, penalty_ms: f64, bw_penalty_per_efold_ms: f64) -> f64 {
         let base = if self.consecutive_failures == 0 {

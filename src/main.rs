@@ -429,7 +429,7 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
         // 分数不影响选择，省下这次下载。
         round_no = round_no.wrapping_add(1);
         if t.bw_interval_rounds > 0
-            && round_no % t.bw_interval_rounds == 0
+            && round_no.is_multiple_of(t.bw_interval_rounds)
             && !pinned.load(Ordering::Relaxed)
         {
             let bw_nodes: Vec<Node> = {

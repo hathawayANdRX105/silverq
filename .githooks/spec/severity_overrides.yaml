@@ -69,3 +69,4 @@
 
 severity_overrides:
   CM-02: "WARN"
+  CM-03: "INFO"
