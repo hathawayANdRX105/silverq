@@ -685,10 +685,7 @@ pub async fn read_http_connect_target(
     };
     let https = uri[..scheme_end].eq_ignore_ascii_case("https");
     let after = &uri[scheme_end + 3..];
-    let authority = after
-        .find(|c| matches!(c, '/' | '?' | '#'))
-        .map_or(after, |i| &after[..i]);
-    // userinfo 取**最后一个** @ 之后（安全关键）：
+    let authority = after.find(['/', '?', '#']).map_or(after, |i| &after[..i]);
     // `http://127.0.0.1:8090@evil.com/` 的主机是 evil.com，不是回环——
     // 若按首个 @ 切分，is_local_target 会被骗成直连本地，绕过代理策略。
     let host_part = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
