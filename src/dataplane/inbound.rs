@@ -581,16 +581,20 @@ pub async fn read_socks5_target(
         }
     };
 
-    let host = if host_bytes.len() == 4 {
+    // 16 字节既可能是真 IPv6，也可能是恰好 16 字符的域名（如
+    // "www.bilibili.com"）。ATYP 已经标明客户端意图：0x04 = IPv6，
+    // 0x03 = 域名。只有 ATYP=0x04 才该按地址解码，否则按域名原样保留——
+    // 误转换会让 china 后缀表失配，国内站点被错误地送进代理候选链。
+    let host = if head[3] == 0x04 && host_bytes.len() == 16 {
+        let mut addr = [0u8; 16];
+        addr.copy_from_slice(&host_bytes);
+        std::net::Ipv6Addr::from(addr).to_string()
+    } else if head[3] == 0x01 && host_bytes.len() == 4 {
         host_bytes
             .iter()
             .map(|b| b.to_string())
             .collect::<Vec<_>>()
             .join(".")
-    } else if host_bytes.len() == 16 {
-        let mut addr = [0u8; 16];
-        addr.copy_from_slice(&host_bytes);
-        std::net::Ipv6Addr::from(addr).to_string()
     } else {
         String::from_utf8_lossy(&host_bytes).into_owned()
     };
@@ -878,7 +882,7 @@ async fn handle_udp_associate(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_local_target, route_cache_eligible};
+    use super::{is_local_target, read_socks5_target, route_cache_eligible};
 
     #[test]
     fn local_targets_are_detected() {
@@ -938,5 +942,42 @@ mod tests {
         assert!(!route_cache_eligible("www.baidu.com", false, true)); // 国内
         assert!(!route_cache_eligible("www.gstatic.com", true, false)); // 钉住
         assert!(!route_cache_eligible("localhost", false, false)); // 本地
+    }
+
+    #[tokio::test]
+    async fn sixteen_byte_domain_is_not_mangled_to_ipv6() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpStream;
+        // "www.bilibili.com" 恰好 16 字节，旧代码按 host_bytes.len()==16
+        // 误判为 IPv6，生成 "7777:772e:..." 这样的伪字面量，导致国内后缀表
+        // 失配、站点被错误地送进代理候选链。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (mut tx, (mut rx, _)) = tokio::join!(
+            async { TcpStream::connect(addr).await.unwrap() },
+            async { listener.accept().await.unwrap() },
+        );
+        // ATYP=0x03（域名），长度 16
+        let domain = b"www.bilibili.com";
+        let mut req = vec![0x05, 0x01, 0x00, 0x03, domain.len() as u8];
+        req.extend_from_slice(domain);
+        req.extend_from_slice(&443u16.to_be_bytes());
+        tx.write_all(&req).await.unwrap();
+        let target = read_socks5_target(&mut rx).await.unwrap();
+        assert_eq!(
+            target.host, "www.bilibili.com",
+            "16 字节域名必须保持域名形态"
+        );
+
+        // 对照：真 IPv6（ATYP=0x04）仍正确解码
+        let v6 = [
+            0x20, 0x01, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+        ];
+        let mut req2 = vec![0x05, 0x01, 0x00, 0x04];
+        req2.extend_from_slice(&v6);
+        req2.extend_from_slice(&443u16.to_be_bytes());
+        tx.write_all(&req2).await.unwrap();
+        let t2 = read_socks5_target(&mut rx).await.unwrap();
+        assert_eq!(t2.host, "2001:4860::1", "真 IPv6 必须解码为字面量");
     }
 }
