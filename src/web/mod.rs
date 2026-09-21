@@ -416,7 +416,7 @@ async fn delay_probe(state: &CtlState, tag: &str, timeout_ms: u64) -> Option<Str
     };
     match url_test(
         adapter.as_ref(),
-        &state.probe_url,
+        state.probe_urls.first().map(String::as_str).unwrap_or(""),
         Some("200,204"),
         Duration::from_millis(timeout_ms),
     )

@@ -47,7 +47,7 @@ pub struct CtlState {
     pub tuning: SharedTuning,
     /// 探测 URL（按需单节点测延迟 GET /proxies/{name}/delay 用）
     #[cfg_attr(not(feature = "meow"), allow(dead_code))] // 仅 meow 的 web 模块读
-    pub probe_url: String,
+    pub probe_urls: Vec<String>,
     /// metacubexd 静态目录；空 = 不服务 /ui/
     #[cfg_attr(not(feature = "meow"), allow(dead_code))]
     pub ui_dir: String,
@@ -70,7 +70,7 @@ impl CtlState {
         pinned: Arc<AtomicBool>,
         pin_target: Arc<Mutex<Option<String>>>,
         tuning: SharedTuning,
-        probe_url: String,
+        probe_urls: Vec<String>,
         ui_dir: String,
         protocols: std::collections::HashMap<String, String>,
         progress: Arc<crate::scheduler::SchedulerProgress>,
@@ -84,7 +84,7 @@ impl CtlState {
             pinned,
             pin_target,
             tuning,
-            probe_url,
+            probe_urls,
             ui_dir,
             protocols: Mutex::new(protocols),
             progress,
@@ -101,7 +101,7 @@ impl CtlState {
         pinned: Arc<AtomicBool>,
         pin_target: Arc<Mutex<Option<String>>>,
         tuning: SharedTuning,
-        probe_url: String,
+        probe_urls: Vec<String>,
         ui_dir: String,
         protocols: std::collections::HashMap<String, String>,
         progress: Arc<crate::scheduler::SchedulerProgress>,
@@ -114,7 +114,7 @@ impl CtlState {
             pinned,
             pin_target,
             tuning,
-            probe_url,
+            probe_urls,
             ui_dir,
             protocols: Mutex::new(protocols),
             progress,

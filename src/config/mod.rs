@@ -36,6 +36,12 @@ pub const DEFAULT_TUN_EXCLUDE_CIDRS: &[&str] = &[
 /// gstatic generate_204：无 body、稳定，适合做延迟探测。
 /// 仅 meow feature 下用到（真实探测），默认模式的 NoopMeasurer 不发请求。
 #[cfg_attr(not(feature = "meow"), allow(dead_code))]
+/// 探测目标清单（SNI 白名单检测）：默认只用 gstatic，用户可在配置里追加。
+///
+/// 单目标探测的盲区：部分免费节点按 SNI 白名单放行——gstatic/cloudflare 这类
+/// 热门端点握手正常，冷门域名在 Client Hello 阶段就被 RST/EOF。调度器会把这类
+/// 节点当健康的选进来，真实业务却连不上（connect.linux.do / api.pie-xian.com
+/// 踩过）。多目标要求全部通过才记延迟，拦截型节点自然沉底。
 pub const DEFAULT_PROBE_URL: &str = "https://www.gstatic.com/generate_204";
 
 /// 带宽探测端点：必须能下发有限字节 body（generate_204 无 body，不能用）。
@@ -64,10 +70,28 @@ fn env_parsed<T: std::str::FromStr>(key: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
-/// 探测 URL（`SILVERQ_PROBE_URL`）。仅 meow feature 下调用。
-#[cfg_attr(not(feature = "meow"), allow(dead_code))]
-pub fn probe_url() -> String {
-    std::env::var("SILVERQ_PROBE_URL").unwrap_or_else(|_| DEFAULT_PROBE_URL.to_string())
+/// 解析探测目标列表：逗号分隔（SILVERQ_PROBE_URL=a,b），空则回落默认单目标。
+pub fn probe_urls() -> Vec<String> {
+    split_probe_urls(&std::env::var("SILVERQ_PROBE_URL").unwrap_or_default())
+}
+
+/// 纯函数：把 env 值切成探测目标列表。
+/// - 空串/全空白 → 回落默认单目标（旧配置与未设置 env 的行为不变）
+/// - 逗号分隔，逐项去空白，丢弃空项（"a,,b" → [a,b]）
+///
+/// 抽成纯函数是因为这里最容易写错：若把空项留下来，measure() 会去拨一个
+/// 空 URL 的目标，整池节点被判废。split_probe_urls 单测直接守住这条线。
+pub fn split_probe_urls(raw: &str) -> Vec<String> {
+    let items: Vec<String> = raw
+        .split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect();
+    if items.is_empty() {
+        vec![DEFAULT_PROBE_URL.to_string()]
+    } else {
+        items
+    }
 }
 
 /// fallback 尝试上限（`SILVERQ_FALLBACK_ATTEMPTS`）。
@@ -75,4 +99,39 @@ pub fn probe_url() -> String {
 #[cfg_attr(not(feature = "meow"), allow(dead_code))]
 pub fn fallback_attempts() -> usize {
     env_parsed("SILVERQ_FALLBACK_ATTEMPTS", 3)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_probe_urls_single() {
+        assert_eq!(
+            split_probe_urls("https://www.gstatic.com/generate_204"),
+            vec!["https://www.gstatic.com/generate_204"]
+        );
+    }
+
+    #[test]
+    fn split_probe_urls_multiple_trims_and_drops_empties() {
+        // SNI 白名单检测的实际配置形态：两个目标，带空白和空项
+        assert_eq!(
+            split_probe_urls(" https://a/generate_204 , https://b/generate_204 , "),
+            vec!["https://a/generate_204", "https://b/generate_204"]
+        );
+        // 中间空项必须丢弃，否则 measure() 会去拨空 URL，整池误判废
+        assert_eq!(
+            split_probe_urls("https://a/,,https://b/"),
+            vec!["https://a/", "https://b/"]
+        );
+    }
+
+    #[test]
+    fn split_probe_urls_empty_falls_back_to_default() {
+        // 未设置 env 或写空：行为必须等价于旧的单目标配置
+        assert_eq!(split_probe_urls(""), vec![DEFAULT_PROBE_URL]);
+        assert_eq!(split_probe_urls("   "), vec![DEFAULT_PROBE_URL]);
+        assert_eq!(split_probe_urls(",,,,"), vec![DEFAULT_PROBE_URL]);
+    }
 }

@@ -42,8 +42,10 @@ pub struct SchedulerSection {
     pub concurrency: usize,
     /// 超时扣分幅度（毫秒）
     pub timeout_penalty: f64,
-    /// 探测 URL（generate_204 风格）
-    pub probe_url: String,
+    /// 探测目标列表（SNI 白名单检测）。所有目标都必须通过才记延迟：
+    /// 部分免费节点按 SNI 放行热门端点、拦截冷门域名，单目标探测会把它们
+    /// 误判为健康（connect.linux.do / api.pie-xian.com 踩过）。
+    pub probe_urls: Vec<String>,
     /// 带宽探测 URL（有限字节下载端点，generate_204 无 body 不能用）。
     #[cfg_attr(not(feature = "meow"), allow(dead_code))]
     pub bw_probe_url: String,
@@ -73,7 +75,7 @@ impl Default for SchedulerSection {
             timeout_ms: crate::config::DEFAULT_TIMEOUT_MS,
             concurrency: crate::config::DEFAULT_CONCURRENCY,
             timeout_penalty: crate::config::DEFAULT_TIMEOUT_PENALTY,
-            probe_url: crate::config::DEFAULT_PROBE_URL.to_string(),
+            probe_urls: vec![crate::config::DEFAULT_PROBE_URL.to_string()],
             bw_probe_url: crate::config::DEFAULT_BW_PROBE_URL.to_string(),
             bw_interval_rounds: crate::config::DEFAULT_BW_INTERVAL_ROUNDS,
             bw_timeout_ms: crate::config::DEFAULT_BW_TIMEOUT_MS,
@@ -225,7 +227,7 @@ pub struct Effective {
     pub concurrency: usize,
     pub timeout_penalty: f64,
     #[cfg_attr(not(feature = "meow"), allow(dead_code))] // meow 模式才发探测请求
-    pub probe_url: String,
+    pub probe_urls: Vec<String>,
     #[cfg_attr(not(feature = "meow"), allow(dead_code))]
     pub bw_probe_url: String,
     pub bw_interval_rounds: u32,
@@ -364,7 +366,7 @@ impl Effective {
             timeout_ms: env_parsed_or("SILVERQ_TIMEOUT_MS", fc.scheduler.timeout_ms),
             concurrency: env_parsed_or("SILVERQ_CONCURRENCY", fc.scheduler.concurrency),
             timeout_penalty: env_parsed_or("SILVERQ_TIMEOUT_PENALTY", fc.scheduler.timeout_penalty),
-            probe_url: env_or("SILVERQ_PROBE_URL", fc.scheduler.probe_url.clone()),
+            probe_urls: crate::config::probe_urls(),
             bw_probe_url: env_or("SILVERQ_BW_PROBE_URL", fc.scheduler.bw_probe_url.clone()),
             bw_interval_rounds: env_parsed_or(
                 "SILVERQ_BW_INTERVAL_ROUNDS",
