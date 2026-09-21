@@ -929,7 +929,7 @@ mod tests {
             "8.8.8.8",
             "240e:97d:10:1402::1:42",
             "2001:4860::1",
-            "[::ffff:8.8.8.8]",
+            "::ffff:8.8.8.8",
         ] {
             assert!(
                 !route_cache_eligible(host, false, false),
