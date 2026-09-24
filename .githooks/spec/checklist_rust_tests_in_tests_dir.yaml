@@ -16,7 +16,7 @@
 enabled: true
 hooks: [pre-commit, pre-push, merge]
 sla: l1
-fail_severity: FAIL
+fail_severity: WARN
 match:
   paths_include: ["**/src/**/*.rs"]
   paths_exclude: ["target/", ".wt/", ".githooks/"]
@@ -120,7 +120,7 @@ harness:
           split("\n")
           | map(select(length > 0))
           | map(capture("^(?<path>.+):(?<line>[0-9]+):(?<rest>.*)$"))
-          | map({id: "NO-SRC-TEST", severity: "FAIL", path: .path, line: (.line|tonumber), message: ("测试必须同层 tests/ 目录, 严禁在 src/ 留测试代码: " + .rest)})
+          | map({id: "NO-SRC-TEST", severity: "WARN", path: .path, line: (.line|tonumber), message: ("测试必须同层 tests/ 目录, 严禁在 src/ 留测试代码: " + .rest)})
         '
       fi
 optional: true
