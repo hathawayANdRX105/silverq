@@ -15,6 +15,7 @@ review_formats:
   # CRG Review 格式: 必须是 ## (二级标题), 子分类必须 ### (三级标题)
   crg_review:
     heading_level_crg: "H2"       # CRG Review 必须是 ##
+    heading_text_crg: "Agent 🤖 - CRG Review"  # H2 标题固定文本 (RV-05 存在性检查也基于它；缺此键则 RV-05 关闭)
     heading_level_crg_sub: "H3"   # CRG Review 子分类必须 ###
     content_must_be_chinese: true  # 正文必须中文
     checkbox_forbidden: true      # 评论中严禁 - [x] / - [ ]
@@ -36,6 +37,8 @@ review_formats:
     content_must_be_chinese: true
     # 评论中禁止 checkbox
     checkbox_forbidden: true
+    # 允许的 P 级别；不在列表内的级别 → RV-04 FAIL。缺此键则任何级别都 FAIL
+    allowed_inline_levels: ["P0", "P1", "P2", "P3"]
 
 # reply 格式契约
 reply_formats:
@@ -46,3 +49,37 @@ reply_formats:
   required_intent_word: true
   # 冒号后必须跟空格
   colon_after: true
+  # 回复理由最短长度 (字符数；中文按字符计)。缺此键则 RV-03 关闭
+  reply_min_detail: 5
+
+# 规则严重级别覆盖 (可选)
+# 格式: "规则ID": "FAIL" | "WARN" | "INFO"
+# 默认严重级别如下, 按需调整:
+#   RV-01: FAIL — review 评论含 checkbox
+#   RV-02: WARN — 回复用了不在 allowed_reply_words 的 intent word
+#   RV-03: WARN — 回复理由过短
+#   RV-04: FAIL — CRG/Inline Review 格式不对 (标题英文, 正文中文, 子段 H3, 级别合法)
+#   RV-05: FAIL — PR 会话里没有 CRG Review
+#   RV-06: FAIL — inline finding 没有对应回复
+severity_overrides:
+  RV-01: "FAIL"   # review 评论含 checkbox
+  RV-02: "WARN"   # 回复 intent word 不合法
+  RV-03: "WARN"   # 回复理由过短
+  RV-04: "FAIL"   # CRG/Inline Review 格式
+  RV-05: "FAIL"   # 缺少 CRG Review
+  RV-06: "FAIL"   # inline finding 无回复
+
+# merge 审查门 (RV-07): gate merge 时的 CRG + ocr 双重审查
+#   required: false      → 完全跳过 CRG+ocr (RV-07 降为 INFO, 不拦 merge)
+#   ocr_timeout_secs: 600 → ocr 超时秒数 (缺省 600)
+merge_review:
+  required: true
+  ocr_timeout_secs: 600
+
+# ---------------------------------------------------------------------------
+# 检查能力选择 (capability allowlist)
+#   checks: 列出「启用哪些检查项」(规则ID 或家族前缀, 如 [RV-05, RV-06] 或 [RV])
+#   缺省(不写 checks:) = 全部检查项启用; 写了 = 只保留列表内的
+# 示例:
+#   checks: [RV-01, RV-04, RV-05]
+# ---------------------------------------------------------------------------

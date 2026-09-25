@@ -67,6 +67,16 @@ title_forbidden_prefixes:
   - "issue:"
   - "sub:"
   - "parent:"
+# IS-14: issue 必须带至少一个 type label (此集合内的任意一个)
+type_labels:
+  - "bug"
+  - "enhancement"
+  - "feature"
+  - "documentation"
+  - "chore"
+  - "refactor"
+  - "tests"
+  - "epic"
 
 # 正文禁 Labels 段 (label 用 gh label 操作，不写正文)
 labels_section_forbidden: true
@@ -124,3 +134,26 @@ severity_overrides:
   IS-14: "WARN"   # 缺少 type label / 关键词不对齐
   IS-15: "FAIL"   # 关闭时 Done when 未全勾
   IS-16: "FAIL"   # 乱码/禁用关键词/全角标点
+
+# Done-when judge: close 时把每条 Done when 项拿给模型评审 (jev ->
+# 小模型 -> 跳过 三档降级, harness 内部决定)。证据 = 关联 PR diff, 缺失时
+# 退化为 close --comment 文本。任何基础设施失败只降级 INFO, 不阻断;
+# GT-04 机械 checkbox 门与工具检查仍是兜底。
+# 阈值: 问题集每个 item 的 fail 默认 0.85 (p(未达标)>=0.85 -> FAIL 硬拦)。
+done_when_judge:
+  enabled: true
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/review_chain.py"
+    - ".githooks/spec/harness/jev_questions_done_when.json"
+    - "0.85"
+    - "0.5"
+  timeout_secs: 180
+
+# ---------------------------------------------------------------------------
+# 检查能力选择 (capability allowlist)
+#   checks: 列出「启用哪些检查项」(规则ID 或家族前缀, 如 [IS-05, IS-15] 或 [RV])
+#   缺省(不写 checks:) = 全部检查项启用; 写了 = 只保留列表内的
+# 示例:
+#   checks: [IS-05, IS-15]
+# ---------------------------------------------------------------------------

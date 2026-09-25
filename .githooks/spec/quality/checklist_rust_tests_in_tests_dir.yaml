@@ -14,7 +14,7 @@
 #   新建 src 测试文件 (e.g. crates/adaptor/src/bad_test.rs) → 仍必须报告.
 #   干净 base 上三种 git diff 全空 → 候选为空 → 输出 [].
 enabled: true
-hooks: [pre-commit, pre-push, merge]
+hooks: [merge]
 sla: l1
 fail_severity: WARN
 match:

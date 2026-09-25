@@ -1,0 +1,24 @@
+# [jev-verified] 候选=无assert的#[test](高召回), 判决=jev noul 'verifies behavior?' — spy/verify 风格假阴性被滤掉
+# 泛用: 测试函数必须含断言
+# 一个 #[test] fn ... 函数体内,至少出现一次 assert! / assert_eq! / assert_ne!
+# grep 模式, 零 LLM
+# 限制: awk 启发式, 不能处理嵌套 mod tests, 但足以拦掉最常见的"跑过就算"
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l2
+fail_severity: WARN
+match:
+  paths_include: ["**/tests/*.rs", "**/*_test.rs", "**/test_*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+mode: file
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/verify_chain.py"
+    - "--rule"
+    - "rust_test_no_assert"
+  # 候选 = 确定性正则（高召回）; 判决 = jev 语义验证（verify_chain.py）
+  # 无 key / 请求失败 -> 候选降级为 WARN 原样输出（召回不丢，处置照常）
+optional:
+ true
+timeout: 15

@@ -1,0 +1,30 @@
+# CK-CCN: 函数圈复杂度天花板 + ratchet（棘轮存量记账，只拦增量）
+# 依据: crapkit (ccn ceiling 6 / ratchet seed, marks may only fall) —
+#       "Above the ceiling, coverage cannot save you. Decompose."
+# 语义: 只判「本次改动碰到的函数」:
+#       新超标(未记账) / 已记账但分数涨了 → FAIL，唯一出路是拆函数；
+#       已记账且持平 → 静默容忍(存量债务)；修复/删除 → 记账自动清除
+# 记账: 首次 `python3 .githooks/spec/harness/ccn_gate.py seed --root . --ceiling 6`
+#       生成 ratchet.tsv(进仓)；此后门禁只判改动函数，存量只许降不许升
+# 依赖: python3 + lizard (pip install lizard)；lizard 缺失时 harness 输出 [] 静默跳过
+# 协议: mode:file — stdin 收 "===== FILE: rel =====" 标记的变更文件
+enabled: true
+hooks: [pre-commit, merge]
+sla: l1
+fail_severity: FAIL
+mode: file
+match:
+  paths_include: ["**/*.rs", "**/*.ts", "**/*.py", "**/*.go"]
+  paths_exclude: ["target/", ".wt/", "node_modules/"]
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/ccn_gate.py"
+    - "judge"
+    - "--root"
+    - "."
+    - "--ceiling"
+    - "6"
+    - "--stdin-files"
+optional: true
+timeout: 60

@@ -1,0 +1,48 @@
+{
+  "introduces_complexity": {
+    "type": "noul",
+    "instructions": "Does this diff introduce a new function that is overly complex (many branches, deep nesting)?",
+    "criteria": {"true": "new function ccn above ~10 or 4+ nesting levels", "false": "no new complex function"},
+    "fail": 0.8,
+    "warn": 0.5
+  },
+  "risky_without_test": {
+    "type": "noul",
+    "instructions": "Is this a risky change (control flow, error handling, concurrency) without a corresponding test?",
+    "criteria": {"true": "risk-relevant logic changed and no test covers it", "false": "not risky or covered"},
+    "fail": 0.85,
+    "warn": 0.5
+  },
+  "security_relevant_risk": {
+    "type": "noul",
+    "instructions": "Does this diff touch authentication, authorization, input validation, secrets, or deserialization in a way that could introduce a vulnerability?",
+    "criteria": {"true": "security-relevant surface changed without clear guards", "false": "no security-relevant surface"},
+    "fail": 0.9,
+    "warn": 0.6
+  },
+  "introduces_duplication": {
+    "type": "noul",
+    "instructions": "Does this diff introduce logic that duplicates existing code (copy-paste with renamed identifiers)?",
+    "criteria": {"true": "near-identical block already exists elsewhere", "false": "no duplication"},
+    "fail": 0.8,
+    "warn": 0.5
+  },
+  "convention_violation": {
+    "type": "noul",
+    "instructions": "Does this diff violate the repo's conventions (naming, module placement, comment style, error handling style)?",
+    "criteria": {"true": "clear convention violation", "false": "follows conventions"},
+    "fail": 0.8,
+    "warn": 0.5
+  },
+  "verdict": {
+    "type": "choice",
+    "instructions": "What is the main character of this diff?",
+    "criteria": {
+      "clean": "mechanical, low-risk change",
+      "needs_review": "deserves human or agent attention",
+      "problematic": "contains an apparent defect, duplication, or convention violation"
+    },
+    "fail": 0.8,
+    "warn": 0.5
+  }
+}

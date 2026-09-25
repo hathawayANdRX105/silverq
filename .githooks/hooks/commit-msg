@@ -3,10 +3,10 @@
 # 找二进制: 先 PATH 里的 gate (系统安装), 否则用仓库内 .githooks/gate
 REPO=$(git rev-parse --show-toplevel 2>/dev/null)
 if command -v gate >/dev/null 2>&1; then
-  exec gate pre-push
+  exec gate commit-msg "$1"
 fi
 if [ -x "$REPO/.githooks/gate" ]; then
-  exec "$REPO/.githooks/gate" pre-push
+  exec "$REPO/.githooks/gate" commit-msg "$1"
 fi
 echo "gate binary not found (need: gate on PATH, or .githooks/gate)" >&2
 exit 1

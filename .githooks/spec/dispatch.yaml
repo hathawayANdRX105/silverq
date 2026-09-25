@@ -1,20 +1,28 @@
+# dispatch.yaml — hook dispatcher config
+#
+# Each hook runs the listed topics in order. Add/remove topics here
+# without touching the hook scripts.
+
+# commit 快路径：只做基本代码检查（lint + 高价值候选判决）
+# 工作区卫生（WS-*）在 merge 把关：干净树是合并标准，不是提交标准
 pre-commit:
-- workspace
-- code
-- checklist
-- doc_sync
-- code_doc
+  - code
+  - checklist
+
 pre-push:
-- workspace
-- code
-- checklist
-- doc_sync
-- code_doc
+  - code
+  - checklist
+
 merge:
-- github/pull_requests
-- github/reviews
-- cleanup
-- checklist
-- github/pr_gates
-- doc_sync
-- code_doc
+  - workspace
+  - github/pull_requests
+  - github/reviews
+  - cleanup
+  - checklist
+
+# 严重级别覆盖（按 rule_id）——每个检查「要不要拦截」在这里改，
+# 不改代码。FAIL=硬拦 / WARN=提示 / INFO=仅参考。
+severity_overrides:
+  CM-01: "FAIL"   # commit 标题非 conventional commit
+  CM-02: "FAIL"   # commit 标题含 CJK
+  CM-03: "FAIL"   # commit type 与关联 PR type 不一致

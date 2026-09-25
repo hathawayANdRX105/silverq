@@ -1,0 +1,32 @@
+# CK-REVIEW-CHAIN: 模型审查层三档降级 — jev -> 小模型 -> 工具检查
+#
+# 重要判断(审查/代码质量规范)优先交给 jev (TypeSafe System One 决策模型):
+#   TYPESAFE_API_KEY 存在 -> jev 定型问题, 拿校准概率(100-500ms)
+# jev 不可用 -> 降级小模型 (OpenAI 兼容):
+#   REVIEW_LLM_BASE_URL + REVIEW_LLM_API_KEY + REVIEW_LLM_MODEL
+# 都不可用 -> INFO 说明; 确定性工具检查(ccn/duplication/antislop/slop_comment
+#   等独立 checklist)永远照跑, 不依赖模型层
+#
+# per-question 阈值(confidence-gated routing): 问题 JSON 里每个问题可带
+#   "fail"/"warn" (缺省用 harness 参数 0.8/0.5); p(issue)>=fail FAIL 硬拦,
+#   >=warn WARN, 否则 INFO。findings 带 tier/confidence extra,
+#   `gate check --json` 供开发 agent 自定行动阈值。
+#
+# 任何基础设施失败(无 key/网络/解析失败)只降级不阻断。
+enabled: true
+hooks: [pre-push, merge]
+sla: l3
+fail_severity: INFO
+mode: diff
+match:
+  paths_include: ["**/*.rs", "**/*.ts", "**/*.js", "**/*.py", "**/*.go", "**/*.sh", "**/*.md"]
+  paths_exclude: ["target/", ".wt/", "node_modules/"]
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/review_chain.py"
+    - ".githooks/spec/harness/jev_questions_review.json"
+    - "0.8"
+    - "0.5"
+optional: true
+timeout: 180

@@ -2,7 +2,7 @@
 # 只扫注释与 todo!/unimplemented! 宏, 避开字符串字面量里的关键字表
 # 扫仓库根, 不假设 crate 嵌套深度
 enabled: true
-hooks: [pre-commit, pre-push, merge]
+hooks: [merge]
 sla: l1
 fail_severity: WARN
 match:
@@ -15,13 +15,9 @@ harness:
     - "-c"
     - |
       ROOT=$(git rev-parse --show-toplevel)
-      matches=$(grep -rEn '(//.*\b(TODO|FIXME)\b|(todo|unimplemented)!\()' "$ROOT" \
-        --include='*.rs' \
-        --exclude-dir=target --exclude-dir=.wt --exclude-dir=.git \
-        --exclude-dir=tests 2>/dev/null \
-        | grep -vE '(TODO|FIXME)\(#[0-9]+' \
-        | grep -vE 'FORBIDDEN_KEYWORDS|stale_marker|GOOD_SUB_BODY|EAGER_TODO|MID_RUN_TODO' \
-        | head -20)
+      cd "$ROOT"
+      # 扫描范围 = git 跟踪文件集 (gitignore 感知)
+      matches=$(git ls-files -z -- '*.rs' | grep -zvE '(^|/)tests/' | xargs -0r grep -nEn '(//.*\b(TODO|FIXME)\b|(todo|unimplemented)!\()' 2>/dev/null | grep -vE '(TODO|FIXME)\(#[0-9]+' | grep -vE 'FORBIDDEN_KEYWORDS|stale_marker|GOOD_SUB_BODY|EAGER_TODO|MID_RUN_TODO' | head -20)
       if [ -z "$matches" ]; then
         echo '[]'
       else

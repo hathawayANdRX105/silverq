@@ -1,0 +1,28 @@
+# [jev-verified] 候选=正则(高召回), 判决=jev noul 'is slop?' + score severity — 转述可抓, 分级按后果
+# CK-SLOP: AI slop 检测 — agent 生成代码的典型注释病灶
+# 依据: sloplint / AI-SLOP-Detector (github.com/dannote/sloplint,
+#       github.com/flamehaven01/AI-SLOP-Detector)
+# 检测: 步骤注释(Step 1:/第一步:)、叙述型注释(This function.../该函数...)、
+#       拖延语(for now/temporary fix/quick implementation/先这样/临时/凑合)、
+#       含糊语(hopefully/should work/assumes/估计/理论上) — 拖延/含糊类依据 antislop
+# 为什么 grep 而非 LLM: 模式固定, 零 token, 毫秒级
+# 刻意不查(误报太高): 空 catch 块、单行空 fn、注释密度、// ---- 分节线(仓库自身惯例) — 靠 clippy + oversize 兜底
+enabled: true
+hooks: [pre-commit, pre-push, merge]
+sla: l2
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs", "**/*.ts", "**/*.js", "**/*.py", "**/*.go"]
+  paths_exclude: ["target/", ".wt/", "node_modules/", "**/tests/**"]
+mode: file
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/verify_chain.py"
+    - "--rule"
+    - "slop_comment"
+  # 候选 = 确定性正则（高召回）; 判决 = jev 语义验证（verify_chain.py）
+  # 无 key / 请求失败 -> 候选降级为 WARN 原样输出（召回不丢，处置照常）
+optional:
+ true
+timeout: 15

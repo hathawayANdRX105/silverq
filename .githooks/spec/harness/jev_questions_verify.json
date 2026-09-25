@@ -1,0 +1,110 @@
+{
+ "hardcoded_secret": {
+  "intent": "hardcoded credentials that would leak if committed",
+  "questions": {
+   "real_secret": {
+    "type": "noul",
+    "instructions": "Is this matched string a credential that would leak if committed?",
+    "criteria": {
+     "true": "live key, token, password, or private key material for a real system or third-party service",
+     "false": "placeholder, test fixture, example value, documentation sample, or local-only default"
+    },
+    "fail": 0.85,
+    "warn": 0.6
+   }
+  }
+ },
+ "slop_comment": {
+  "intent": "AI slop comments: narration that restates the code instead of explaining why",
+  "questions": {
+   "is_slop": {
+    "type": "noul",
+    "instructions": "Is this comment AI slop (narrates what the code does, step-by-step filler) rather than a substantive why?",
+    "criteria": {
+     "true": "restates the adjacent code, narrates execution steps, or is filler with no information content",
+     "false": "explains a reason, constraint, tradeoff, caveat, or decision the code cannot show"
+    },
+    "fail": 0.8,
+    "warn": 0.55
+   },
+   "severity": {
+    "type": "score",
+    "instructions": "How damaging is this comment to a maintainer? (0=cosmetic .. 2=misleading)",
+    "criteria": [
+     "cosmetic phrasing; intent of the code is still clear",
+     "narrates what the code does; nothing would be lost if the comment were deleted",
+     "actively misleads the reader or masks a missing decision"
+    ],
+    "fail": 2,
+    "warn": 1
+   }
+  }
+ },
+ "rust_test_no_assert": {
+  "intent": "tests that execute code without verifying any behavior",
+  "questions": {
+   "no_verification": {
+    "type": "noul",
+    "instructions": "Does this test function fail to verify any behavior (no assert, no mock verification, no panic or checked-result check)?",
+    "criteria": {
+     "true": "the test only executes code and would still pass if the behavior under test were broken",
+     "false": "it verifies through assert!/assert_eq!/assert_ne!, mock expectations, should_panic, or unwraps a checked result"
+    },
+    "fail": 0.75,
+    "warn": 0.5
+   }
+  }
+ },
+ "antislop": {
+  "intent": "AI slop in code: unfinished-work markers, deferrals, hedges, empty stubs",
+  "questions": {
+   "slop_violation": {
+    "type": "noul",
+    "instructions": "Is this matched token a real slop violation (unfinished-work marker, deferral, hedge, or empty stub left in the code) rather than legitimate use?",
+    "criteria": {
+     "true": "The token marks unfinished/deferred/hedged work with no tracking: bare TODO/FIXME without an issue reference, a 'for now' deferral, a 'should work' hedge, or an empty function body",
+     "false": "Legitimate use: TODO with an issue reference (repo convention TODO(#123)), placeholder/stub as a documented API concept or test fixture, or the word used in normal prose or an identifier"
+    },
+    "fail": 0.8,
+    "warn": 0.55
+   },
+   "slop_severity": {
+    "type": "score",
+    "instructions": "How damaging is this token to a maintainer reading the code?",
+    "criteria": [
+     "Cosmetic: legitimate use or trivial wording; nothing to fix",
+     "Misleading: deferral or hedge that reads like a decision but defers one",
+     "Blocking signal: bare unfinished-work marker or empty stub shipped in code"
+    ],
+    "fail": 2,
+    "warn": 1
+   }
+  }
+ },
+ "duplication": {
+  "intent": "copy-paste drift: the same block introduced more than once within this change",
+  "questions": {
+   "real_duplication": {
+    "type": "noul",
+    "instructions": "Is this repeated block harmful duplication that should be extracted or shared, rather than coincidental or idiomatic similarity?",
+    "criteria": {
+     "true": "Same or near-same logic lines repeated across locations; a fix to one would need the same fix in the others",
+     "false": "Similarity is structural boilerplate (imports, trait/struct declarations, test scaffolding, standard match arms) or the blocks differ in essential logic"
+    },
+    "fail": 0.8,
+    "warn": 0.6
+   },
+   "dup_severity": {
+    "type": "score",
+    "instructions": "How much drift risk does this duplication carry?",
+    "criteria": [
+     "Coincidental or idiomatic: no shared logic, no extraction needed",
+     "Extractable: 4-10 duplicated lines with real logic; changes must be mirrored",
+     "High risk: large or logic-bearing block duplicated across files with divergent-fix danger"
+    ],
+    "fail": 2,
+    "warn": 1
+   }
+  }
+ }
+}

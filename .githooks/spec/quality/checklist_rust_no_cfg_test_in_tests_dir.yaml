@@ -2,7 +2,7 @@
 # 为什么: Cargo 对 tests/ 目录默认只在 cargo test 编译, 写 #[cfg(test)] 是重复且错误的 boilerplate
 # grep 模式, 零 LLM
 enabled: true
-hooks: [pre-commit, pre-push, merge]
+hooks: [merge]
 sla: l1
 fail_severity: WARN
 match:
@@ -15,9 +15,9 @@ harness:
     - "-c"
     - |
       ROOT=$(git rev-parse --show-toplevel)
-      matches=$(grep -rEn '#\[cfg\(test\)\]' "$ROOT" --include='*.rs' \
-        --exclude-dir=target --exclude-dir=.wt --exclude-dir=.git 2>/dev/null \
-        | grep '/tests/' | head -20)
+      cd "$ROOT"
+      # 扫描范围 = git 跟踪文件集 (gitignore 感知)
+      matches=$(git ls-files -z -- '*.rs' | grep -zE '(^|/)tests/' | xargs -0r grep -nEn '#\[cfg\(test\)\]' 2>/dev/null | head -20)
       if [ -z "$matches" ]; then
         echo '[]'
       else

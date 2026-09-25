@@ -1,0 +1,122 @@
+# github_pull_requests.yaml — PR 元数据 + body 结构契约
+# 使用方式: gate Rust PR validator 读取本文件, 规则参数从 YAML 读取。
+# 审查评论格式契约请参考 #103 (github_reviews.yaml)。
+
+# 必填的 body 段 (按出现顺序检查)
+required_body_headings: ["Issue", "What", "Why", "Construction plan", "Delivery record", "How to test", "Checklist"]
+
+# 必填的标题 (可自定义)
+required_title_headings: ["Goal", "Background", "Done when", "Suspected areas", "Out of scope"]
+# 标题必须是中文
+title_must_be_chinese: true
+# 标题禁止出现的中文全角标点
+forbidden_brackets_in_title:
+  - "（"
+  - "）"
+  - "「"
+  - "」"
+  - "【"
+  - "】"
+  - "『"
+  - "』"
+  - "《"
+  - "》"
+  - "〈"
+  - "〉"
+
+# conventional commit 标题类型 (PR-02)：标题不匹配这些类型时按 ci_check_mode 提示
+conventional_commit_types: ["feat", "fix", "chore", "docs", "style", "refactor", "test", "ci", "build", "perf", "revert"]
+
+# PR-07 done-when 段落：检查 checkbox 数量；缺 done_when_min_checkboxes 时该检查关闭
+done_when_headings: ["Construction plan", "Checklist"]
+done_when_min_checkboxes: 2
+
+# PR-04 中文正文段：这些段必须含中文（heading 本身仍须英文）
+chinese_prose_sections: ["What"]
+
+# review 相关 (指 review 评论, 不在本 yaml 范围, 详见 #103)
+# allowed_review_types_prefixes: ...
+
+# branch 前缀 (PR-08 参考)
+allowed_branch_prefixes:
+  - "feat/"
+  - "fix/"
+  - "chore/"
+  - "epic/"
+  - "main"
+  - "master"
+  - "release/"
+
+# Fixes 关键词
+fixes_keywords: ["Fixes", "Closes", "Resolves"]
+
+# type label (从 label_policy 读取)
+type_labels_cfg: ["bug", "enhancement", "feature", "documentation", "chore", "refactor", "tests", "epic"]
+
+# CI 状态检查策略
+ci_check_mode: "WARN"  # 可选 FAIL / WARN
+
+# Done when 检查策略
+done_when_check_mode: "FAIL"  # 可选 FAIL / WARN
+
+# keyword_label_suggestions (WARN 级辅助)
+keyword_label_suggestions:
+  "修复": "bug"
+  "新功能": "enhancement"
+  "功能": "enhancement"
+  "功能添加": "enhancement"
+  "清理": "chore"
+  "优化": "refactor"
+  "代码质量": "refactor"
+
+# 说明：曾命中 "bug" / "测试" 的关键词已改为只保留 修复 / 代码 两个稳定词：
+# 1. "bug" 作为英文单词出现在任何 PR 正文（"debug" 子串、"bug 修复"）都会误报；
+# 2. "测试" 在 Rust 项目 PR 中几乎必出现（cargo test 等），建议 测试 label 没有实际意义；
+# 3. "代码" 作为独立词比 "代码质量" 更通用，保留 refactor 建议。
+
+# 关键词建议 (WARN 级) — 标题/body 命中关键字但缺对应 label 时提示
+# 工作方式: 读取 keyword_label_suggestions, 若 title/body 命中某关键字但对应 label 缺失, 则 WARN 建议
+# 示例: body 命中 "测试" 但 label 缺 "tests", 则 WARN "based on content keywords, consider also labeling: tests"
+
+# PR-10 关联机制 (check_content + run)
+# - check_content: Part of/Related #N 是纯文本，不产生 GitHub Development 关联 → INFO
+# - run: Fixes #N 目标是 parent issue (epic) 时提示 (epic 侧不显示 closing 关联, 应 Fixes sub-issue) → WARN
+linkage_check:
+  plain_text_link_keywords: ["Part of", "Related"]  # 触发纯文本提示的关键词
+  plain_text_links_severity: "INFO"   # Part of/Related 提示级别
+  fixes_epic_severity: "WARN"         # Fixes 目标是 parent issue 时提示级别
+
+# 规则严重级别覆盖 (可选)
+# 格式: "规则ID": "FAIL" | "WARN" | "INFO"
+# 默认严重级别如下, 按需调整:
+#   PR-01: FAIL — 标题含 CJK
+#   PR-02: WARN — 标题非 conventional commit
+#   PR-03: FAIL — 缺少必填 heading
+#   PR-04: FAIL — heading 含 CJK
+#   PR-05: WARN — 缺少 Fixes # 关联
+#   PR-06: FAIL — 缺少 type label
+#   PR-07: FAIL — Construction plan/Checklist checkbox < 2
+#   PR-08: FAIL — 分支名前缀不在白名单
+#   PR-10: INFO — Part of/Related 纯文本
+#   PR-06: WARN — 关键词与 label 不对齐
+#
+# 示例: 把 PR-05 改成 INFO，不再警告缺少 issue 关联
+# severity_overrides:
+#   PR-05: "INFO"
+severity_overrides:
+  # PR-01: "FAIL"  — 标题含 CJK
+  # PR-02: "WARN"  — 标题非 conventional commit
+  PR-03: "FAIL"   # 缺少必填 heading
+  PR-04: "FAIL"   # heading 含 CJK / What 无中文
+  PR-05: "WARN"   # 缺少 Fixes # 关联 (改成 INFO 则不阻塞)
+  PR-06: "FAIL"   # 缺少 type label
+  PR-07: "FAIL"   # Construction plan/Checklist checkbox < 2
+  PR-08: "FAIL"   # 分支名前缀不在白名单
+
+# ---------------------------------------------------------------------------
+# 检查能力选择 (capability allowlist)
+#   checks: 列出「启用哪些检查项」(规则ID 或家族前缀, 如 [PR-05, PR-07] 或 [RV])
+#   缺省(不写 checks:) = 全部检查项启用; 写了 = 只保留列表内的
+# 示例:
+#   checks: [PR-01, PR-07]
+# ---------------------------------------------------------------------------

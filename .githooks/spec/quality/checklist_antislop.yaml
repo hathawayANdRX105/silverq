@@ -1,0 +1,23 @@
+# CK-ANTISLOP: AI slop 专项检查 — 单二进制 antislop 做 5 类规则
+# 依据: antislop (crates.io, github.com/skew202/antislop) — hybrid regex+AST, 毫秒级
+# 检测: Placeholder(TODO/FIXME) / Deferral(for now/temporary fix) / Hedging(hopefully/should work)
+#       / Stub(空实现) / NamingConvention — MECE 哲学: 与 clippy/eslint 正交互补, 不重复抓
+# 依赖: cargo install antislop。缺失时 harness 输出 [] 走 optional 静默跳过(不假绿, 不阻断)
+# 协议: mode:grep — harness 自扫仓库根, jq 把 antislop JSON 适配成 gate finding 数组
+# 注: --extensions 按需调; --only/--disable 可门控规则类(全部进 yaml 参数域)
+enabled: true
+hooks: [merge]
+sla: l2
+fail_severity: WARN
+mode: file
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/verify_chain.py"
+    - "--rule"
+    - "antislop"
+  # 候选 = 五类词法正则（高召回）; 判决 = jev noul '真 slop vs 合法用法' + score 严重度
+  # 无 key / 请求失败 -> 候选降级为 WARN 原样输出（召回不丢，处置照常）
+optional:
+ true
+timeout: 60

@@ -1,0 +1,25 @@
+# CK-DUPLICATION: 复制漂移检测 (L2 语义层)
+# 模式: 4+ 连续非空行在多个文件中重复出现 (clones 类)
+# 实现: sh + awk + sort + uniq (零外部依赖)
+# 性能: ~200ms (遍历 .rs 文件)
+# SLA: l2 (语义层, 秒级)
+# Hook: merge (重量检查, 不阻塞日常提交)
+enabled: true
+hooks: [merge]
+sla: l2
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/", "**/tests/**", "**/test_*.rs"]
+mode: file
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/verify_chain.py"
+    - "--rule"
+    - "duplication"
+  # 候选 = 4+ 连续非空行块(>80字符) md5 在本次变更文件集中重复; 判决 = jev noul '真漂移 vs 惯用相似'
+  # 范围 = 本次变更（抓新引入的复制漂移）; 无 key / 请求失败 -> 候选降级 WARN
+optional:
+ true
+timeout: 30

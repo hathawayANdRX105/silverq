@@ -36,7 +36,7 @@
 # === COMMIT (CM) ===
 #   CM-01: FAIL — commit 标题非 conventional commit
 #   CM-02: FAIL — commit 标题含 CJK
-#   CM-03: WARN — commit 与 PR 不一致
+#   CM-03: FAIL — commit 与 PR 不一致
 #
 # === REVIEW (RV) ===
 #   RV-01: FAIL — review 评论含 checkbox
@@ -56,17 +56,8 @@
 #   CL-02: FAIL — checklist 格式错误
 #   CL-03: WARN — checklist 缺少必要项
 #
-# === PR 合并前门禁 (checklist_pr_*.yaml, 经 dispatch github/pr_gates 段挂载) ===
-#   PR-LABEL-MISSING: FAIL — PR 缺 type label (pr_labels)
-#   PR-LABEL-DOMAIN:  FAIL — 标题命中域关键词但缺域 label (pr_labels, 建议性, 可降 WARN)
-#   PR-CRG-MISSING:   FAIL — PR 讨论区无 CRG 审查记录 (pr_crg_review)
-#   PR-CRG-FIX-MISSING: FAIL — 审查记录提到问题但缺修复/回应记录 (pr_crg_review)
-#
 # 示例: 把 PR-05 改成 INFO，不再阻塞无 Fixes # 的 PR
 # severity_overrides:
 #   PR-05: "INFO"
-#   PR-LABEL-DOMAIN: "WARN"  # 域 label 建议降级为提示, 不阻断
 
-severity_overrides:
-  CM-02: "WARN"
-  CM-03: "INFO"
+severity_overrides: {}

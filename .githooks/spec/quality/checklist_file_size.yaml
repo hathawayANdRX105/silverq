@@ -16,12 +16,10 @@ harness:
   args:
     - "-c"
     - |
-      ROOT=$(git rev-parse --show-toplevel)
+      ROOT=$(git rev-parse --show-toplevel); cd "$ROOT"
       LIMIT_LINES=1500
       LIMIT_BYTES=35840
-      matches=$(find "$ROOT" \( -name target -o -name .git -o -name .wt \) -prune \
-        -o -name '*.rs' -print 2>/dev/null \
-        | while read -r f; do
+      matches=$(git ls-files -- '*.rs' | while read -r f; do
             lines=$(( $(wc -l < "$f" 2>/dev/null) ))
             bytes=$(( $(wc -c < "$f" 2>/dev/null) ))
             if [ "$lines" -gt "$LIMIT_LINES" ] || [ "$bytes" -gt "$LIMIT_BYTES" ]; then

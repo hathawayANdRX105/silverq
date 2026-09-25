@@ -1,0 +1,11 @@
+enabled: true
+naming_pattern: 'fn (test_|it_)'
+min_assertions_per_test: 1
+assert_patterns: ['assert!', 'assert_eq!', 'assert_ne!']
+required_helpers: []
+paths_include: ["**/tests/*.rs", "**/*_test.rs", "**/test_*.rs"]
+paths_exclude: ["target/", ".wt/"]
+
+# 检查能力选择 / 严重度 (缺省 = 全部启用, WARN)
+#   checks: [CL-01]   # 能力白名单: 只保留列出的检查项 (ID 或前缀)
+#   fail_severity: WARN  # 本家族检查项严重度 (FAIL=硬拦 / WARN=提示 / INFO=参考)

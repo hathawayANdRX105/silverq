@@ -1,0 +1,22 @@
+# API Endpoint Security Spec
+# Validates that public API endpoints properly handle input validation, output sanitization, error handling, and authentication
+# This spec catches semantic security issues that grep alone cannot detect
+
+enabled: true
+hooks: [pre-push, merge]
+sla: l2
+fail_severity: WARN
+mode: file
+match:
+  # Engine-level filtering to limit to files that could contain API endpoints
+  paths_include: ["**/*.rs", "**/*.py", "**/*.js", "**/*.ts"]
+  paths_exclude: ["target/", ".wt/", "node_modules/", "**/*test*", "**/tests/**"]
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/jev_rule.py"
+    - "--config"
+    - ".githooks/spec/custom/api_endpoint_security.json"
+  # This spec uses semantic judgment via jev - public endpoints without proper security controls are HIGH-RISK
+optional: true
+timeout: 300

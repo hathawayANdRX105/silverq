@@ -1,0 +1,22 @@
+{
+  "default_fail": 0.85,
+  "default_warn": 0.5,
+  "evidence_sufficient": {
+    "type": "noul",
+    "instructions": "Is the evidence sufficient to judge whether the acceptance items are satisfied (real code, tests, or command output rather than bare claims)?",
+    "criteria": {"true": "evidence is empty, vague, or claim-only", "false": "concrete evidence present"},
+    "fail": 0.9,
+    "warn": 0.6
+  },
+  "verdict": {
+    "type": "choice",
+    "instructions": "What is the completion character of this issue given the evidence?",
+    "criteria": {
+      "all_done": "every acceptance item is demonstrated by the evidence",
+      "some_pending": "at least one item is not demonstrated",
+      "not_started": "the evidence does not correspond to the items at all"
+    },
+    "fail": 0.85,
+    "warn": 0.5
+  }
+}

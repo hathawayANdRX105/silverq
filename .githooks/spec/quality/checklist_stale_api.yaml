@@ -3,7 +3,7 @@
 #       std::sync::ONCE_INIT / std::cell::BorrowError
 # grep 模式, 零 LLM
 enabled: true
-hooks: [pre-commit, pre-push, merge]
+hooks: [merge]
 sla: l1
 fail_severity: WARN
 match:
@@ -18,7 +18,9 @@ harness:
       exec 2>/tmp/gate-stale-api-err.log
       ROOT=$(git rev-parse --show-toplevel)
       PAT='(std::mem::uninitialized|try!\(|Error::description\(\)|std::sync::ONCE_INIT|std::cell::BorrowError)'
-      matches=$(grep -rEn "$PAT" "$ROOT/crates" "$ROOT/bin" --include='*.rs' 2>/dev/null | head -50)
+      cd "$ROOT"
+      # 扫描范围 = git 跟踪文件集 (gitignore 感知)
+      matches=$(git ls-files -z -- '*.rs' | grep -zE '^(crates|bin)/' | xargs -0r grep -nEn "$PAT" 2>/dev/null | head -50)
       if [ -z "$matches" ]; then
         echo '[]'
       else

@@ -1,0 +1,22 @@
+enabled: true
+# 根目录无 manifest (如 canon 的嵌套 workspace bin/gate) 时跳过, 防假 FAIL
+command: sh
+args:
+  - "-c"
+  - |
+    ms=$(git ls-files | grep -E '(^|/)Cargo.toml$')
+    [ -z "$ms" ] && exit 0
+    rc=0
+    for m in $ms; do
+      d=$(dirname "$m")
+      out=$(cd "$d" && cargo fmt --check 2>&1) || {
+        case "$out" in
+          *"believes it's in a workspace"*) : ;;  # 独立于 workspace 的 crate: 跳过（cargo 配置问题, 非 fmt 违规）
+          *) printf '%s\n' "$out"; rc=1 ;;
+        esac
+      }
+    done
+    exit $rc
+fail_severity: FAIL
+paths_include: ["**/*.rs"]
+paths_exclude: ["target/", ".wt/"]

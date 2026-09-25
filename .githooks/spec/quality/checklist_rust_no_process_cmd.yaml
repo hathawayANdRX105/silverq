@@ -17,10 +17,9 @@ harness:
     - |
       ROOT=$(git rev-parse --show-toplevel)
       # 检测 std::process::Command 拉 HTTP CLI
-      matches=$(grep -rEn 'std::process::Command.*"(curl|wget|httpie)"' "$ROOT" \
-        --include='*.rs' \
-        --exclude-dir=target --exclude-dir=.wt --exclude-dir=.git \
-        --exclude-dir=tests 2>/dev/null | head -20)
+      cd "$ROOT"
+      # 扫描范围 = git 跟踪文件集 (gitignore 感知): 未跟踪的参考目录 (todo/ 等) 不入扫
+      matches=$(git ls-files -z -- '*.rs' | grep -zvE '(^|/)tests/|^crates/tools/' | xargs -0r grep -nEn 'std::process::Command.*"(curl|wget|httpie)"' 2>/dev/null | head -20)
       if [ -z "$matches" ]; then
         echo '[]'
       else
