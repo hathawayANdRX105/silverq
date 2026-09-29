@@ -23,9 +23,10 @@ use std::time::{Duration, Instant};
 pub const RACE_THRESHOLD: Duration = Duration::from_secs(2);
 /// 路由缓存 TTL。
 pub const ROUTE_TTL: Duration = Duration::from_secs(300);
-/// 直连连续失败多少次后移除缓存（TLS 盲区缓解：TCP 通但 TLS 死的直连
-/// 会在应用层反复失败，靠失败计数把它踢出）。
-const DIRECT_FAILS_TO_DROP: u32 = 2;
+/// 直连连续失败多少次后把条目切到代理路线（TLS 盲区缓解：TCP 通但 TLS 死
+/// 的直连会在应用层反复失败，靠失败计数强制收敛到代理，不再回未命中重试
+/// 直连——那会对这类域名形成永久的直连预算循环）。
+const DIRECT_FAILS_TO_SWITCH: u32 = 2;
 /// 缓存条目上限。过期只在 decide/record 访问该 host 时惰性清理，浏览器
 /// 流量里大量一次性域名不会被复查——不主动清扫则长跑进程内存只涨不消。
 const MAX_ENTRIES: usize = 8192;
@@ -122,9 +123,15 @@ impl RouteCache {
             RouteOutcome::Failed => {
                 if route == Route::Direct {
                     e.direct_fails += 1;
-                    if e.direct_fails >= DIRECT_FAILS_TO_DROP {
-                        // 直连连续失败：移除缓存回退代理（TLS 盲区缓解）
-                        m.remove(host);
+                    if e.direct_fails >= DIRECT_FAILS_TO_SWITCH {
+                        // 直连连续失败：条目切到代理路线（TLS 盲区缓解）。不能
+                        // 移除回未命中——未命中又优先直连，对「TCP 通但 TLS 被
+                        // 吞」的域名形成永久直连循环（#21）。切到代理后下次
+                        // 请求直接走代理链，成功即把路线写回缓存，形成收敛。
+                        e.route = Route::Proxy;
+                        e.direct_fails = 0;
+                        e.slow = false;
+                        e.until = now + ROUTE_TTL;
                         return;
                     }
                     e.slow = true; // 直连失败一次：下次竞速验证
@@ -216,16 +223,17 @@ mod tests {
         assert!(matches!(c.decide("h.com"), Decision::Proxy));
     }
 
+    /// 连续直连失败后条目切到代理路线，不回未命中（#21 回归）：
+    /// 「TCP 通、TLS 被吞」的域名从没写过代理路线，若踢条目回未命中，
+    /// 未命中又优先直连，每次访问都重烧一轮直连预算，永不收敛。
     #[test]
-    fn direct_failures_drop_entry() {
+    fn direct_failures_switch_entry_to_proxy() {
         let c = RouteCache::new();
-        c.record("d.com", Route::Proxy, responded(3000)); // slow
+        assert!(matches!(c.decide("d.com"), Decision::Direct)); // 未命中 → 直连观察
         c.record("d.com", Route::Direct, RouteOutcome::Failed);
-        assert!(!matches!(c.decide("d.com"), Decision::Direct));
+        assert!(matches!(c.decide("d.com"), Decision::Race)); // 一次失败 → 竞速验证
         c.record("d.com", Route::Direct, RouteOutcome::Failed);
-        // 连续 2 次失败 → 条目移除 → 回未命中语义（直连优先，代理由
-        // 调用方 fallback 链兜底，成功后缓存会改写成代理）
-        assert!(matches!(c.decide("d.com"), Decision::Direct));
+        assert!(matches!(c.decide("d.com"), Decision::Proxy)); // 两次 → 切代理，收敛
     }
 
     #[test]
