@@ -1,0 +1,76 @@
+{
+  "ocr_default_review": {
+    "intent": "Generic code review against the OpenCodeReview default rubric (internal/config/rules/rule_docs/default.md), applied to changed files NOT already covered by the language-specific checklists (no .rs/.go/.js/.jsx/.ts/.tsx). Judge the CHANGED code. Favor precision over recall: report only defects likely real; treat correctness and security findings as blocking, style-only as advisory. Before reporting any non-local claim, establish the call site, ownership, synchronization, and trust boundary from the diff and provided context; report a finding only on concrete evidence actually present in the change; prefer a false negative over a false positive; do not turn formatter/linter-enforced style into blocking findings. The overall_severity score counts only defects that survive this guard.",
+    "paths_include": [
+      "**/*.py", "**/*.sh", "**/*.bash",
+      "**/*.sql", "**/*.rb", "**/*.php", "**/*.cs", "**/*.java", "**/*.kt",
+      "**/*.c", "**/*.cc", "**/*.cpp", "**/*.h",
+      "**/*.yml", "**/*.yaml", "**/*.toml", "**/*.json"
+    ],
+    "paths_exclude": [
+      "target/", ".wt/", "vendor/", "node_modules/",
+      "**/*.lock", "**/package-lock.json",
+      "**/*.min.js", "**/testdata/**"
+    ],
+    "state": { "file": true, "diff": true, "context_files": [] },
+    "questions": {
+      "correctness": {
+        "type": "noul",
+        "instructions": "Is the changed logic correct? Are boundary conditions handled? Are exceptions/errors handled properly and not silently swallowed? Is the code thread-safe where it touches shared state under concurrency?",
+        "criteria": {
+          "true": "A correctness defect (wrong logic, unhandled boundary, swallowed error, thread-unsafety) is present in the changed code",
+          "false": "The changed code is correct and its errors/boundaries/concurrency are handled"
+        },
+        "fail": 0.85, "warn": 0.6
+      },
+      "security": {
+        "type": "noul",
+        "instructions": "Are there security vulnerabilities in the changed code: SQL injection, XSS, command injection, path traversal; is sensitive information (secrets, credentials, PII) handled correctly; is permission/authorization validation complete? Confirm untrusted input reaches the sink before reporting.",
+        "criteria": {
+          "true": "A concrete security vulnerability or sensitive-data leak is present in the changed code",
+          "false": "No security defect, or no untrusted input reaches the changed code"
+        },
+        "fail": 0.85, "warn": 0.6
+      },
+      "performance": {
+        "type": "noul",
+        "instructions": "Are there obvious performance defects in the changed code: N+1 queries, unnecessary loops over large collections, redundant computation; are resources (files, connections, transactions, locks, subprocesses) properly released on all paths?",
+        "criteria": {
+          "true": "A material performance defect or resource leak is present in the changed code",
+          "false": "No significant performance defect; resources are released"
+        },
+        "fail": 0.7, "warn": 0.55
+      },
+      "maintainability": {
+        "type": "noul",
+        "instructions": "Is the changed code clear and easy to understand? Do names accurately express intent? Does it follow the project's existing code style and architecture patterns? Report only when the code is genuinely harder to read or maintain, not personal style preference.",
+        "criteria": {
+          "true": "The changed code is meaningfully harder to understand or maintain than the surrounding code",
+          "false": "The changed code is clear and consistent with the project"
+        },
+        "fail": 0.7, "warn": 0.55
+      },
+      "test_coverage": {
+        "type": "noul",
+        "instructions": "Do the critical logic paths changed here have corresponding test cases, and do those tests cover boundary conditions? Only report when a concrete changed failure mode has no test that would catch it.",
+        "criteria": {
+          "true": "A critical changed path or boundary has no test that would catch a real regression",
+          "false": "Changed critical paths are test-covered, or no critical path changed"
+        },
+        "fail": 0.7, "warn": 0.55
+      },
+      "overall_severity": {
+        "type": "score",
+        "instructions": "Overall severity of the real defects in the changed code (ignoring advisory-only/style items). 0 = no defects. 1 = minor/recoverable issues only. 2 = at least one likely-correctness issue that can cause wrong behavior. 3 = a correctness defect likely to cause a real bug, or a security issue at a trust boundary. 4 = a security defect with a concrete exploit path, or a data-loss defect.",
+        "criteria": [
+          "No real defect in the changed code; at most style nitpicks",
+          "Only minor, recoverable issues (no wrong behavior expected)",
+          "At least one likely-correctness issue that can cause wrong behavior",
+          "A correctness defect likely to cause a real bug, or a security issue at a trust boundary",
+          "A security defect with a concrete exploit path, or a data-loss defect"
+        ],
+        "fail": 2, "warn": 1
+      }
+    }
+  }
+}

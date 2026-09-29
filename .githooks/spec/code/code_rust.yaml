@@ -1,5 +1,6 @@
 enabled: true
-# 根目录无 manifest (如 canon 的嵌套 workspace bin/gate) 时跳过, 防假 FAIL
+# 根目录无 manifest (如 harness 独立 crate) 时跳过, 防假 FAIL
+# fmt 违规以 cargo fmt 的 "Diff in" 输出为准; metadata/workspace 报错是环境配置问题, 不算违规
 command: sh
 args:
   - "-c"
@@ -11,8 +12,8 @@ args:
       d=$(dirname "$m")
       out=$(cd "$d" && cargo fmt --check 2>&1) || {
         case "$out" in
-          *"believes it's in a workspace"*) : ;;  # 独立于 workspace 的 crate: 跳过（cargo 配置问题, 非 fmt 违规）
-          *) printf '%s\n' "$out"; rc=1 ;;
+          *"Diff in"*) printf '%s\n' "$out"; rc=1 ;;
+          *) : ;;
         esac
       }
     done

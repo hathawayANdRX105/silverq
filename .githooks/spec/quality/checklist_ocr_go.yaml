@@ -1,0 +1,20 @@
+# ocr-review 替代品（Go）
+# 忠实移植 alibaba/open-code-review 的 internal/config/rules/rule_docs/go.md：
+# 7 类缺陷（errors/nil/context/channels/resources/collections/security）+ 总分（score）。
+# 精度优先（ocr 原文原则）：scope-guard 折入 criteria——确认并发可达、确认攻击者可控才报。
+enabled: true
+hooks: [merge]
+sla: l2
+fail_severity: WARN
+mode: file
+match:
+  paths_include: ["**/*.go"]
+  paths_exclude: ["**/*_test.go"]
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/jev_rule.py"
+    - "--config"
+    - ".githooks/spec/harness/ocr-go.json"
+optional: true
+timeout: 300

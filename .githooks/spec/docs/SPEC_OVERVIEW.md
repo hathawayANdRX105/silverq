@@ -5,9 +5,9 @@
 ```
 .githooks/
 ├── hooks/                     # git hooks 入口（core.hooksPath = .githooks/hooks）
-│   ├── pre-commit            # bash 包装 → exec gate pre-commit（CM-01/02/03 + workspace + code + checklist）
-│   ├── pre-push              # bash 包装 → exec gate pre-push（workspace + code + checklist）
-│   └── merge                 # bash 包装 → exec gate merge（PR + reviews + cleanup + CRG + ocr + checklist）
+│   ├── pre-commit            # bash 包装 → exec canon pre-commit（CM-01/02/03 + workspace + code + checklist）
+│   ├── pre-push              # bash 包装 → exec canon pre-push（workspace + code + checklist）
+│   └── merge                 # bash 包装 → exec canon merge（PR + reviews + cleanup + CRG + ocr + checklist）
 ├── spec/                      # 规则配置（改规则只改这里，不改脚本）
 │   ├── SPEC_OVERVIEW.md      # 本文件（规范总览）
 │   ├── dispatch.yaml         # 钩子→主题映射（哪个钩子跑哪些检查）
@@ -42,7 +42,7 @@
 - 规则**只**在 `.githooks/spec/*.yaml`（参数）和 Rust 校验器（逻辑）两处，改规则只改 spec
 - **新增/修改规则后必须更新本文档**
 - 规则编号采用**主题前缀 + 连续编号**（IS/PR/RV/GT/WS/CD/CL/CM/CK）
-- commit 标题规则 CM-01/02/03 实现在 `gate pre-commit`，语义与 PR-01/PR-02 对齐
+- commit 标题规则 CM-01/02/03 实现在 `canon pre-commit`，语义与 PR-01/PR-02 对齐
 
 ## 主题一：GitHub 规则（IS/PR/RV）
 
@@ -100,16 +100,16 @@
 - GT-05 pr merge 前 checkbox 全勾 + 关联 Fixes issue Done when 全勾（epic 目标豁免，由 GT-06 保障）+ --body 理由 + squash 标题 CM-01/CM-02 — FAIL 拒（开关 `merge_checkbox_gate`/`merge_fixes_gate`/`merge_requires_body`/`merge_title_gate`）— 触发：gh pr merge
 - GT-06 epic close/merge 前所有 sub-issues 已关闭（开关 `epic_sub_issue_gate`；sub 查询失败仍 fail-closed 硬拒，不可配）— FAIL 拒 — 触发：gh issue close / gh pr merge
 - GT-07 merge 后自动在 PR 留言 + 删除本地 head 分支（安全模式）— 行为（无拦截）— 触发：gh pr merge
-- RV-07 有文件改动的 PR merge 前必须 CRG + ocr 审查 — FAIL 阻塞（`github_reviews.yaml merge_review.required: false` 关；`ocr_timeout_secs` 调超时）— 触发：gate merge
+- RV-07 有文件改动的 PR merge 前必须 CRG + ocr 审查 — FAIL 阻塞（`github_reviews.yaml merge_review.required: false` 关；`ocr_timeout_secs` 调超时）— 触发：canon merge
 
 参数剥离：`gh_args()` 剥 `--parent`/`--repo`/`-R`；`arg_repo()` 提取 `--repo` 值（issue close 从 --repo 或 cwd 取仓库）。
 
-## 主题三：钩子调度（gate pre-commit / pre-push / merge）
+## 主题三：钩子调度（canon pre-commit / pre-push / merge）
 
-- `gate init` 部署：复制二进制到 `~/.local/bin/gate`（+ 同二进制为 `~/.local/bin/gh`）、设置 `core.hooksPath=.githooks/hooks`、写 hook 模板
+- `canon init` 部署：复制二进制到 `~/.local/bin/canon`（+ 同二进制为 `~/.local/bin/gh`）、设置 `core.hooksPath=.githooks/hooks`、写 hook 模板
 - pre-commit：CM-01/CM-02/CM-03（commit 标题格式/CJK/与 PR type 一致）+ workspace（WS-*）+ code（CD-*）
 - pre-push：workspace + code（cargo 不传 target、ruff 排除 .githooks、file_placement 忽略 .githooks/）
-- merge（手动 `gate merge <owner/repo> <pr_number> [--dry-run]`）：PR + reviews + cleanup + RV-07（CRG + ocr）
+- merge（手动 `canon merge <owner/repo> <pr_number> [--dry-run]`）：PR + reviews + cleanup + RV-07（CRG + ocr）
 
 ### Commit 标题规则（CM-01 ~ CM-03）
 
@@ -136,13 +136,13 @@
 
 ## 主题六：Cleanup（CL-01 ~ CL-03，Rust cleanup validators）
 
-- CL-01 branch_cleanup：merged/orphan/temp 分支清理，dry-run 默认（gate merge 调用）；配置 `spec/cleanup_branch_cleanup.yaml` — WARN
-- CL-02 tests_check：四语言测试命名/断言数/必需 helper（配置 `spec/cleanup_tests_{rust,go,javascript,bash}.yaml`，gate merge 调用）— WARN
-- CL-03 docs_hygiene：全角括号/死链/遗留标记（TODO/FIXME/XXX）/空文件/CRLF/尾随空白（配置 `spec/cleanup_docs_hygiene.yaml`，gate merge 调用）— WARN/INFO
+- CL-01 branch_cleanup：merged/orphan/temp 分支清理，dry-run 默认（canon merge 调用）；配置 `spec/cleanup_branch_cleanup.yaml` — WARN
+- CL-02 tests_check：四语言测试命名/断言数/必需 helper（配置 `spec/cleanup_tests_{rust,go,javascript,bash}.yaml`，canon merge 调用）— WARN
+- CL-03 docs_hygiene：全角括号/死链/遗留标记（TODO/FIXME/XXX）/空文件/CRLF/尾随空白（配置 `spec/cleanup_docs_hygiene.yaml`，canon merge 调用）— WARN/INFO
 
-## 主题七：本地审查（RV-07，gate review）
+## 主题七：本地审查（RV-07，canon review）
 
-`gate review [--post|--post-inline] [--pr N]`：
+`canon review [--post|--post-inline] [--pr N]`：
 
 1. CRG 结构分析：`code-review-graph detect-changes --brief --base main` → 影响文件/风险分
 2. ocr AI 审查：`ocr review --format json --audience agent` → findings（path/start_line/severity/category/content）
@@ -157,7 +157,7 @@
 - harness = 任意可执行文件，stdout 必须是 finding JSON 数组（与 code/ocr/CRG 同协议）
 - 严重度合并：harness 报的与 yaml `fail_severity` **就高取大**（harness FAIL 永远阻断）
 - `optional: true`（默认）harness 缺失 → WARN 跳过；`false` → FAIL
-- 实现：`crates/spec/src/tools/checklist.rs`（CK-01 dispatcher） + `gate pre-commit/pre-push/merge` 调度
+- 实现：`crates/spec/src/tools/checklist.rs`（CK-01 dispatcher） + `canon pre-commit/pre-push/merge` 调度
 - 详见 [CHECKLIST_SPEC.md](./CHECKLIST_SPEC.md) 与 [CHECKLIST_DEMO_README.md](./CHECKLIST_DEMO_README.md)
 
 - CK-01 yaml 字段：`enabled` / `hooks` / `match.{paths_include,paths_exclude}` / `mode` / `harness.{command,args}` / `timeout` / `optional` / `fail_severity` — FAIL/WARN/INFO
@@ -177,13 +177,13 @@
 - git push → WS-01、WS-02、CD-01~06、checklist（同上）
 > 清单更新顺序：按文件名字典序（加 `00_`/`10_` 前缀可强制提前）。
 
-## 主题十：手动运行检查（gate check）
+## 主题十：手动运行检查（canon check）
 
-`gate check [names...]` — 按名字或列出所有 checklist，强制忽略 yaml 的 `hooks:` 过滤，用于调试/CI/按需跑：
+`canon check [names...]` — 按名字或列出所有 checklist，强制忽略 yaml 的 `hooks:` 过滤，用于调试/CI/按需跑：
 
-- `gate check` → 列出当前 SLA 层级（默认 l1）下的检查项
-- `gate check clippy` → 只跑 clippy
-- `gate check --sla l2` / `l3` → 解锁更高 SLA 层
+- `canon check` → 列出当前 SLA 层级（默认 l1）下的检查项
+- `canon check clippy` → 只跑 clippy
+- `canon check --sla l2` / `l3` → 解锁更高 SLA 层
 
 每次加/删 checklist yaml，清单自动更新；新规则只需 `cp spec/xxx.yaml .githooks/spec/` 即可。
 
@@ -216,11 +216,11 @@ close 路径另有 `done_when_judge`（`github_issues.yaml`）：GT-04 机械门
 - **l2 语义层**：轻量，秒级（影响面 / 重复检测）。FAIL 硬门槛。
 - **l3 LLM 层**：按需，秒~分钟级（`review_chain` 三档降级：jev → 小模型 → 无；`ferrite_oversize` wildtoken `fast-l`）。INFO/score/confidence，不阻断；per-question fail 阈值命中时 FAIL。深度审查自行 `ocr review --format json --audience agent`。
 
-`gate check` 默认只跑 l1；`--sla l2` 或 `l3` 解锁更高层。
-l3 默认 hooks: [merge]，本地用 `gate check <l3-name> --sla l3` 触发。
+`canon check` 默认只跑 l1；`--sla l2` 或 `l3` 解锁更高层。
+l3 默认 hooks: [merge]，本地用 `canon check <l3-name> --sla l3` 触发。
 
 ## 更新与校验
 
 - 新增/修改规则：只改 `.githooks/spec/*.yaml` 参数 + 相应校验器逻辑，更新本文档
-- gate 改动后：`cargo build --release -p gate-bin` → `upx --best --lzma target/release/gate` → `gate init` 重部署 + `install` 复制为 `~/.local/bin/gh`
+- gate 改动后：`cargo build --release -p gate-bin` → `upx --best --lzma target/release/gate` → `canon init` 重部署 + `install` 复制为 `~/.local/bin/gh`
 - 触发式按上表 lazy 执行，不全局扫描

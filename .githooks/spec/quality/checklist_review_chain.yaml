@@ -10,7 +10,7 @@
 # per-question 阈值(confidence-gated routing): 问题 JSON 里每个问题可带
 #   "fail"/"warn" (缺省用 harness 参数 0.8/0.5); p(issue)>=fail FAIL 硬拦,
 #   >=warn WARN, 否则 INFO。findings 带 tier/confidence extra,
-#   `gate check --json` 供开发 agent 自定行动阈值。
+#   `canon check --json` 供开发 agent 自定行动阈值。
 #
 # 任何基础设施失败(无 key/网络/解析失败)只降级不阻断。
 enabled: true

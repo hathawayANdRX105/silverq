@@ -1,0 +1,35 @@
+# CK-DIOXUS-STYLE-SCATTER: tailwind 类名散落 / 硬编码颜色
+#
+# 为什么: 样式散在 rsx 里，换主题要逐处改；原始色板类（bg-zinc-800、text-white）
+#   绕开了语义 token，主题色板一换就散架。ui-kit 的 styles.rs 已经是语义常量
+#   的正本（TYPE_*/C_*/S_*/B_* + 页面级常量），没往外引等于没在用。
+# 判据（三类 finding）:
+#   DIOXUS-INLINE-CLASS   内联 class: 字符数 ≥72，样式该抽成常量或用 ui-kit 常量
+#   DIOXUS-HARDCODED-COLOR  #hex 硬编码颜色
+#   DIOXUS-RAW-PALETTE    bg-zinc-800 / text-white 这类原始色板类
+# 重要取舍: 不要求「所有 class 都得是常量」。ui-kit styles.rs:84-90 明确禁止把
+#   单个原子类也提成常量——过度抽象比散落更难维护。只在成组出现时抽。
+# 阈值来自实测: 存量仓 ferrite 全仓 1971 条（RAW-PALETTE 1401 集中在正在迁移的
+#   ui-components 副本里），走 --scope changed 后归零。所以本规则是「新代码不许
+#   新增散落」，不是「清理历史债」——历史债走 merge 的全仓审计 + severity_overrides。
+# 工具: dioxus_web.py（l1 确定性，零 LLM，~1s）
+enabled: true
+hooks: [pre-push, merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/", "node_modules/"]
+mode: grep
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/dioxus_web.py"
+    - "--only"
+    - "style"
+    - "--scope"
+    - "changed"
+    - "--class-limit"
+    - "72"
+optional: false
+timeout: 60

@@ -1,0 +1,97 @@
+{
+  "ocr_js_review": {
+    "intent": "JavaScript/TypeScript/JSX/TSX code review against the OpenCodeReview semantic rubric (internal/config/rules/rule_docs/ts_js_tsx_jsx.md). Judge the CHANGED code. Favor precision over recall: report only defects likely real. Correctness and security findings are blocking; style-only items are advisory. React best-practice rules apply only when the changed code is a React component or uses hooks; otherwise answer false for that question. Hardcoded business strings/URL paths/numbers are defects; simple UI text may be relaxed. Before reporting any non-local claim, establish the call site, ownership, synchronization, and trust boundary from the diff and provided context; report a finding only on concrete evidence actually present in the change; prefer a false negative over a false positive; do not turn formatter/linter-enforced style into blocking findings. The overall_severity score counts only defects that survive this guard.",
+    "paths_include": [
+      "**/*.js",
+      "**/*.jsx",
+      "**/*.ts",
+      "**/*.tsx"
+    ],
+    "paths_exclude": [
+      ".wt/",
+      "**/*.d.ts",
+      "**/*.test.*",
+      "**/*.spec.*"
+    ],
+    "state": {
+      "file": true,
+      "diff": true,
+      "context_files": []
+    },
+    "questions": {
+      "typos": {
+        "type": "noul",
+        "instructions": "Does the changed code have spelling errors in variable names, function names, component names, or Props property names, or in log/error message strings that affect readability?",
+        "criteria": {
+          "true": "A declaration-site or message typo is present in the changed code",
+          "false": "No typos in the changed code"
+        },
+        "fail": 0.8,
+        "warn": 0.6
+      },
+      "dead_code": {
+        "type": "noul",
+        "instructions": "Does the changed code contain dead code: branches where the condition is always false or code after an unconditional return; variables declared but never read or referenced; or large blocks of commented-out code with no apparent intent to retain?",
+        "criteria": {
+          "true": "Dead or unreachable code is present in the changed code",
+          "false": "No dead code in the change"
+        },
+        "fail": 0.7,
+        "warn": 0.55
+      },
+      "code_quality": {
+        "type": "noul",
+        "instructions": "Does the changed code violate the quality rules: duplicate logic that should be extracted; hardcoded business strings/URL paths/business numbers (simple UI text relaxed); using var instead of let/const; loose equality == / != instead of === / !==; using the any type without an explanatory comment; missing null checks when accessing or destructuring values; nested ternary expressions? Or are complex business logic blocks without a clear explanatory comment?",
+        "criteria": {
+          "true": "At least one listed quality-rule violation is present in the changed code",
+          "false": "None of the listed quality rules are violated in the change"
+        },
+        "fail": 0.7,
+        "warn": 0.55
+      },
+      "react": {
+        "type": "noul",
+        "instructions": "Only if the changed code is a React component or uses hooks: does it violate React rules: calling hooks conditionally or outside React functions; lifting state higher than needed; useEffect missing dependencies or cleanup; side effects in render (API calls, DOM manipulation); inline style attributes for dynamic values that should be class-based; declaring a new component inside a component instead of a render method; or using React.memo/useMemo/useCallback without a demonstrated performance need (over-optimization)?",
+        "criteria": {
+          "true": "A React best-practice violation is present in the changed React code",
+          "false": "The changed code is not React, or the React usage follows the rules"
+        },
+        "fail": 0.8,
+        "warn": 0.6
+      },
+      "async": {
+        "type": "noul",
+        "instructions": "Does the changed async code lack proper error handling with user-friendly messages; use callback hell instead of async/await; or run independent async operations sequentially when Promise.all would parallelize them (without wrongly parallelizing dependent operations)?",
+        "criteria": {
+          "true": "An async-handling defect is present in the changed code",
+          "false": "Async code in the change handles errors correctly and uses the right concurrency shape, or there is no async code"
+        },
+        "fail": 0.8,
+        "warn": 0.6
+      },
+      "security": {
+        "type": "noul",
+        "instructions": "Security defects in the changed code: user input inserted via innerHTML without escaping/XSS protection; eval(), the Function() constructor, or string-arg setTimeout/setInterval; document.write(); exposed API keys or sensitive data; modifying native object prototypes (Array.prototype, Object.prototype). Confirm the input is user-controlled before reporting XSS; confirm attacker control for the others.",
+        "criteria": {
+          "true": "A concrete security defect is present in the changed code",
+          "false": "No security defect, or no untrusted input reaches the changed code"
+        },
+        "fail": 0.85,
+        "warn": 0.6
+      },
+      "overall_severity": {
+        "type": "score",
+        "instructions": "Overall severity of the real defects in the changed JavaScript/TypeScript code (ignoring advisory-only/style items). 0 = no defects. 1 = minor/recoverable issues only. 2 = at least one likely-correctness issue that can cause wrong behavior. 3 = a correctness defect likely to cause a real bug, or a security issue at a trust boundary. 4 = a security defect with a concrete exploit path (XSS, code injection).",
+        "criteria": [
+          "No real defect in the changed code; at most style nitpicks",
+          "Only minor, recoverable issues (no wrong behavior expected)",
+          "At least one likely-correctness issue that can cause wrong behavior",
+          "A correctness defect likely to cause a real bug, or a security issue at a trust boundary",
+          "A security defect with a concrete exploit path"
+        ],
+        "fail": 2,
+        "warn": 1
+      }
+    }
+  }
+}

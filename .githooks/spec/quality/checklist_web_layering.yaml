@@ -1,0 +1,30 @@
+# CK-WEB-LAYERING: web crate 的分层方向
+#
+# 为什么: 层级是单向的 views → components/layouts/utils。反向依赖一旦出现，
+#   低层组件就得知道页面级状态，UI 就再也拆不动了。
+# 判据: components/ layouts/ utils/ 里出现 `use crate::views::` 或 `use super::views::`。
+#   —— import 方向是唯一零歧义的可判定信号。
+# 不按目录一刀切: omenic 的 views/config.rs 放 6 个 #[component]、views/stats.rs 放 5 个，
+#   那是他们刻意的「一文件一 pub 组件 + 私有子组件同文件」约定（lib.rs:3-6 自述）。
+#   写成「views 里不许定义组件」会误报 6 处，是错的规则。
+# 现状: omenic 0 违例、ferrite 0 违例 → 这是能硬拦的干净约束，故 FAIL。
+#   与 RSX-NESTED-ELEMENT 的 WARN 定位不同：这条是架构红线，不是风格偏好。
+# 工具: dioxus_web.py（l1 确定性，零 LLM，~1s）
+enabled: true
+hooks: [pre-push, merge]
+sla: l1
+fail_severity: FAIL
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/", "node_modules/"]
+mode: grep
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/dioxus_web.py"
+    - "--only"
+    - "layering"
+    - "--scope"
+    - "changed"
+optional: false
+timeout: 60

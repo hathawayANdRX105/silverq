@@ -180,7 +180,7 @@ merge:
   - github/pull_requests
   - github/reviews
   - cleanup
-  - checklist      # 新增（手动 gate merge 时全跑）
+  - checklist      # 新增（手动 canon merge 时全跑）
 ```
 
 checklist 自身再用 `hooks:` 字段过滤；topic 进来后**每个 yaml 独立判断**是否在本钩子触发。
@@ -242,7 +242,7 @@ timeout: 60
 
 跑起来（mock harness 时）：
 ```
-$ gate pre-push
+$ canon pre-push
 [checklist.file_placement_demo] file_placement_demo.FP-01 WARN crates/page/admin/src/network.rs 2952 lines exceeds 1500
 ```
 
@@ -282,11 +282,11 @@ timeout: 30
 ## 迁移路径
 
 1. 加 `crates/spec/src/tools/checklist.rs`（~120 行）
-2. `bin/gate/src/main.rs` 在 PreCommit/PrePush/Merge 路径里调 `run_all`
+2. `src/main.rs` 在 PreCommit/PrePush/Merge 路径里调 `run_all`
 3. `.githooks/spec/dispatch.yaml` 加 `checklist` topic
 4. `.githooks/spec/SPEC_OVERVIEW.md` 加「主题九：Checklist（CK-01）」章节
 5. demo yaml + mock harness 脚本（不需真调 LLM；echo mock JSON 即可）
-6. `ferrite` 加 `.githooks/` + `gate init` → 跑 `gate pre-push` 验证
+6. `ferrite` 加 `.githooks/` + `canon init` → 跑 `canon pre-push` 验证
 
 ## 不做的事（YAGNI）
 

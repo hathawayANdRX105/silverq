@@ -1,0 +1,39 @@
+# CK-WEB-SPEC-DETERMINISTIC: web-spec 里能数得清的两条（R1.3 + H3）
+#
+# 依据: ferrite `todo/web-refract/web-spec.md`
+#   R1.3 §B2.4  一个 #[component] 函数体至多 1 个内容 rsx；验收方式就是
+#               「grep -c 'rsx!' × grep -c '#\[component\]' 逐文件对账」——
+#               这是纯计数，本来就该在 l1 用 grep 判完，不该付 LLM 的钱。
+#   H3   §B3    rsx 元素体内中文为 0，范围 = tab-page/ + components/；
+#               §B3.3 例外：data-testid 值、纯符号数字单位（"¥"）、测试断言不抽；
+#               §B3 明写「注释里的中文不算」。
+#
+# **本规则不判色值。** web-spec §B2.3 明确把「把 border-zinc-800 顺手改
+# border-border」列为 H1 违例，B2.5 与 B8 要求色值迁移单独开 PR。l1 在这里
+# 指挥换色 = 越权，且会让 agent 违反 H1。色值归 web_refactor 的 semantic_style
+# 问句（B8，jev l2）管。
+#
+# 语义部分（该抽什么组件、状态放哪层、注释六要素、复用 ui-components vs
+# 本页 components）**不在这里** —— 那是 web_refactor（jev l2, 13 问句）的职责。
+# 本规则只做它做不了的确定性部分，两者互补不重叠。
+#
+# 范围: --scope changed，存量债走 merge 全仓审计。
+# 工具: dioxus_web.py（l1 确定性，零 LLM，~1s）
+enabled: true
+hooks: [pre-push, merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/", "node_modules/"]
+mode: grep
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/dioxus_web.py"
+    - "--only"
+    - "spec"
+    - "--scope"
+    - "changed"
+optional: false
+timeout: 60
