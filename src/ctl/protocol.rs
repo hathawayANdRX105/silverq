@@ -56,6 +56,9 @@ pub struct CtlState {
     /// 调度进度（schedule_loop 写、web 面板读；与调度循环共享同一 Arc）
     #[cfg_attr(not(feature = "meow"), allow(dead_code))] // 仅 meow 的 web 模块读
     pub progress: Arc<crate::scheduler::SchedulerProgress>,
+    /// jev 决策器（未启用为 None）。ctl status 汇总、web 面板展示，
+    /// 与调度循环共享同一实例（head/统计同一份）。
+    pub jev: Option<Arc<crate::scheduler::jev::JevDecider>>,
 }
 
 impl CtlState {
@@ -74,6 +77,7 @@ impl CtlState {
         ui_dir: String,
         protocols: std::collections::HashMap<String, String>,
         progress: Arc<crate::scheduler::SchedulerProgress>,
+        jev: Option<Arc<crate::scheduler::jev::JevDecider>>,
     ) -> Self {
         Self {
             registry,
@@ -88,6 +92,7 @@ impl CtlState {
             ui_dir,
             protocols: Mutex::new(protocols),
             progress,
+            jev,
         }
     }
 
@@ -105,6 +110,7 @@ impl CtlState {
         ui_dir: String,
         protocols: std::collections::HashMap<String, String>,
         progress: Arc<crate::scheduler::SchedulerProgress>,
+        jev: Option<Arc<crate::scheduler::jev::JevDecider>>,
     ) -> Self {
         Self {
             pool,
@@ -118,6 +124,7 @@ impl CtlState {
             ui_dir,
             protocols: Mutex::new(protocols),
             progress,
+            jev,
         }
     }
 }
@@ -320,7 +327,12 @@ async fn do_status(state: &CtlState) -> String {
     let pool_len = state.pool.read().await.len();
     let pinned = state.pinned.load(Ordering::Relaxed);
     let path = state.nodes_path.lock().clone();
-    format!("nodes={pool_len} selection={sel:?} pinned={pinned} nodes_path={path}")
+    let jev = state
+        .jev
+        .as_ref()
+        .map(|j| j.summary())
+        .unwrap_or_else(|| "off".into());
+    format!("nodes={pool_len} selection={sel:?} pinned={pinned} nodes_path={path} jev={jev}")
 }
 
 /// 读一行（到 '\n' 或长度上限）。

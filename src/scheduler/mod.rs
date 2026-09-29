@@ -2,6 +2,7 @@
 pub mod batch;
 pub mod decision;
 pub mod fast_path;
+pub mod jev;
 pub mod node;
 pub mod persist;
 

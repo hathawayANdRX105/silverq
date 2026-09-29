@@ -36,6 +36,7 @@ select_top(N)  纯 EWMA 取前 N（无迟滞轮次）
 - **回环/私网/国内直连判定**（SOCKS 入站）：pin 优先，之后回环/私网目标原样直连、国内域名（`china-domains.txt`，11 万条后缀表）经真实 DNS 解析成 IP 后直连，其余交给域名级路线缓存（下一条）。避免每个死候选烧 4s、国内绕远、私网目标被拨到节点侧 loopback。
 - **直连优先 + 路线缓存（曾成功的路线优先）**：缓存未命中 → 先直连（真实 DNS 解析后拨 IP），拨不通回退代理候选链（fallback）；命中 → 照缓存里上次成功的路线走，可能是代理。首响应/失败写回缓存：代理首响应 > 2s 标记 slow → 下次并行竞速（直连 + 代理候选，TCP 先建连者胜）；换路线走滞回（新路线快过旧路线一半才接管，旧路线没有耗时基线时成功的直接接管），TTL 5 分钟。已知盲区：纯 TCP 观测分不出「TCP 通、TLS 断」——直连 relay 失败计 `direct_fails`，连续 2 次剔除条目回未命中。TUN 路径未接入（首响应信号在 meow 引擎内部）。
 - **节点 dial 真实 DNS 预解析**：节点服务器域名经固定上游（223.5.5.5 / 119.29.29.29，`SILVERQ_RESOLVE_UPSTREAMS` 可覆盖）预解析写 `NodeSpec.dial_addr`，adapter 拨号用真实 IP。修复 TUN + fake-IP 环境下「拨节点变成经候选链拨节点」的自指递归（2026-09-19 事故：健康检查幸存 14-30 → 0-1）。解析失败回退系统解析，只降级不丢节点。
+- **jev 判断接入（可选，默认关）**：`[jev].enabled = true` 时，每轮测速结束后把分数前 6 候选（只 tag + 指标，不发 server/端口/凭证）POST 给 Jev 的 `{model, state, questions}` 协议做一次 bounded decision，胜出节点顶到 selection 队首——其余候选仍按分数排，数据面 best→次优 候选链原样保留。**失败即回退纯分数选择**：传输失败（超时/非 2xx）、非法响应（fail-closed 校验）、逃生舱（ask_user 等）、胜出概率 < 阈值都算；连续失败进冷却，冷却期不发请求。pinned 时不发起也不应用（手动钉住优先级最高）。HTTP 走 reqwest + rustls，`.no_proxy()`（基础设施流量不吃环境代理，避免自指递归）。决策状态在 `silverq status` 的 `jev=` 段与 `/api/status` 的 `jev` 字段。
 
 ## 使用
 
@@ -60,6 +61,9 @@ silverq select auto           # 取消钉住，恢复自动
 | `SILVERQ_STATE` | `~/.local/state/silverq/scores.json` | EWMA 分数存档 |
 | `SILVERQ_RESOLVE_UPSTREAMS` | `223.5.5.5,119.29.29.29` | 节点 dial / 国内直连解析用的真实上游 DNS（逗号分隔） |
 | `SILVERQ_CHINA_DOMAINS` | `~/.config/silverq/rules/china-domains.txt` | 国内域名后缀表（缺失 = 空表 = 无直连判定） |
+| `SILVERQ_JEV_ENABLED` | TOML `[jev]` | 临时启停 jev 判断接入（优先级高于 TOML） |
+| `SILVERQ_JEV_BASE_URL` | TOML `[jev]` | jev endpoint 覆盖 |
+| `SILVERQ_JEV_API_KEY` | TOML `[jev]` | jev API key 覆盖（同规则：不入库、不打印） |
 
 无 `meow` feature 时用 `NoopMeasurer` 空跑（自测调度逻辑）：`cargo run -- serve nodes.yaml`
 
