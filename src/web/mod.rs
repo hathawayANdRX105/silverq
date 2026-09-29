@@ -161,6 +161,8 @@ struct StatusJson<'a> {
     selection: &'a [String],
     nodes: Vec<NodeJson<'a>>,
     progress: ProgressJson,
+    /// jev 决策状态（未启用为 null）
+    jev: Option<crate::scheduler::jev::JevStatus>,
 }
 
 fn css_response(body: &str) -> String {
@@ -265,6 +267,7 @@ async fn status_json(state: &CtlState) -> String {
         selection: &selection,
         nodes: nodes_json,
         progress,
+        jev: state.jev.as_ref().map(|j| j.status()),
     };
     serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into())
 }

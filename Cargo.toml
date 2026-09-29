@@ -21,6 +21,10 @@ async-trait = "0.1"
 base64 = "0.22"
 sha1 = "0.10"   # clash_api WebSocket 握手（已在依赖树，零新增下载）
 parking_lot = "0.12"
+# jev 判断接入：轮末 POST {model,state,questions} 调 provider（见 scheduler/jev.rs）。
+# 标准库无 TLS，依赖树里没有可复用的 HTTP 客户端；rustls 与 meow 侧同源。
+# default-features 关掉默认的系统 TLS（openssl），只走 rustls。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [dependencies.meow-proxy]
 version = "0.21"

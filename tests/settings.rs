@@ -66,3 +66,37 @@ state = "/tmp/s.json"
     assert_eq!(cfg.paths.state, "/tmp/s.json");
     let _ = std::fs::remove_file(p);
 }
+
+#[test]
+fn jev_disabled_by_default() {
+    // 生产安全底线：没写 [jev] 就绝不能对进程外发任何请求。
+    let cfg = load(std::path::Path::new("/nonexistent/silverq.toml")).unwrap();
+    assert!(!cfg.jev.enabled);
+    assert_eq!(cfg.jev.provider, "typesafe");
+    assert!((cfg.jev.min_probability - 0.5).abs() < f64::EPSILON);
+}
+
+#[test]
+fn parses_jev_section() {
+    let p = write(
+        "jev",
+        "[jev]\nenabled = true\nprovider = \"compatible\"\n\
+         base_url = \"http://127.0.0.1:8080\"\nmin_probability = 0.7\nttl_rounds = 2\n",
+    );
+    let cfg = load(&p).unwrap();
+    assert!(cfg.jev.enabled);
+    assert_eq!(cfg.jev.provider, "compatible");
+    assert_eq!(cfg.jev.base_url, "http://127.0.0.1:8080");
+    assert!((cfg.jev.min_probability - 0.7).abs() < f64::EPSILON);
+    assert_eq!(cfg.jev.ttl_rounds, 2);
+    let _ = std::fs::remove_file(p);
+}
+
+#[test]
+fn unknown_jev_key_is_rejected() {
+    // 拼错 key（enable 而非 enabled）必须大声失败：静默忽略会让人以为开着，
+    // 实际决策层从未启动，fallback 记账也永远是空的。
+    let p = write("jev-bad", "[jev]\nenable = true\n");
+    assert!(load(&p).is_err(), "[jev] 拼写错误的 key 必须报错");
+    let _ = std::fs::remove_file(p);
+}

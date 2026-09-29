@@ -66,3 +66,31 @@ fake_ip_cidr = "198.18.0.0/15"
 # 不走 TUN 的 CIDR（→ DIRECT）。私网 5 段是硬编码安全网，不用在这里重复；
 # 这里放自定义网段，或排查节点回环时加 "节点IP/32"。
 exclude_cidrs = []
+
+[jev]
+# jev 判断接入（默认关）：每轮测速结束后对分数前 N 候选做一次语义决策
+# （bounded decision），采纳时只把胜出节点顶到 selection 队首，其余仍按分数排。
+# 传输失败 / 非法响应 / 逃生舱 / 概率不足 一律自动回退纯分数选择，
+# 连续失败进冷却；pinned 时不发起也不应用。详见 src/scheduler/jev.rs。
+enabled = false
+# 判断传输：typesafe | openrouter | compatible（三者都吃 {model,state,questions} 协议）。
+# cloudflare / vercel 信封不同，暂不支持。
+provider = "typesafe"
+# endpoint 覆盖：留空 = provider 默认；compatible 时必填（自控的 Jev 兼容端点）。
+# base_url = "https://api.typesafe.ai"
+# API key：留空 = 读标准环境变量（TYPESAFE_API_KEY / OPENROUTER_API_KEY / JEV_API_KEY）。
+# 与 nodes.yaml 同规矩：本文件在 ~/.config/silverq/ 下，不入库、不打印。
+# api_key = ""
+# 模型（jev-latest = 跟随最新；openrouter 无此别名，需要时填具体版本）
+model = "jev-latest"
+# 单次决策超时（秒）：超时按传输失败处理 → 回退
+timeout_secs = 10
+# 送审候选数（2..=6，jev_decide 协议上限 6）
+candidate_count = 6
+# 胜出概率下限：分布低于它视为判断不足 → 回退
+min_probability = 0.5
+# 决策跨过几个轮末仍有效（0 = 只管下一轮）
+ttl_rounds = 1
+# 连续 N 次拿不到可用决策后冷却，冷却期跳过 10 轮（不每轮白等超时）
+fail_threshold = 3
+cooldown_rounds = 10

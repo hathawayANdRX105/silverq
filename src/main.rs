@@ -17,7 +17,7 @@ use silverq::dataplane::tun;
 use silverq::proxy::nodespec;
 #[cfg(feature = "meow")]
 use silverq::proxy::{factory, meow};
-use silverq::scheduler::{batch, decision, fast_path, persist, SchedulerProgress};
+use silverq::scheduler::{batch, decision, fast_path, jev, persist, SchedulerProgress};
 #[cfg(feature = "meow")]
 use silverq::web;
 
@@ -147,6 +147,23 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
 
     // 4. 调度循环（测速 + EWMA + 切换），pinned 时暂停覆盖
     let progress = Arc::new(SchedulerProgress::default());
+    // jev 判断接入：只有 [jev].enabled 才构造；配置残缺只降级禁用（记错误日志），
+    // 不因为一个可选增强杀启动。
+    let jev = match jev::JevDecider::new(&file_cfg.jev.resolved()) {
+        Ok(Some(j)) => {
+            tracing::info!(
+                provider = j.provider(),
+                candidates = j.candidate_count(),
+                "jev 判断接入已启用"
+            );
+            Some(j)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::error!(reason = %e, "jev 配置无效，本次启动按禁用处理");
+            None
+        }
+    };
     let handles = SchedulerHandles {
         measurer: measurer.clone(),
         pool: pool.clone(),
@@ -155,6 +172,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
         pin_target: pin_target.clone(),
         selector_store: eff.selector_store.clone(),
         progress: progress.clone(),
+        jev: jev.clone(),
     };
     let sched = tokio::spawn(schedule_loop(handles, tuning.clone()));
 
@@ -175,6 +193,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             eff.ui_dir.clone(),
             protocols.clone(),
             progress.clone(),
+            jev.clone(),
         ));
         #[cfg(not(feature = "meow"))]
         let ctl_state = Arc::new(ctl::CtlState::new(
@@ -189,6 +208,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             eff.ui_dir.clone(),
             protocols.clone(),
             progress.clone(),
+            jev.clone(),
         ));
         let ctl_sock = std::path::PathBuf::from(eff.ctl_sock.clone());
         #[cfg(feature = "meow")]
@@ -319,6 +339,8 @@ struct SchedulerHandles {
     selector_store: String,
     /// 面板进度计数（schedule_loop 写，web 读）
     progress: Arc<SchedulerProgress>,
+    /// jev 决策器（[jev].enabled 时为 Some：轮末发起决策，reselect 叠加队首）
+    jev: Option<Arc<jev::JevDecider>>,
 }
 
 /// 调度主循环：周期全池测速 → EWMA 更新 → 纯 EWMA 选前 N → 写共享选择。
@@ -345,6 +367,7 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
         pin_target,
         selector_store,
         progress,
+        jev,
     } = h;
 
     // 冷启动播种：还没有任何测速数据时，按配置顺序给数据面一个候选集，
@@ -413,6 +436,8 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
                 &pinned,
                 &t,
                 &selector_store,
+                &jev,
+                u64::from(round_no),
                 &mut last_selection,
             )
             .await;
@@ -460,6 +485,8 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
                     &pinned,
                     &t,
                     &selector_store,
+                    &jev,
+                    u64::from(round_no),
                     &mut last_selection,
                 )
                 .await;
@@ -481,6 +508,38 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
             }
         }
 
+        // 轮末 jev 决策：基于本轮测速对分数前 N 候选做一次 bounded decision。
+        // 异步执行、不阻塞轮间隔；采纳结果由下一批 reselect 叠加到队首，
+        // 任何失败自动回退纯分数选择（分类与回退语义见 scheduler::jev）。
+        // pinned 时不发起：手动钉住期间判断没有可影响的对象，省一次请求。
+        if let (Some(j), false) = (&jev, pinned.load(Ordering::Relaxed)) {
+            let candidates = {
+                let guard = pool.read().await;
+                let top = decision::select_top(
+                    &guard,
+                    t.capacity,
+                    t.timeout_penalty,
+                    t.bw_penalty_per_efold_ms,
+                );
+                let total = top.len().min(j.candidate_count());
+                top.iter()
+                    .take(total)
+                    .filter_map(|tag| guard.iter().find(|n| &n.tag == tag))
+                    .enumerate()
+                    .map(|(i, n)| {
+                        jev::Candidate::from_node(
+                            n,
+                            i + 1,
+                            total,
+                            t.timeout_penalty,
+                            t.bw_penalty_per_efold_ms,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            j.spawn_round(candidates, u64::from(round_no));
+        }
+
         tracing::info!(
             selection = ?last_selection,
             "测速轮完成"
@@ -494,9 +553,13 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
 
 /// 算 selection 并发布（共享选择 + meow SelectorStore）。
 ///
-/// pinned 时强制为 pin_target，否则按分数选前 N。**desired 为空时不动**：
-/// select_top 会排除从未测通的节点，整池还没测出活节点时返回空，此时覆盖
-/// 冷启动种子会让数据面连"瞎选的候选"都没有，请求必死——保留种子等下一轮。
+/// pinned 时强制为 pin_target；否则按分数选前 N，再叠加 jev 决策
+/// （有效 head 只把胜出节点顶到队首，失败/过期则原样——见 `jev::apply_head`）。
+/// **desired 为空时不动**：select_top 会排除从未测通的节点，整池还没测出
+/// 活节点时返回空，此时覆盖冷启动种子会让数据面连"瞎选的候选"都没有，
+/// 请求必死——保留种子等下一轮。
+// 装配态引用直传（同 CtlState::new）：打包成 struct 只是换写法不减复杂度。
+#[allow(clippy::too_many_arguments)]
 async fn reselect(
     pool: &Arc<RwLock<Vec<Node>>>,
     selection: &SharedSelection,
@@ -504,17 +567,26 @@ async fn reselect(
     pinned: &AtomicBool,
     t: &settings::RuntimeTuning,
     selector_store: &str,
+    jev: &Option<Arc<jev::JevDecider>>,
+    round_no: u64,
     last_selection: &mut Vec<String>,
 ) {
     let target = pin_target.lock().clone();
     let desired = match (&target, pinned.load(Ordering::Relaxed)) {
+        // 手动钉住优先级最高：不被分数覆盖，也不被 jev 决策改写
         (Some(tag), true) => vec![tag.clone()],
-        _ => decision::select_top(
-            &pool.read().await,
-            t.capacity,
-            t.timeout_penalty,
-            t.bw_penalty_per_efold_ms,
-        ),
+        _ => {
+            let mut desired = decision::select_top(
+                &pool.read().await,
+                t.capacity,
+                t.timeout_penalty,
+                t.bw_penalty_per_efold_ms,
+            );
+            if let Some(j) = jev {
+                j.apply_head(&mut desired, round_no);
+            }
+            desired
+        }
     };
     if desired.is_empty() {
         return;

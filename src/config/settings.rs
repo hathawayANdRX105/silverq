@@ -24,6 +24,8 @@ pub struct FileConfig {
     pub paths: PathsSection,
     #[serde(default)]
     pub tun: TunSection,
+    #[serde(default)]
+    pub jev: JevSection,
 }
 
 /// 调度器参数。
@@ -195,6 +197,71 @@ impl Default for TunSection {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+        }
+    }
+}
+
+/// jev 判断接入（默认关闭）：每轮一次对分数前 N 候选做 bounded decision，
+/// 采纳时只把胜出节点顶到 selection 队首，任何失败回退纯分数选择。
+/// 协议、失败分类与回退语义见 [`crate::scheduler::jev`]。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct JevSection {
+    /// 总开关。false 时不起任务、不发请求（零开销）。
+    pub enabled: bool,
+    /// 判断传输：`typesafe` | `openrouter` | `compatible`。
+    pub provider: String,
+    /// endpoint 覆盖。空 = provider 默认；`compatible` 必填。
+    pub base_url: String,
+    /// API key。空 = 读 provider 标准环境变量（`TYPESAFE_API_KEY` /
+    /// `OPENROUTER_API_KEY` / `JEV_API_KEY`）。与 nodes.yaml 同规矩：
+    /// 只留在 `~/.config/silverq/`，不入库、不进日志。
+    pub api_key: String,
+    /// 模型标识（`jev-latest` = 跟随最新版）。
+    pub model: String,
+    /// 单次决策超时（秒）。超时按传输失败处理 → 回退分数选择。
+    pub timeout_secs: u64,
+    /// 送审候选数（2..=6，`jev_decide` 协议上限 6）。
+    /// 实际取 `min(capacity, 该值)`。
+    pub candidate_count: usize,
+    /// 胜出概率下限：分布低于它视为判断不足 → 回退。
+    pub min_probability: f64,
+    /// 决策跨过几个轮末仍有效（0 = 只管下一轮）。
+    /// 用途是兜住「长时间 pinned 后解除」这类不刷新场景。
+    pub ttl_rounds: u64,
+    /// 连续几次拿不到可用决策后进入冷却。
+    pub fail_threshold: u32,
+    /// 冷却期间跳过的轮数（避免每轮白等超时）。
+    pub cooldown_rounds: u64,
+}
+
+impl Default for JevSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "typesafe".into(),
+            base_url: String::new(),
+            api_key: String::new(),
+            model: "jev-latest".into(),
+            timeout_secs: 10,
+            candidate_count: 6,
+            min_probability: 0.5,
+            ttl_rounds: 1,
+            fail_threshold: 3,
+            cooldown_rounds: 10,
+        }
+    }
+}
+
+impl JevSection {
+    /// 环境变量覆盖后返回生效配置（与 `Effective` 的优先级约定一致：
+    /// env > TOML > 默认值）。只覆盖运维时真正会动的三项——开关、端点、密钥。
+    pub fn resolved(self) -> Self {
+        Self {
+            enabled: env_parsed_or("SILVERQ_JEV_ENABLED", self.enabled),
+            base_url: env_or("SILVERQ_JEV_BASE_URL", self.base_url),
+            api_key: env_or("SILVERQ_JEV_API_KEY", self.api_key),
+            ..self
         }
     }
 }
