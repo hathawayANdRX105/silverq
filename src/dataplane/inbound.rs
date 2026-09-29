@@ -298,7 +298,15 @@ async fn handle_one(
             }
         }
         DirectDial::Ip(ip) => {
-            let t = std::cmp::max(dial_timeout, dt.first_response());
+            // 缓存驱动的直连只做可达性观察：SYN 黑洞用拨号超时即可判定，
+            // 预算不再叠首响（首响等待在 relay 侧另有收紧）。否则被墙域名
+            // 每次未命中都要烧满 40s 才轮到代理回退，浏览器早超时（#21）。
+            // 策略直连（国内域名）没有回退链，保持原预算语义。
+            let t = if proxy_fallback {
+                dial_timeout
+            } else {
+                std::cmp::max(dial_timeout, dt.first_response())
+            };
             conn = dial_direct(
                 (ip, target.port),
                 t,
@@ -310,7 +318,7 @@ async fn handle_one(
                 used_route = Route::Direct;
             } else if proxy_fallback {
                 // 缓存直连拨不通：先记一次账，随后代理兜底成功会把缓存改写
-                // 成代理路线（连续 2 次直连失败则踢条目，回未命中语义）。
+                // 成代理路线（连续 2 次直连失败则把条目切到代理，见 route.rs）。
                 ctx.routes
                     .record(&target.host, Route::Direct, RouteOutcome::Failed);
             }
@@ -394,7 +402,7 @@ async fn handle_one(
         // 强制直连（回环/国内）失败、缓存直连+代理兜底全败、竞速全败：
         // 诚实失败。本机目标送进代理链没有意义；全败 = 直连与代理都不可达。
         // 缓存直连的失败已在拨号阶段记过账，这里再记一次会把 direct_fails
-        // 一次打满、误删条目，所以只剩竞速需要补记录。
+        // 一次打满、把条目误切到代理路线，所以只剩竞速需要补记录。
         if race {
             ctx.routes
                 .record(&target.host, Route::Proxy, RouteOutcome::Failed);
@@ -439,7 +447,16 @@ async fn handle_one(
     };
     let _ = peer;
 
-    let fr = relay(socket, conn, dt.first_response(), target.replay).await;
+    // 缓存驱动的直连（未命中观察 / 竞速验证）首响等待收紧到拨号超时：
+    // 被墙域名 TCP 能通但 TLS 被吞时，40s 首响白等会把请求拖到客户端超时，
+    // 且这条路径的失败不经过代理回退链（#21）。策略直连与代理节点保持
+    // 原预算（代理侧黑洞检测按 4 倍超时设计）。
+    let fr_budget = if used_route == Route::Direct && (proxy_fallback || race) {
+        dial_timeout
+    } else {
+        dt.first_response()
+    };
+    let fr = relay(socket, conn, fr_budget, target.replay).await;
     if cache_eligible {
         match fr {
             Ok(Some(d)) => ctx
