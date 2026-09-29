@@ -109,7 +109,11 @@ severity_overrides:
   PR-03: "FAIL"   # 缺少必填 heading
   PR-04: "FAIL"   # heading 含 CJK / What 无中文
   PR-05: "WARN"   # 缺少 Fixes # 关联 (改成 INFO 则不阻塞)
-  PR-06: "FAIL"   # 缺少 type label
+  # PR-06 不在此覆盖 (维护者 2026-09-30 授权移除): canon 的 override 按
+  # rule-ID 全局生效, 会把「关键词与 label 不对齐」这条 WARN 级建议也拉成
+  # FAIL; 而关键词 修复 必然命中 PR 模板 closeout 固定行, 任何非 bug 类 PR
+  # 都会被误拦 (2026-09-30 实测 #23 被拦)。缺 type label 的 finding 在 canon
+  # 内已硬编码 FAIL, 本 override 对原意是 no-op —— 关键词建议保持 WARN 级。
   PR-07: "FAIL"   # Construction plan/Checklist checkbox < 2
   PR-08: "FAIL"   # 分支名前缀不在白名单
 
