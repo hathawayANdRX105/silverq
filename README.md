@@ -34,7 +34,7 @@ select_top(N)  纯 EWMA 取前 N（无迟滞轮次）
 - **超时扣分后移**：死/慢节点拿不到前排。
 - **节点淘汰（pipeline 双指标 + 地板）**：连续失败 ≥ `retire_max_failures`（默认 5）触发检查——从未测通的节点立即摘除（从未通过真实握手不会自愈）；曾测通过的进入延长保活，连续失败连续满 `retire_keep_alive_secs`（默认 3600s）才摘。期间成功一次即复活。`retire_min_pool`（默认 10，0=禁用）兜底防摘到 0 全黑。可面板热改 + `silverq config-reload` 重读配置。
 - **回环/私网/国内直连判定**（SOCKS 入站）：pin 优先，之后回环/私网目标原样直连、国内域名（`china-domains.txt`，11 万条后缀表）经真实 DNS 解析成 IP 后直连，其余交给域名级路线缓存（下一条）。避免每个死候选烧 4s、国内绕远、私网目标被拨到节点侧 loopback。
-- **直连优先 + 路线缓存（曾成功的路线优先）**：缓存未命中 → 先直连（真实 DNS 解析后拨 IP），拨不通回退代理候选链（fallback）；命中 → 照缓存里上次成功的路线走，可能是代理。首响应/失败写回缓存：代理首响应 > 2s 标记 slow → 下次并行竞速（直连 + 代理候选，TCP 先建连者胜）；换路线走滞回（新路线快过旧路线一半才接管，旧路线没有耗时基线时成功的直接接管），TTL 5 分钟。已知盲区：纯 TCP 观测分不出「TCP 通、TLS 断」——直连 relay 失败计 `direct_fails`，连续 2 次剔除条目回未命中。TUN 路径未接入（首响应信号在 meow 引擎内部）。
+- **事实驱动的路线选择（缓存复用 + 首字节竞速，#23）**：缓存未命中/过期 → 并行竞速：直连 ‖ 代理首选同时发，**上游首字节先到者胜**（TCP 秒连但 TLS 无响应的一侧赢不了），赢家路线写回缓存；双败后并行拨第 2、3 名候选（`fallback_attempts` 圈定的后两位），全败才诚实失败——用户路径上不存在失败等待。命中 → 照缓存里上次成功的路线复用终点，可能是代理。首响应/失败写回缓存：代理首响应 > 2s 标记 slow → 下次竞速；换路线走滞回（新路线快过旧路线一半才接管，旧路线没有耗时基线时成功的直接接管），TTL 3 分钟（命中即续期，只管闲置域名何时重新竞速观察）。非幂等纯 HTTP（POST/PUT 等）不参与首字节双发，降级串行候选链。残余盲区：首字节赢了但中途被掐的直连（GFW 放行 ServerHello 后 RST）——靠 `direct_fails` 记账，连续 2 次把条目切到代理路线（#21）。TUN 路径未接入（首响应信号在 meow 引擎内部）。
 - **节点 dial 真实 DNS 预解析**：节点服务器域名经固定上游（223.5.5.5 / 119.29.29.29，`SILVERQ_RESOLVE_UPSTREAMS` 可覆盖）预解析写 `NodeSpec.dial_addr`，adapter 拨号用真实 IP。修复 TUN + fake-IP 环境下「拨节点变成经候选链拨节点」的自指递归（2026-09-19 事故：健康检查幸存 14-30 → 0-1）。解析失败回退系统解析，只降级不丢节点。
 - **jev 判断接入（可选，默认关）**：`[jev].enabled = true` 时，每轮测速结束后把分数前 6 候选（只 tag + 指标，不发 server/端口/凭证）POST 给 Jev 的 `{model, state, questions}` 协议做一次 bounded decision，胜出节点顶到 selection 队首——其余候选仍按分数排，数据面 best→次优 候选链原样保留。**失败即回退纯分数选择**：传输失败（超时/非 2xx）、非法响应（fail-closed 校验）、逃生舱（ask_user 等）、胜出概率 < 阈值都算；连续失败进冷却，冷却期不发请求。pinned 时不发起也不应用（手动钉住优先级最高）。HTTP 走 reqwest + rustls，`.no_proxy()`（基础设施流量不吃环境代理，避免自指递归）。决策状态在 `silverq status` 的 `jev=` 段与 `/api/status` 的 `jev` 字段。
 
@@ -81,7 +81,7 @@ src/
 │                      # persist.rs（EWMA 存档）；mod.rs（调度进度计数）
 ├── proxy/             # nodespec.rs（节点 YAML 模型）、factory.rs（NodeSpec→meow
 │                      # adapter）、meow.rs（MeowMeasurer）、dns.rs（零依赖 UDP DNS
-│                      # 客户端 + 国内域名表 ChinaSet）、route.rs（域名级路线缓存：直连优先）
+│                      # 客户端 + 国内域名表 ChinaSet）、route.rs（域名级路线缓存 + 首字节竞速决策）
 │                      # ——meow feature
 ├── dataplane/         # inbound.rs（SOCKS5/HTTP-CONNECT TCP）、udp.rs（UDP 中继）、
 │                      # tun.rs（TUN 透明代理，meow-tun feature）——meow feature
