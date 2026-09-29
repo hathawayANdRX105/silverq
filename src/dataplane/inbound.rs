@@ -224,8 +224,9 @@ async fn handle_one(
     };
 
     // 路由缓存决策（回环/国内/钉住不进缓存：那些是策略或本机语义，非性能选择）。
-    // 未命中 → 直连优先，直连拨不通回退代理候选链（proxy_fallback）；命中 →
-    // 按缓存里曾成功的路线走；代理路线慢的域名下次触发并行竞速。
+    // 未命中/过期 → 并行竞速（直连 ‖ 首选，上游首字节判胜，#23）；命中 → 按
+    // 缓存里曾成功的路线走；条目路线慢 → 同样进竞速。缓存直连命中失败后要
+    // 回退代理候选链（proxy_fallback）。
     let china_hit = ctx.china.matches(&target.host);
     let cache_eligible =
         route_cache_eligible(&target.host, ctx.pinned.load(Ordering::Relaxed), china_hit);
@@ -249,6 +250,12 @@ async fn handle_one(
             crate::proxy::route::Decision::Race => race = true,
             crate::proxy::route::Decision::Proxy => {}
         }
+    }
+    // 非幂等纯 HTTP 请求不参与首字节双发（重复投递有副作用）：降级为串行
+    // 候选链。CONNECT/SOCKS 的 replay 为空（greeting 后的裸字节双发安全），
+    // 幂等方法（GET/HEAD/OPTIONS/TRACE）双发无害。
+    if race && !replay_race_safe(&target.replay) {
+        race = false;
     }
 
     // 按当前选择顺序逐个尝试（best → 次优），dial 失败自动 fallback
@@ -281,7 +288,7 @@ async fn handle_one(
     let dial_timeout = dt.dial();
     let mut conn: Option<Box<dyn meow_common::conn::ProxyConn>> = None;
     let mut used_route = Route::Proxy;
-    // 直连优先：回环/私网按原样拨（localhost 解析交给系统，回环段不受
+    // 策略直连：回环/私网按原样拨（localhost 解析交给系统，回环段不受
     // fake-IP 影响）；国内域名与缓存路线拨已解析的真实 IP。
     match direct {
         DirectDial::Host => {
@@ -326,53 +333,111 @@ async fn handle_one(
         DirectDial::None => {}
     }
 
-    // 代理侧：竞速（直连与候选链并行），或「未尝试直连 / 直连拨不通」时的
-    // 候选链兜底。策略直连（回环/国内）失败不进这里——送进代理链没意义。
+    // 代理侧：首字节竞速（#23——直连 ‖ 首选并行判胜、双败并行兜底），或
+    // 「未尝试直连 / 直连拨不通 / POST 守卫降级」时的串行候选链兜底。策略
+    // 直连（回环/国内）失败不进这里——送进代理链没意义。
     if conn.is_none() {
         if race {
-            // 竞速：直连与候选链并行，TCP 先建连者胜（慢路由域名的专属路径）
+            // 波次1 = 直连 ‖ 首选候选；波次2（双败后）= 第 2、3 名候选并行。
+            // 判胜看上游首字节而非谁先建连——TCP 秒连但 TLS 无响应的一侧赢
+            // 不了，这正是旧 TCP 竞速的误判盲区。全程自带首字节预算，胜者
+            // 路径不再走 relay 的首响等待。
             let label = format!("{}/{}", target.host, target.port);
             let host = target.host.clone();
             let port = target.port;
-            let direct_f = Box::pin(async move {
+            let direct_side: SideFut<'_> = Box::pin(async move {
                 match crate::proxy::dns::resolve_host(&host).await {
-                    Some(ip) => dial_direct((ip, port), dial_timeout, label).await,
+                    Some(ip) => dial_direct((ip, port), dial_timeout, label)
+                        .await
+                        .map(|s| Box::new(s) as Box<dyn meow_common::conn::ProxyConn>),
                     None => None,
                 }
             });
-            let proxy_f = Box::pin(async {
-                for adapter in &candidates {
-                    match tokio::time::timeout(dial_timeout, adapter.dial_tcp(&metadata)).await {
-                        Ok(Ok(c)) => return Some(c),
-                        Ok(Err(e)) => {
-                            tracing::info!(tag = adapter.name(), "dial failed: {e}")
+            let mut waves: Vec<Vec<(Route, SideFut<'_>)>> =
+                vec![vec![(Route::Direct, direct_side)]];
+            if let Some(first) = candidates.first() {
+                let md = &metadata;
+                waves[0].push((
+                    Route::Proxy,
+                    Box::pin(async move {
+                        match tokio::time::timeout(dial_timeout, first.dial_tcp(md)).await {
+                            Ok(Ok(c)) => Some(c),
+                            Ok(Err(e)) => {
+                                tracing::info!(tag = first.name(), "dial failed: {e}");
+                                None
+                            }
+                            Err(_) => {
+                                tracing::info!(
+                                    tag = first.name(),
+                                    "dial 超时 {dial_timeout:?}，竞速侧弃用"
+                                );
+                                None
+                            }
                         }
-                        Err(_) => {
-                            tracing::info!(
-                                tag = adapter.name(),
-                                "dial 超时 {dial_timeout:?}，换下一个候选"
-                            )
-                        }
-                    }
+                    }),
+                ));
+            }
+            if candidates.len() > 1 {
+                let md = &metadata;
+                let wave2: Vec<(Route, SideFut<'_>)> = candidates[1..]
+                    .iter()
+                    .map(|adapter| {
+                        let side: SideFut<'_> = Box::pin(async move {
+                            match tokio::time::timeout(dial_timeout, adapter.dial_tcp(md)).await {
+                                Ok(Ok(c)) => Some(c),
+                                Ok(Err(e)) => {
+                                    tracing::info!(tag = adapter.name(), "dial failed: {e}");
+                                    None
+                                }
+                                Err(_) => {
+                                    tracing::info!(
+                                        tag = adapter.name(),
+                                        "dial 超时 {dial_timeout:?}，竞速侧弃用"
+                                    );
+                                    None
+                                }
+                            }
+                        });
+                        (Route::Proxy, side)
+                    })
+                    .collect();
+                waves.push(wave2);
+            }
+            // race 只可能在 cache_eligible 分支里被置位，记录不必再查门禁。
+            match race_relay(
+                socket,
+                &target.replay,
+                dial_timeout,
+                waves,
+                target.proto == Proto::Http,
+            )
+            .await
+            {
+                RaceOutcome::Won(route, fr) => {
+                    tracing::info!(
+                        host = %target.host,
+                        route = ?route,
+                        fr_ms = fr.as_millis() as u64,
+                        "竞速胜出"
+                    );
+                    ctx.routes
+                        .record(&target.host, route, RouteOutcome::Responded(fr));
+                    return Ok(());
                 }
-                None
-            });
-            match futures::future::select(direct_f, proxy_f).await {
-                futures::future::Either::Left((res, proxy_f)) => {
-                    if let Some(s) = res {
-                        conn = Some(Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
-                        used_route = Route::Direct;
-                    } else if let Some(c) = proxy_f.await {
-                        conn = Some(c);
-                    }
+                RaceOutcome::ClientLeft => {
+                    // 未分出胜负：不记账——竞速发起时可能还没有条目，
+                    // 凭空造一条会把无证据的路线当结论用。
+                    return Ok(());
                 }
-                futures::future::Either::Right((res, direct_f)) => {
-                    if let Some(c) = res {
-                        conn = Some(c);
-                    } else if let Some(s) = direct_f.await {
-                        conn = Some(Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
-                        used_route = Route::Direct;
-                    }
+                RaceOutcome::AllDead => {
+                    // 全灭与旧竞速全败同语义：代理侧记一次失败。
+                    ctx.routes
+                        .record(&target.host, Route::Proxy, RouteOutcome::Failed);
+                    return Ok(());
+                }
+                RaceOutcome::DiedAfterWin(route, e) => {
+                    ctx.routes.record(&target.host, route, RouteOutcome::Failed);
+                    return Err(e);
                 }
             }
         } else if matches!(direct, DirectDial::None) || proxy_fallback {
@@ -398,15 +463,11 @@ async fn handle_one(
     }
     let conn: Box<dyn meow_common::conn::ProxyConn> = if let Some(c) = conn {
         c
-    } else if !matches!(direct, DirectDial::None) || race {
-        // 强制直连（回环/国内）失败、缓存直连+代理兜底全败、竞速全败：
-        // 诚实失败。本机目标送进代理链没有意义；全败 = 直连与代理都不可达。
-        // 缓存直连的失败已在拨号阶段记过账，这里再记一次会把 direct_fails
-        // 一次打满、把条目误切到代理路线，所以只剩竞速需要补记录。
-        if race {
-            ctx.routes
-                .record(&target.host, Route::Proxy, RouteOutcome::Failed);
-        }
+    } else if !matches!(direct, DirectDial::None) {
+        // 强制直连（回环/国内）失败、缓存直连+代理兜底全败：诚实失败。本机
+        // 目标送进代理链没有意义。缓存直连的失败已在拨号阶段记过账，这里再
+        // 记一次会把 direct_fails 一次打满、把条目误切到代理路线。竞速全败
+        // 在 race_relay 分支里已记账并直接返回，不会走到这里。
         if target.proto == Proto::Http {
             let _ = socket
                 .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
@@ -447,11 +508,12 @@ async fn handle_one(
     };
     let _ = peer;
 
-    // 缓存驱动的直连（未命中观察 / 竞速验证）首响等待收紧到拨号超时：
-    // 被墙域名 TCP 能通但 TLS 被吞时，40s 首响白等会把请求拖到客户端超时，
-    // 且这条路径的失败不经过代理回退链（#21）。策略直连与代理节点保持
-    // 原预算（代理侧黑洞检测按 4 倍超时设计）。
-    let fr_budget = if used_route == Route::Direct && (proxy_fallback || race) {
+    // 缓存直连命中（复用已记录的直连终点，失败后要回退候选链）的首响等待
+    // 收紧到拨号超时：被墙域名 TCP 能通但 TLS 被吞时，40s 首响白等会把请求
+    // 拖到客户端超时，且这条路径的失败不经过代理回退链（#21）。未命中/慢
+    // 条目走竞速（race_relay 自带首字节预算），不经过这里。策略直连与代理
+    // 节点保持原预算（代理侧黑洞检测按 4 倍超时设计）。
+    let fr_budget = if used_route == Route::Direct && proxy_fallback {
         dial_timeout
     } else {
         dt.first_response()
@@ -528,6 +590,199 @@ async fn relay(
         r = up => r,
         // 客户端侧先结束：拆隧道，不区分正常关闭与错误（误标可接受）
         _ = down => Ok(None),
+    }
+}
+
+/// 首字节双发是否安全：CONNECT/SOCKS5（replay 为空，greeting 后是裸字节，
+/// 双发无重复投递问题）或安全方法的透明 HTTP。非幂等方法（POST/PUT/...）
+/// 双发会让源站收到两遍副作用请求，只能走串行候选链。
+fn replay_race_safe(replay: &[u8]) -> bool {
+    replay.is_empty()
+        || replay.starts_with(b"GET ")
+        || replay.starts_with(b"HEAD ")
+        || replay.starts_with(b"OPTIONS ")
+        || replay.starts_with(b"TRACE ")
+}
+
+/// 竞速侧拨号 future：None = 拨号失败或超时（各侧日志已在闭包内打）。
+type SideFut<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Option<Box<dyn meow_common::conn::ProxyConn>>> + Send + 'a,
+    >,
+>;
+
+/// 首字节竞速的结果（#23）。
+#[derive(Debug)]
+enum RaceOutcome {
+    /// route 赢得首字节；fr = 自竞速发起到首字节的耗时（含拨号，用户实感）
+    Won(Route, Duration),
+    /// 客户端在分出胜负前离开——没有结论，不记账
+    ClientLeft,
+    /// 所有波次全败：没有任何一侧回过首字节
+    AllDead,
+    /// 赢家首字节到手后连接中途死亡（赢了但被掐）——按赢家路线记账
+    DiedAfterWin(Route, Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// 首字节竞速：把客户端字节投给每个拨号成功的上游侧，谁先回字节谁赢。
+///
+/// - `replay` = 透明 HTTP 已读走的请求行+头部（CONNECT/SOCKS 为空，协议
+///   应答已由上层发出）；随后实时到达的客户端字节同样双发。
+/// - `waves` 按波次执行：上一波全灭（拨号失败或首字节超时）才开下一波。
+///   调用方组织成 [直连‖首选, 第 2、3 名] 两波——双败并行兜底，不逐个试。
+/// - `first_byte_budget` 同时约束各侧拨号与首字节：一侧静默等满预算即弃。
+///   用户等待上限是单个竞速窗，而非串行超时叠加。
+/// - `write_503` = 目标为 HTTP 语义（与串行全败路径一致补 503；SOCKS 不补）。
+async fn race_relay<'a>(
+    socket: TcpStream,
+    replay: &[u8],
+    first_byte_budget: Duration,
+    mut waves: Vec<Vec<(Route, SideFut<'a>)>>,
+    write_503: bool,
+) -> RaceOutcome {
+    let (mut cr, mut cw) = tokio::io::split(socket);
+    let t0 = std::time::Instant::now();
+    // 客户端已读走的首字节：侧建立时全量投递，之后按增量投递（off 记账）
+    let mut sent: Vec<u8> = replay.to_vec();
+    let mut cbuf = vec![0u8; 16 * 1024];
+
+    struct LiveSide {
+        route: Route,
+        pr: tokio::io::ReadHalf<Box<dyn meow_common::conn::ProxyConn>>,
+        pw: tokio::io::WriteHalf<Box<dyn meow_common::conn::ProxyConn>>,
+        /// 已投递给该侧的 sent 字节数
+        off: usize,
+        /// 首字节截止时刻：从建连起固定，不因事件循环重建 future 而顺延
+        deadline: std::time::Instant,
+    }
+
+    enum Ev {
+        Client(std::io::Result<usize>),
+        Side(usize, Option<(usize, Vec<u8>)>),
+        Dial(usize, Option<Box<dyn meow_common::conn::ProxyConn>>),
+    }
+
+    let mut live: Vec<LiveSide> = Vec::new();
+    let mut wave_idx = 0;
+    // None = 已 resolve 的失败槽（保留索引到本轮事件处理完，再统一清走）
+    let mut pending: Vec<(Route, Option<SideFut<'a>>)> = Vec::new();
+
+    loop {
+        if live.is_empty() && pending.is_empty() {
+            if wave_idx < waves.len() {
+                pending = std::mem::take(&mut waves[wave_idx])
+                    .into_iter()
+                    .map(|(route, f)| (route, Some(f)))
+                    .collect();
+                wave_idx += 1;
+                continue;
+            }
+            if write_503 {
+                let _ = cw
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+                    .await;
+            }
+            return RaceOutcome::AllDead;
+        }
+
+        // 事件集：客户端读（先 poll，及时发现客户端离开）｜各未完成拨号
+        // （跨迭代保持：shim 只借用槽位，shim 被丢弃不取消拨号本身）｜各
+        // 已建连侧的首字节（重新创建的读 future 取消安全，数据不丢）。
+        let mut futs: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = Ev> + Send + '_>>> =
+            Vec::new();
+        futs.push(Box::pin(async {
+            let r = cr.read(&mut cbuf).await;
+            Ev::Client(r)
+        }));
+        for (i, slot) in pending.iter_mut().enumerate() {
+            if slot.1.is_none() {
+                continue;
+            }
+            futs.push(Box::pin(async move {
+                let c = match slot.1.as_mut() {
+                    Some(f) => f.await,
+                    None => None,
+                };
+                Ev::Dial(i, c)
+            }));
+        }
+        for (j, side) in live.iter_mut().enumerate() {
+            let remaining = side
+                .deadline
+                .saturating_duration_since(std::time::Instant::now());
+            futs.push(Box::pin(async move {
+                let mut b = vec![0u8; 16 * 1024];
+                let got = if remaining.is_zero() {
+                    None
+                } else {
+                    match tokio::time::timeout(remaining, side.pr.read(&mut b)).await {
+                        Ok(Ok(n)) if n > 0 => Some((n, b)),
+                        _ => None,
+                    }
+                };
+                Ev::Side(j, got)
+            }));
+        }
+
+        let (ev, _, rest) = futures::future::select_all(futs).await;
+        drop(rest); // 释放对 cr/cbuf/pending/live 的借用，事件数据是自持的
+
+        match ev {
+            Ev::Client(Ok(0)) | Ev::Client(Err(_)) => return RaceOutcome::ClientLeft,
+            Ev::Client(Ok(n)) => {
+                sent.extend_from_slice(&cbuf[..n]);
+                for side in &mut live {
+                    if side.off < sent.len() && side.pw.write_all(&sent[side.off..]).await.is_ok() {
+                        side.off = sent.len();
+                    }
+                }
+            }
+            Ev::Dial(i, conn) => {
+                let route = pending[i].0;
+                pending[i].1 = None;
+                if let Some(c) = conn {
+                    let (pr, pw) = tokio::io::split(c);
+                    let mut side = LiveSide {
+                        route,
+                        pr,
+                        pw,
+                        off: 0,
+                        deadline: std::time::Instant::now() + first_byte_budget,
+                    };
+                    if !sent.is_empty() && side.pw.write_all(&sent).await.is_ok() {
+                        side.off = sent.len();
+                    }
+                    live.push(side);
+                }
+            }
+            Ev::Side(j, Some((n, b))) => {
+                // 首字节到手：判胜成立，回程首块交回客户端，胜者接管双向流。
+                // 耗时在这里定格——首字节才是判胜信号，不等双向拷贝收尾。
+                let fr = t0.elapsed();
+                let mut win = live.remove(j);
+                if win.off < sent.len() {
+                    let _ = win.pw.write_all(&sent[win.off..]).await;
+                }
+                if cw.write_all(&b[..n]).await.is_err() {
+                    return RaceOutcome::ClientLeft;
+                }
+                let wroute = win.route;
+                // 败者侧（其他 live 槽与未完成拨号）随返回一并 drop 即拆除
+                return tokio::select! {
+                    r = tokio::io::copy(&mut win.pr, &mut cw) => match r {
+                        // 上游正常收尾：请求已答完
+                        Ok(_) => RaceOutcome::Won(wroute, fr),
+                        Err(e) => RaceOutcome::DiedAfterWin(wroute, e.into()),
+                    },
+                    // 客户端读完响应主动关闭：首字节已成立
+                    _ = tokio::io::copy(&mut cr, &mut win.pw) => RaceOutcome::Won(wroute, fr),
+                };
+            }
+            Ev::Side(j, None) => {
+                live.remove(j);
+            }
+        }
+        pending.retain(|p| p.1.is_some());
     }
 }
 
@@ -915,7 +1170,146 @@ async fn handle_udp_associate(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_local_target, read_socks5_target, route_cache_eligible};
+    use super::{
+        is_local_target, race_relay, read_socks5_target, replay_race_safe, route_cache_eligible,
+        RaceOutcome, SideFut,
+    };
+    use crate::proxy::route::Route;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// 假客户端：连上 race_relay 侧的 socket，返回 (客户端句柄, 服务端句柄)。
+    async fn client_pair() -> (TcpStream, TcpStream) {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (sock, _) = l.accept().await.unwrap();
+        (client, sock)
+    }
+
+    /// TCP 秒连但永不出数据的一侧必须输掉竞速（#23 盲区回归）：直连侧先
+    /// 连通且全程静默，代理侧晚 100ms 才拨通但立刻回数据 → 代理侧首字节判胜。
+    /// 旧 TCP 竞速在这组时序下会选静默的直连侧，然后空等到超时。
+    #[tokio::test]
+    async fn race_winner_is_first_byte_not_first_connect() {
+        // 直连侧：accept 即持有，永不出数据
+        let silent_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let silent_addr = silent_l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (s, _) = silent_l.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            drop(s);
+        });
+        // 代理侧：100ms 后才拨通，连上立刻回首字节
+        let resp_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let resp_addr = resp_l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = resp_l.accept().await.unwrap();
+            s.write_all(b"FIRST-BYTE").await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        let dial = |addr: std::net::SocketAddr, delay: Duration| async move {
+            tokio::time::sleep(delay).await;
+            match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr)).await {
+                Ok(Ok(s)) => Some(Box::new(s) as Box<dyn meow_common::conn::ProxyConn>),
+                _ => None,
+            }
+        };
+        let waves: Vec<Vec<(Route, SideFut<'static>)>> = vec![vec![
+            (Route::Direct, Box::pin(dial(silent_addr, Duration::ZERO))),
+            (
+                Route::Proxy,
+                Box::pin(dial(resp_addr, Duration::from_millis(100))),
+            ),
+        ]];
+
+        let (mut client, sock) = client_pair().await;
+        let handle = tokio::spawn(race_relay(sock, &[], Duration::from_secs(5), waves, false));
+
+        let mut buf = [0u8; 32];
+        let n = tokio::time::timeout(Duration::from_secs(2), client.read(&mut buf))
+            .await
+            .expect("客户端应在 2s 内拿到首字节")
+            .unwrap();
+        assert_eq!(&buf[..n], b"FIRST-BYTE", "应收到代理侧首字节");
+        drop(client); // 客户端关闭 → 胜者双向拷贝收尾 → race_relay 返回
+
+        match handle.await.unwrap() {
+            RaceOutcome::Won(route, fr) => {
+                assert_eq!(route, Route::Proxy, "TCP 先建连但静默的一侧不应赢");
+                assert!(
+                    fr < Duration::from_secs(1),
+                    "判胜耗时应停在首字节，实际 {fr:?}"
+                );
+            }
+            other => panic!("应判胜，实际 {other:?}"),
+        }
+    }
+
+    /// 双败后第二波并行兜底（#23）：波次 1 的直连与首选都拨号即败，第 2 波
+    /// 的候选救回请求——而不是串行逐个试到第三轮。
+    #[tokio::test]
+    async fn race_second_wave_rescues_after_double_fail() {
+        // 无监听的端口：loopback connect 立即 ECONNREFUSED
+        let dead_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead_l.local_addr().unwrap();
+        drop(dead_l);
+
+        let resp_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let resp_addr = resp_l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = resp_l.accept().await.unwrap();
+            s.write_all(b"RESCUED").await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        let dial = |addr: std::net::SocketAddr| async move {
+            match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr)).await {
+                Ok(Ok(s)) => Some(Box::new(s) as Box<dyn meow_common::conn::ProxyConn>),
+                _ => None,
+            }
+        };
+        let waves: Vec<Vec<(Route, SideFut<'static>)>> = vec![
+            vec![
+                (Route::Direct, Box::pin(dial(dead_addr))),
+                (Route::Proxy, Box::pin(dial(dead_addr))),
+            ],
+            vec![(Route::Proxy, Box::pin(dial(resp_addr)))],
+        ];
+
+        let (mut client, sock) = client_pair().await;
+        let handle = tokio::spawn(race_relay(sock, &[], Duration::from_secs(5), waves, false));
+
+        let mut buf = [0u8; 32];
+        let n = tokio::time::timeout(Duration::from_secs(2), client.read(&mut buf))
+            .await
+            .expect("第二波应救回客户端")
+            .unwrap();
+        assert_eq!(&buf[..n], b"RESCUED");
+        drop(client);
+
+        match handle.await.unwrap() {
+            RaceOutcome::Won(Route::Proxy, _) => {}
+            other => panic!("第二波应救回，实际 {other:?}"),
+        }
+    }
+
+    /// POST 守卫（#23）：非幂等方法的透明 HTTP 不允许双发，否则源站收到
+    /// 两遍副作用请求；CONNECT/SOCKS（空 replay）与安全方法放行。
+    #[test]
+    fn only_safe_requests_are_race_eligible() {
+        assert!(replay_race_safe(b""));
+        assert!(replay_race_safe(b"GET / HTTP/1.1\r\nHost: a\r\n\r\n"));
+        assert!(replay_race_safe(b"HEAD / HTTP/1.1\r\nHost: a\r\n\r\n"));
+        assert!(replay_race_safe(b"OPTIONS / HTTP/1.1\r\nHost: a\r\n\r\n"));
+        assert!(!replay_race_safe(
+            b"POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\n\r\nhello"
+        ));
+        assert!(!replay_race_safe(b"PUT /x HTTP/1.1\r\nHost: a\r\n\r\n"));
+        assert!(!replay_race_safe(b"DELETE /x HTTP/1.1\r\nHost: a\r\n\r\n"));
+    }
 
     #[test]
     fn local_targets_are_detected() {

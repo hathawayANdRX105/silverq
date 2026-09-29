@@ -1,18 +1,20 @@
-//! 域名级路由缓存：直连优先，缓存记的是「曾经成功的那条路线」（可能是代理）。
+//! 域名级路由缓存：缓存记的是「曾经成功的那条路线」（可能是直连，也可能是代理）。
 //!
 //! 触发模型：
-//! 1. 缓存未命中 → 直连优先；直连拨不通回退代理候选链（调用方 fallback）
+//! 1. 缓存未命中/过期 → 并行竞速：直连 ‖ 第一候选同时发，**上游首字节
+//!    先到者胜**（#23），赢家路线写回缓存；双败后并行拨第 2、3 名候选，
+//!    全败才诚实失败。用户路径上不存在失败等待。
 //! 2. 命中 → 按缓存里的路线走，谁上次成功听谁的
 //! 3. 走代理的首响应超过 [`RACE_THRESHOLD`] → 标记 slow → 下次并行竞速
-//!    （直连 + 代理候选，TCP 先建连者胜）
+//!    （判胜同样是首字节）
 //! 4. 换路线走滞回：新路线要快过旧路线一半才接管；旧路线从没测通过
 //!    （无耗时基线）时不享受滞回，成功的路线直接接管
 //! 5. 缓存 TTL [`ROUTE_TTL`]，到期待重新观察
 //!
-//! 已知盲区（ponytail）：silverq 是隧道，看不到 TLS 层——「TCP 握手通、
-//! TLS 被打断」的直连会被 TCP 竞速误判为优。缓解：直连侧失败（relay
-//! 错误 / 拨号失败）计 direct_fails，连续 2 次移除条目回未命中，代理靠
-//! fallback 链兜住；TTL 只有 5 分钟。TUN 数据面暂未接入：meow-tunnel 的首响应信号在引擎内部，需 meow 侧
+//! 残余盲区：首字节赢了但随后连接被掐的直连（GFW 放行 ServerHello 后
+//! RST 的少数场景）——赢面在竞速里拿不到，只能事后记账：直连侧失败计
+//! direct_fails，连续 2 次把条目切到代理路线（不再回未命中重试直连）。
+//! TUN 数据面暂未接入：meow-tunnel 的首响应信号在引擎内部，需 meow 侧
 //! 配合后才能把同样的机制搬到 TUN 路径（SOCKS 路径先行）。
 
 use parking_lot::Mutex;
@@ -21,8 +23,12 @@ use std::time::{Duration, Instant};
 
 /// 代理首响应超过该阈值 → 标记 slow，下次访问触发竞速。
 pub const RACE_THRESHOLD: Duration = Duration::from_secs(2);
-/// 路由缓存 TTL。
-pub const ROUTE_TTL: Duration = Duration::from_secs(300);
+/// 路线缓存 TTL。
+///
+/// 3 分钟：命中即续期，活跃域名不过期；只管闲置域名多久后重新进入
+/// 竞速观察（#23）。旧串行设计下短 TTL = 反复重烧直连预算，并行竞速
+/// 下过期的代价只是多一次后台拨号，可以放心收短以更快适应网络变化。
+pub const ROUTE_TTL: Duration = Duration::from_secs(180);
 /// 直连连续失败多少次后把条目切到代理路线（TLS 盲区缓解：TCP 通但 TLS 死
 /// 的直连会在应用层反复失败，靠失败计数强制收敛到代理，不再回未命中重试
 /// 直连——那会对这类域名形成永久的直连预算循环）。
@@ -53,7 +59,7 @@ pub enum Decision {
     Direct,
     /// 按缓存走代理
     Proxy,
-    /// 直连与代理并行竞速，TCP 先建连者胜
+    /// 直连与代理并行竞速，上游首字节先到者胜（#23）
     Race,
 }
 
@@ -79,18 +85,19 @@ impl RouteCache {
         }
     }
 
-    /// 路线决策：命中按缓存走，未命中/过期回直连优先。
+    /// 路线决策：命中按缓存走，未命中/过期并行竞速首字节定胜负（#23）。
     ///
-    /// 未命中返回 [`Decision::Direct`] —— 直连失败由调用方回退代理候选链，
-    /// 成功的那条路线会被 [`RouteCache::record`] 写回缓存，下次直接照走。
+    /// 未命中/过期返回 [`Decision::Race`] —— 调用方同时发起直连与代理
+    /// 候选，上游首字节先到者胜，赢家路线被 [`RouteCache::record`] 写回
+    /// 缓存，下次直接照走复用终点。
     pub fn decide(&self, host: &str) -> Decision {
         let mut m = self.entries.lock();
         let Some(e) = m.get_mut(host) else {
-            return Decision::Direct; // 无缓存：直连优先，失败再走代理候选链
+            return Decision::Race; // 无缓存：并行竞速，首字节定胜负
         };
         if Instant::now() >= e.until {
             m.remove(host);
-            return Decision::Direct;
+            return Decision::Race; // 过期回未命中语义：同样进竞速
         }
         match e.route {
             Route::Direct if e.slow => Decision::Race, // 直连路线也慢 → 竞速换路线
@@ -179,18 +186,18 @@ mod tests {
     #[test]
     fn first_visit_marks_slow_on_threshold() {
         let c = RouteCache::new();
-        assert!(matches!(c.decide("a.com"), Decision::Direct)); // 无缓存 → 直连优先
+        assert!(matches!(c.decide("a.com"), Decision::Race)); // 无缓存 → 并行竞速
         c.record("a.com", Route::Proxy, responded(500));
         assert!(matches!(c.decide("a.com"), Decision::Proxy)); // 快 → 不竞速
         c.record("a.com", Route::Proxy, responded(3000));
         assert!(matches!(c.decide("a.com"), Decision::Race)); // 3s > 2s → 竞速
     }
 
-    /// 未命中即直连优先：这是 fallback 链的第一跳。
+    /// 未命中即并行竞速：直连 ‖ 第一候选，首字节先到者胜（#23）。
     #[test]
-    fn cache_miss_prefers_direct() {
+    fn cache_miss_races() {
         let c = RouteCache::new();
-        assert!(matches!(c.decide("never-seen.com"), Decision::Direct));
+        assert!(matches!(c.decide("never-seen.com"), Decision::Race));
     }
 
     /// 直连拨不通、代理兜底成功 → 一次请求就把缓存改写成代理路线，
@@ -198,7 +205,7 @@ mod tests {
     #[test]
     fn direct_failure_then_proxy_success_caches_proxy() {
         let c = RouteCache::new();
-        assert!(matches!(c.decide("f.com"), Decision::Direct));
+        assert!(matches!(c.decide("f.com"), Decision::Race));
         c.record("f.com", Route::Direct, RouteOutcome::Failed);
         c.record("f.com", Route::Proxy, responded(400));
         assert!(matches!(c.decide("f.com"), Decision::Proxy));
@@ -225,11 +232,11 @@ mod tests {
 
     /// 连续直连失败后条目切到代理路线，不回未命中（#21 回归）：
     /// 「TCP 通、TLS 被吞」的域名从没写过代理路线，若踢条目回未命中，
-    /// 未命中又优先直连，每次访问都重烧一轮直连预算，永不收敛。
+    /// 每次访问又把这条直接送进竞速重烧一轮拨号，永不收敛。
     #[test]
     fn direct_failures_switch_entry_to_proxy() {
         let c = RouteCache::new();
-        assert!(matches!(c.decide("d.com"), Decision::Direct)); // 未命中 → 直连观察
+        assert!(matches!(c.decide("d.com"), Decision::Race)); // 未命中 → 竞速观察
         c.record("d.com", Route::Direct, RouteOutcome::Failed);
         assert!(matches!(c.decide("d.com"), Decision::Race)); // 一次失败 → 竞速验证
         c.record("d.com", Route::Direct, RouteOutcome::Failed);
@@ -245,10 +252,10 @@ mod tests {
         assert!(matches!(c.decide("p.com"), Decision::Race));
     }
 
-    /// 过期后回未命中语义（直连优先）。用代理条目过期来断言，才证得出
-    /// 「条目确实被作废」——直连条目过期前后同为 Direct，断言不出差别。
+    /// 过期后回未命中语义（并行竞速）。用代理条目过期来断言，才证得出
+    /// 「条目确实被作废」——过期前后 Proxy ≠ Race 的差值就是作废本身。
     #[test]
-    fn ttl_expiry_returns_to_direct_first() {
+    fn ttl_expiry_returns_to_race() {
         let c = RouteCache::new();
         c.record("t.com", Route::Proxy, responded(100));
         assert!(matches!(c.decide("t.com"), Decision::Proxy));
@@ -256,7 +263,7 @@ mod tests {
         let mut m = c.entries.lock();
         m.get_mut("t.com").unwrap().until = Instant::now() - Duration::from_secs(1);
         drop(m);
-        assert!(matches!(c.decide("t.com"), Decision::Direct));
+        assert!(matches!(c.decide("t.com"), Decision::Race));
         assert!(c.entries.lock().is_empty(), "过期条目应在 decide 时清掉");
     }
 
