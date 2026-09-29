@@ -33,8 +33,8 @@ select_top(N)  纯 EWMA 取前 N（无迟滞轮次）
 - **快慢分离**：测速（周期全池离线）与切换（只读已算好的 EWMA）完全解耦，卡顿隔离。
 - **超时扣分后移**：死/慢节点拿不到前排。
 - **节点淘汰（pipeline 双指标 + 地板）**：连续失败 ≥ `retire_max_failures`（默认 5）触发检查——从未测通的节点立即摘除（从未通过真实握手不会自愈）；曾测通过的进入延长保活，连续失败连续满 `retire_keep_alive_secs`（默认 3600s）才摘。期间成功一次即复活。`retire_min_pool`（默认 10，0=禁用）兜底防摘到 0 全黑。可面板热改 + `silverq config-reload` 重读配置。
-- **回环/私网/国内直连判定**（SOCKS 入站）：pin 优先，之后回环/私网目标原样直连、国内域名（`china-domains.txt`，11 万条后缀表）经真实 DNS 解析成 IP 后直连，其余走候选链。避免每个死候选烧 4s、国内绕远、私网目标被拨到节点侧 loopback。
-- **域名级竞速（慢触发 + 滞回）**：某域名代理首响应 > 2s 才标记 slow，下次访问并行竞速（直连 + 代理候选，TCP 先建连者胜）；接管需滞回（新路线快过旧路线一半），TTL 5 分钟。无脑全域竞速会给每个域名加探测成本，故只对慢域名启用。已知盲区：纯 TCP 竞速分不出「TCP 通、TLS 断」——直连 relay 失败计 `direct_fails`，连续 2 次剔除回代理。TUN 路径未接入（首响应信号在 meow 引擎内部）。
+- **回环/私网/国内直连判定**（SOCKS 入站）：pin 优先，之后回环/私网目标原样直连、国内域名（`china-domains.txt`，11 万条后缀表）经真实 DNS 解析成 IP 后直连，其余交给域名级路线缓存（下一条）。避免每个死候选烧 4s、国内绕远、私网目标被拨到节点侧 loopback。
+- **直连优先 + 路线缓存（曾成功的路线优先）**：缓存未命中 → 先直连（真实 DNS 解析后拨 IP），拨不通回退代理候选链（fallback）；命中 → 照缓存里上次成功的路线走，可能是代理。首响应/失败写回缓存：代理首响应 > 2s 标记 slow → 下次并行竞速（直连 + 代理候选，TCP 先建连者胜）；换路线走滞回（新路线快过旧路线一半才接管，旧路线没有耗时基线时成功的直接接管），TTL 5 分钟。已知盲区：纯 TCP 观测分不出「TCP 通、TLS 断」——直连 relay 失败计 `direct_fails`，连续 2 次剔除条目回未命中。TUN 路径未接入（首响应信号在 meow 引擎内部）。
 - **节点 dial 真实 DNS 预解析**：节点服务器域名经固定上游（223.5.5.5 / 119.29.29.29，`SILVERQ_RESOLVE_UPSTREAMS` 可覆盖）预解析写 `NodeSpec.dial_addr`，adapter 拨号用真实 IP。修复 TUN + fake-IP 环境下「拨节点变成经候选链拨节点」的自指递归（2026-09-19 事故：健康检查幸存 14-30 → 0-1）。解析失败回退系统解析，只降级不丢节点。
 
 ## 使用
@@ -77,7 +77,7 @@ src/
 │                      # persist.rs（EWMA 存档）；mod.rs（调度进度计数）
 ├── proxy/             # nodespec.rs（节点 YAML 模型）、factory.rs（NodeSpec→meow
 │                      # adapter）、meow.rs（MeowMeasurer）、dns.rs（零依赖 UDP DNS
-│                      # 客户端 + 国内域名表 ChinaSet）、route.rs（域名级竞速缓存）
+│                      # 客户端 + 国内域名表 ChinaSet）、route.rs（域名级路线缓存：直连优先）
 │                      # ——meow feature
 ├── dataplane/         # inbound.rs（SOCKS5/HTTP-CONNECT TCP）、udp.rs（UDP 中继）、
 │                      # tun.rs（TUN 透明代理，meow-tun feature）——meow feature

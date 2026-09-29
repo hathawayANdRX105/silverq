@@ -224,16 +224,23 @@ async fn handle_one(
     };
 
     // 路由缓存决策（回环/国内/钉住不进缓存：那些是策略或本机语义，非性能选择）。
-    // 代理首响应超阈值的域名下次访问触发竞速：直连 + 候选链并行，TCP 先建连者胜。
+    // 未命中 → 直连优先，直连拨不通回退代理候选链（proxy_fallback）；命中 →
+    // 按缓存里曾成功的路线走；代理路线慢的域名下次触发并行竞速。
     let china_hit = ctx.china.matches(&target.host);
     let cache_eligible =
         route_cache_eligible(&target.host, ctx.pinned.load(Ordering::Relaxed), china_hit);
     let mut race = false;
+    // 缓存驱动的直连（区别于回环/国内的策略直连）：失败后要回退候选链，
+    // 且失败要记账，否则一个被墙域名会每次白烧一轮直连超时。
+    let mut proxy_fallback = false;
     if cache_eligible && matches!(direct, DirectDial::None) {
         match ctx.routes.decide(&target.host) {
             crate::proxy::route::Decision::Direct => {
                 match crate::proxy::dns::resolve_host(&target.host).await {
-                    Some(ip) => direct = DirectDial::Ip(ip),
+                    Some(ip) => {
+                        direct = DirectDial::Ip(ip);
+                        proxy_fallback = true;
+                    }
                     None => ctx
                         .routes
                         .record(&target.host, Route::Direct, RouteOutcome::Failed),
@@ -274,9 +281,9 @@ async fn handle_one(
     let dial_timeout = dt.dial();
     let mut conn: Option<Box<dyn meow_common::conn::ProxyConn>> = None;
     let mut used_route = Route::Proxy;
+    // 直连优先：回环/私网按原样拨（localhost 解析交给系统，回环段不受
+    // fake-IP 影响）；国内域名与缓存路线拨已解析的真实 IP。
     match direct {
-        // 强制直连：回环/私网按原样拨（localhost 解析交给系统，回环段不受
-        // fake-IP 影响）；国内域名拨已解析的真实 IP。
         DirectDial::Host => {
             let t = std::cmp::max(dial_timeout, dt.first_response());
             conn = dial_direct(
@@ -286,7 +293,9 @@ async fn handle_one(
             )
             .await
             .map(|s| Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
-            used_route = Route::Direct;
+            if conn.is_some() {
+                used_route = Route::Direct;
+            }
         }
         DirectDial::Ip(ip) => {
             let t = std::cmp::max(dial_timeout, dt.first_response());
@@ -297,73 +306,83 @@ async fn handle_one(
             )
             .await
             .map(|s| Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
-            used_route = Route::Direct;
+            if conn.is_some() {
+                used_route = Route::Direct;
+            } else if proxy_fallback {
+                // 缓存直连拨不通：先记一次账，随后代理兜底成功会把缓存改写
+                // 成代理路线（连续 2 次直连失败则踢条目，回未命中语义）。
+                ctx.routes
+                    .record(&target.host, Route::Direct, RouteOutcome::Failed);
+            }
         }
-        DirectDial::None => {
-            if race {
-                // 竞速：直连与候选链并行，TCP 先建连者胜（慢路由域名的专属路径）
-                let label = format!("{}/{}", target.host, target.port);
-                let host = target.host.clone();
-                let port = target.port;
-                let direct_f = Box::pin(async move {
-                    match crate::proxy::dns::resolve_host(&host).await {
-                        Some(ip) => dial_direct((ip, port), dial_timeout, label).await,
-                        None => None,
-                    }
-                });
-                let proxy_f = Box::pin(async {
-                    for adapter in &candidates {
-                        match tokio::time::timeout(dial_timeout, adapter.dial_tcp(&metadata)).await
-                        {
-                            Ok(Ok(c)) => return Some(c),
-                            Ok(Err(e)) => {
-                                tracing::info!(tag = adapter.name(), "dial failed: {e}")
-                            }
-                            Err(_) => {
-                                tracing::info!(
-                                    tag = adapter.name(),
-                                    "dial 超时 {dial_timeout:?}，换下一个候选"
-                                )
-                            }
-                        }
-                    }
-                    None
-                });
-                match futures::future::select(direct_f, proxy_f).await {
-                    futures::future::Either::Left((res, proxy_f)) => {
-                        if let Some(s) = res {
-                            conn = Some(Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
-                            used_route = Route::Direct;
-                        } else if let Some(c) = proxy_f.await {
-                            conn = Some(c);
-                        }
-                    }
-                    futures::future::Either::Right((res, direct_f)) => {
-                        if let Some(c) = res {
-                            conn = Some(c);
-                        } else if let Some(s) = direct_f.await {
-                            conn = Some(Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
-                            used_route = Route::Direct;
-                        }
-                    }
+        DirectDial::None => {}
+    }
+
+    // 代理侧：竞速（直连与候选链并行），或「未尝试直连 / 直连拨不通」时的
+    // 候选链兜底。策略直连（回环/国内）失败不进这里——送进代理链没意义。
+    if conn.is_none() {
+        if race {
+            // 竞速：直连与候选链并行，TCP 先建连者胜（慢路由域名的专属路径）
+            let label = format!("{}/{}", target.host, target.port);
+            let host = target.host.clone();
+            let port = target.port;
+            let direct_f = Box::pin(async move {
+                match crate::proxy::dns::resolve_host(&host).await {
+                    Some(ip) => dial_direct((ip, port), dial_timeout, label).await,
+                    None => None,
                 }
-            } else {
+            });
+            let proxy_f = Box::pin(async {
                 for adapter in &candidates {
                     match tokio::time::timeout(dial_timeout, adapter.dial_tcp(&metadata)).await {
-                        Ok(Ok(c)) => {
-                            conn = Some(c);
-                            break;
-                        }
+                        Ok(Ok(c)) => return Some(c),
                         Ok(Err(e)) => {
-                            // info 级：死候选是运维必须能看到的信号（fallback 计数也靠它）
-                            tracing::info!(tag = adapter.name(), "dial failed: {e}");
+                            tracing::info!(tag = adapter.name(), "dial failed: {e}")
                         }
                         Err(_) => {
                             tracing::info!(
                                 tag = adapter.name(),
                                 "dial 超时 {dial_timeout:?}，换下一个候选"
-                            );
+                            )
                         }
+                    }
+                }
+                None
+            });
+            match futures::future::select(direct_f, proxy_f).await {
+                futures::future::Either::Left((res, proxy_f)) => {
+                    if let Some(s) = res {
+                        conn = Some(Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
+                        used_route = Route::Direct;
+                    } else if let Some(c) = proxy_f.await {
+                        conn = Some(c);
+                    }
+                }
+                futures::future::Either::Right((res, direct_f)) => {
+                    if let Some(c) = res {
+                        conn = Some(c);
+                    } else if let Some(s) = direct_f.await {
+                        conn = Some(Box::new(s) as Box<dyn meow_common::conn::ProxyConn>);
+                        used_route = Route::Direct;
+                    }
+                }
+            }
+        } else if matches!(direct, DirectDial::None) || proxy_fallback {
+            for adapter in &candidates {
+                match tokio::time::timeout(dial_timeout, adapter.dial_tcp(&metadata)).await {
+                    Ok(Ok(c)) => {
+                        conn = Some(c);
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        // info 级：死候选是运维必须能看到的信号（fallback 计数也靠它）
+                        tracing::info!(tag = adapter.name(), "dial failed: {e}");
+                    }
+                    Err(_) => {
+                        tracing::info!(
+                            tag = adapter.name(),
+                            "dial 超时 {dial_timeout:?}，换下一个候选"
+                        );
                     }
                 }
             }
@@ -372,16 +391,13 @@ async fn handle_one(
     let conn: Box<dyn meow_common::conn::ProxyConn> = if let Some(c) = conn {
         c
     } else if !matches!(direct, DirectDial::None) || race {
-        // 强制直连 / 竞速全败：诚实失败。本机目标送进代理链没有意义；
-        // 竞速全败 = 直连与代理都不可达。
-        if cache_eligible {
-            if race {
-                ctx.routes
-                    .record(&target.host, Route::Proxy, RouteOutcome::Failed);
-            } else {
-                ctx.routes
-                    .record(&target.host, Route::Direct, RouteOutcome::Failed);
-            }
+        // 强制直连（回环/国内）失败、缓存直连+代理兜底全败、竞速全败：
+        // 诚实失败。本机目标送进代理链没有意义；全败 = 直连与代理都不可达。
+        // 缓存直连的失败已在拨号阶段记过账，这里再记一次会把 direct_fails
+        // 一次打满、误删条目，所以只剩竞速需要补记录。
+        if race {
+            ctx.routes
+                .record(&target.host, Route::Proxy, RouteOutcome::Failed);
         }
         if target.proto == Proto::Http {
             let _ = socket
