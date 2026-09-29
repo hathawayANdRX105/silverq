@@ -43,6 +43,7 @@ Checklist yaml wiring:
 import concurrent.futures
 import json
 import os
+import subprocess
 import re
 import sys
 import urllib.error
@@ -70,19 +71,21 @@ def parse_files(payload: str):
 
 
 def loose_match(rel: str, pat: str) -> bool:
-    """Same semantics as engine matches_include: loose, harness sees full content."""
+    """Glob 匹配，与引擎 matches_include 的宽松语义一致。
+
+    曾经只支持结尾的 `/**`，中段/开头的 `**` 一律不匹配——于是
+    `crates/web/**/*.rs` 这类 patterns 静默零命中，规则照报 ALL PASS（假绿）。
+    现在统一翻译成正则：
+      `**/` 匹配零或多层目录，`*` 只跨一段，`?` 匹配单字符。
+    """
     pat = pat.strip("/")
-    if pat.startswith("**/"):
-        pat = pat[3:]
-    if "." in pat and not pat.startswith("*"):
-        ext = pat.split(".", 1)[1] if pat.startswith("*.") else None
-    else:
-        ext = None
-    if pat.startswith("*."):
-        return rel.endswith(pat[1:])
-    if pat.startswith("*"):
-        return rel.endswith(pat)
-    return rel == pat or rel.endswith("/" + pat) or (pat.endswith("/**") and rel.startswith(pat[:-3]))
+    if rel == pat or rel.endswith("/" + pat):
+        return True
+    if any(c in pat for c in "*?["):
+        regex = re.escape(pat).replace(r"\*\*/", "(?:.*/)?")
+        regex = regex.replace(r"\*\*", ".*").replace(r"\*", "[^/]*").replace(r"\?", "[^/]")
+        return re.fullmatch(regex, rel) is not None
+    return rel == pat or rel.endswith("/" + pat)
 
 
 def file_matches(rule: dict, rel: str) -> bool:
@@ -114,6 +117,22 @@ def build_state(rule: dict, rel: str, content: str, diff_text: str, root: str) -
             body = body[:STATE_CAP] + "\n…[truncated]"
         parts.append(f"FILE CONTENT ({rel}):\n{body}")
     return "\n\n".join(parts), missing
+
+
+def diff_for(root: str, rel: str) -> str:
+    """Hunks of `rel` vs HEAD, so jev judges the CHANGED code, not the whole file.
+
+    The gate's mode:file payload carries full file content only; the engine does
+    not embed hunks. Without this the 'state.diff' config flag is dead and jev
+    reviews pre-existing code as if it were new (false positives on large files).
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", root, "diff", "HEAD", "--unified=3", "--no-color", "--", rel],
+            capture_output=True, text=True, timeout=30).stdout
+    except Exception:
+        return ""
+    return out[:8_000]
 
 
 def post(url: str, headers: dict, payload: dict, timeout: int) -> dict:
@@ -155,6 +174,18 @@ def severity_for(q: dict, ans) -> str:
     return "FAIL" if ans >= fail else ("WARN" if ans >= warn else None)
 
 
+def changed_since(root, rev):
+    """基线以来改动过的文件。git 失败时返回空集（宁可少判，不静默全仓判）。"""
+    for spec in (f"{rev}...HEAD", f"{rev}..HEAD", rev):
+        out = subprocess.run(
+            ["git", "diff", "--name-only", "-z", spec],
+            cwd=root, capture_output=True,
+        )
+        if out.returncode == 0:
+            return {p for p in out.stdout.decode("utf-8", "replace").split("\0") if p}
+    return set()
+
+
 def main():
     args = sys.argv[1:]
     cfg_path = args[args.index("--config") + 1] if "--config" in args else ""
@@ -169,6 +200,16 @@ def main():
         print(json.dumps([]))
         return
     root = os.popen("git rev-parse --show-toplevel").read().strip() or "."
+    # --base（或 GATE_BASE）把范围收窄到基线以来的改动。不给就是全仓：存量仓会
+    # 一次判几百个文件，而规则管的是「别新写」，不是「清历史债」。全仓审计走
+    # merge 阶段显式不给 --base。
+    if "--base" in args:
+        rev = args[args.index("--base") + 1] if args.index("--base") + 1 < len(args) else ""
+    else:
+        rev = ""
+    rev = rev or os.environ.get("GATE_BASE", "")
+    if rev:
+        files = [f for f in files if f[0] in changed_since(root, rev)]
     key = os.environ.get("TYPESAFE_API_KEY")
     base = os.environ.get("TYPESAFE_API_BASE", "https://api.typesafe.ai").rstrip("/")
     model = os.environ.get("JEV_MODEL", "jev-latest")
@@ -176,6 +217,11 @@ def main():
     jobs = []   # (rule_id, rule, rel, content)
     for rel, content in files:
         for rid, rule in rules.items():
+            # 配置里允许放 `_comment` 这类说明键（值是字符串）。只对 dict 规则
+            # 调 file_matches，否则一条说明就能让 harness 崩掉——崩掉会被引擎
+            # 记成 WARN，于是整条规则静默失效并报 ALL PASS（fail-open）。
+            if not isinstance(rule, dict):
+                continue
             if file_matches(rule, rel):
                 jobs.append((rid, rule, rel, content))
     if not jobs:
@@ -188,7 +234,7 @@ def main():
             futs = {}
             for i, (rid, rule, rel, content) in enumerate(jobs):
                 q = rule.get("questions", {})
-                st, missing_ctx = build_state(rule, rel, content, "", root)
+                st, missing_ctx = build_state(rule, rel, content, diff_for(root, rel), root)
                 missing_map[i] = missing_ctx
                 futs[i] = ex.submit(judge_one, base, key, model, st, q)
             for i, fut in futs.items():
@@ -226,8 +272,11 @@ def main():
                 extra[qid] = (f"{r[qid]:.2f}" if isinstance(r[qid], float) else str(r[qid][0]))
         if worst == "INFO":
             continue          # below warn - the false-positive filter
+        # finding 的 message 用规则自带的 `message`（一句话+怎么改），没配才退回
+        # intent 截断。intent 是给模型看的条文，200 字截断后对人没有可执行信息。
         findings.append({"id": rid.upper(), "severity": worst, "path": rel, "line": 0,
-                         "message": rule.get("intent", rid)[:200], **extra})
+                         "message": rule.get("message") or rule.get("intent", rid)[:200],
+                         **extra})
     print(json.dumps(findings))
 
 

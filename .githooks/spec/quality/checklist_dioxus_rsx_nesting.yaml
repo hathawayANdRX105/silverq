@@ -1,0 +1,38 @@
+# CK-WEB-RSX-NESTING: rsx 元素嵌套（R1）
+#
+# 依据: ferrite `todo/web-refract/web-spec.md` R1 ——
+#   「tab-page/*.rs 的 rsx 中元素包含元素最多 1 层，顶层容器的直接子节点必须是
+#     #[component] 组件或叶子元素。更深的子树抽进 components/。」
+#   R1.1 粒度下限（防过度碎片化）：section 组件最小边界 = 一个编号段落。
+#
+# 不管什么（web-spec 没有把它们算进元素嵌套，算了就是误报）：
+#   - `prop: rsx! { ... }`   传 slot 片段
+#   - `if cond { rsx! {} }`  条件渲染
+#   - `.map(|x| rsx! {})`    列表渲染（R1.2 管的是「循环体里内联多行结构」，
+#                            那是 composition_discipline 问句的职责，不是嵌套层数）
+#
+# 口径: 用栈逐个花括号判类别，不正则数 `Name {` 的行数。峰值必须在遍历中取——
+#       块结束时栈已弹平，那时再数恒为 0（这个坑踩过一次）。
+# 阈值: --nesting-limit 2 = 报「超过 1 层」，直接对应 R1 的 ≤1。
+# 范围: --scope changed。存量债不在热路径里追，走 merge 的全仓审计 + 书面驳回。
+# 工具: dioxus_web.py（l1 确定性，零 LLM，~1s）
+enabled: true
+hooks: [pre-push, merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/", "node_modules/"]
+mode: grep
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/dioxus_web.py"
+    - "--only"
+    - "nesting"
+    - "--scope"
+    - "changed"
+    - "--nesting-limit"
+    - "2"
+optional: false
+timeout: 60

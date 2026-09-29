@@ -1,0 +1,22 @@
+# ocr-review 替代品（Rust）
+# 忠实移植 alibaba/open-code-review 的 internal/config/rules/rule_docs/rust.md：
+# 9 类缺陷判定（noul）+ 总分（score），instructions 取自 ocr 原文子规则，非综合改写。
+# 取代 ocr review 的规范层角色；ocr 卸载后本规则承接其职能。
+# 判决由 jev_rule.py 读取 ocr-rust.json（意图 + 每类 noul + 阈值）
+enabled: true
+hooks: [merge]
+sla: l2
+fail_severity: WARN
+mode: file
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/jev_rule.py"
+    - "--config"
+    - ".githooks/spec/harness/ocr-rust.json"
+  # 语义审查按变更文件喂，冷路径（merge）跑，不拖 pre-commit
+optional: true
+timeout: 300

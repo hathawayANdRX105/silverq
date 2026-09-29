@@ -1,0 +1,103 @@
+{
+  "ocr_go_review": {
+    "intent": "Go code review against the OpenCodeReview semantic rubric (internal/config/rules/rule_docs/go.md). Judge the CHANGED Go code (not the whole file). Favor precision over recall: report only defects likely real in the changed code and its reachable context; a false positive costs reviewer trust. Treat correctness and security findings as blocking; style-only suggestions are advisory. Before reporting a non-local claim, establish call sites, ownership, synchronization, and input boundaries from the diff and context; do not infer concurrent invocation, attacker control, resource ownership, or an error contract from a function name alone. Do not duplicate findings go vet / Staticcheck / go test -race / gofmt / the compiler already catch unless the diff shows a concrete user-visible consequence they will not express. Do not make gofmt/vet/lint-enforced formatting, import order, or naming into blocking findings. Before reporting any non-local claim, establish the call site, ownership, synchronization, and trust boundary from the diff and provided context; report a finding only on concrete evidence actually present in the change; prefer a false negative over a false positive; do not turn formatter/linter-enforced style into blocking findings. The overall_severity score counts only defects that survive this guard.",
+    "paths_include": [
+      "**/*.go"
+    ],
+    "paths_exclude": [
+      "vendor/",
+      ".wt/",
+      "**/testdata/**"
+    ],
+    "state": {
+      "file": true,
+      "diff": true,
+      "context_files": []
+    },
+    "questions": {
+      "errors_panics": {
+        "type": "noul",
+        "instructions": "Error/panic/API-contract defects in the changed code: errors from calls that are ignored, overwritten, or converted into success/default that hide a failed operation (best-effort only if the ignored failure is safe and evident); error wrapping that loses the original cause (use %w for Is/As), wraps nil, returns a misleading sentinel, or leaks internal/sensitive detail at a public boundary; panic/log.Fatal/os.Exit in request/worker/library/cleanup paths where a recoverable error can be returned; deferred cleanup that overwrites a primary error or drops a meaningful Close/Commit/Rollback error.",
+        "criteria": {
+          "true": "A real error-handling or panic contract defect is present in the changed code",
+          "false": "Errors are handled and propagated correctly; no unjustified panic"
+        },
+        "fail": 0.85,
+        "warn": 0.6
+      },
+      "nil_interfaces": {
+        "type": "noul",
+        "instructions": "Nil/interface/value-semantics defects in the changed code: a typed nil pointer/map/slice/function/channel/error stored in a non-nil interface and later treated as absent; nil maps written to; nil channels used unintentionally (block forever); nil pointers dereferenced on reachable paths; copying a value that holds a Mutex/RWMutex/Once/Pool/atomic state after first use (value receiver, assignment, return, append, map value, serialization); value receivers that mutate only a copy when callers expect shared state; sync.Once used for work that must retry after failure.",
+        "criteria": {
+          "true": "A real nil/interface/value-semantics defect is present in the changed code",
+          "false": "Nil handling, interface use, and value semantics are correct in the change"
+        },
+        "fail": 0.8,
+        "warn": 0.6
+      },
+      "context_goroutines": {
+        "type": "noul",
+        "instructions": "Context/goroutine/cancellation defects in the changed code: request-scoped work started with context.Background()/TODO() when it should inherit the caller's deadline/cancellation/values; context.Context stored in a struct or replaced by a custom interface when it should be passed as the first param; WithCancel/WithTimeout/WithDeadline whose cancel func is not called; blocking I/O/waits/retries on a request/worker path lacking cancellation or deadline; goroutines that outlive their owner (wait forever on a channel/lock/I/O, no shutdown, unobserved completion); fire-and-forget goroutines capturing request-local mutable data or writing to a response after the handler returns; loop-variable captures in goroutines/callbacks where a closure can observe a later value.",
+        "criteria": {
+          "true": "A real context/goroutine/cancellation defect is present in the changed code",
+          "false": "Context and goroutine lifecycle in the change are correct"
+        },
+        "fail": 0.8,
+        "warn": 0.6
+      },
+      "channels_locks": {
+        "type": "noul",
+        "instructions": "Channel/lock/shared-state defects in the changed code (report only with evidence state is reachable concurrently): unsynchronized concurrent reads/writes of maps/slices/pointers/counters/caches or interleaved check-then-act; holding a Mutex/RWMutex across blocking I/O/channel ops/callbacks/network/db calls or long CPU work; RLock used while mutating protected data, or mixed atomic and non-atomic access of the same state; sends/receives that can block indefinitely because a peer may stop/buffer may fill; multiple channel closers, send-on-closed, or double-close; select defaults that busy-spin or drop required work; WaitGroup Add racing Wait, missing Done, or counters that cannot reach completion.",
+        "criteria": {
+          "true": "A real concurrency defect with reachable concurrent state is present",
+          "false": "Shared state in the change is correctly synchronized or not concurrently reachable"
+        },
+        "fail": 0.8,
+        "warn": 0.6
+      },
+      "timers_resources": {
+        "type": "noul",
+        "instructions": "Timer/ticker/resource-lifecycle defects in the changed code: a timer/ticker retained and left running after work ends (note Go 1.23+ recovers unreferenced unstopped timers — only report when retained state or firing is the cost); time.After in a repeated/select loop only with evidence of allocation cost; timer reset/stop assuming one behavior across Go versions; http.Response.Body / sql.Rows / files / sockets / compression readers / transactions / locks not closed on all reachable paths; defer inside a loop that can run many iterations delaying close; sql.Rows iteration omitting rows.Err() after the loop; outbound HTTP calls missing body cleanup/context/timeout; transactions with a return path after Begin lacking rollback/commit.",
+        "criteria": {
+          "true": "A real resource-leak or timer-lifecycle defect is present in the changed code",
+          "false": "Timers and resources in the change are released on all paths"
+        },
+        "fail": 0.8,
+        "warn": 0.6
+      },
+      "collections_numeric": {
+        "type": "noul",
+        "instructions": "Collection/slice/byte/numeric-boundary defects in the changed code: returning/caching/passing a slice/map/byte buffer whose backing storage is later reused or mutated; append aliasing caller/shared backing storage where mutation escapes; reachable indexing/slicing/length arithmetic that exceeds bounds on empty/boundary input; integer conversion, narrowing, signed/unsigned comparison, or size/offset arithmetic that can overflow, truncate, wrap, or turn a negative input into a huge size; reusing mutable buffers/encoders/decoders/scanners or package-global state concurrently.",
+        "criteria": {
+          "true": "A real collection or numeric-boundary defect is present in the changed code",
+          "false": "Slices, buffers, and numeric arithmetic in the change are sound"
+        },
+        "fail": 0.8,
+        "warn": 0.6
+      },
+      "security": {
+        "type": "noul",
+        "instructions": "Security-sensitive defects in the changed code (confirm attacker control / a trust boundary first; prefer a concrete exploit path): SQL/shell/URL/path/header/template/regex/serialized data assembled from untrusted input without parameterization, validation, escaping, or allowlisting; path traversal, symlink-following, unsafe archive extraction, insecure temp files; html/template replaced with text/template for HTML or trusted templates built from untrusted content; SSRF or credential leakage through outbound URLs; secrets/credentials/tokens/keys/PII logged, returned in errors, or embedded in source; math/rand used for security-sensitive keys/tokens/session IDs/reset codes/nonces/salts (crypto/rand required); reflect/unsafe/cgo without narrow documented invariants.",
+        "criteria": {
+          "true": "A concrete security defect at a trust boundary is present in the changed code",
+          "false": "No security-relevant defect, or no untrusted input reaches the changed code"
+        },
+        "fail": 0.85,
+        "warn": 0.6
+      },
+      "overall_severity": {
+        "type": "score",
+        "instructions": "Overall severity of the real defects in the changed Go code (ignoring advisory-only/style items). 0 = no defects. 1 = minor/recoverable issues only. 2 = at least one likely-correctness issue that can cause wrong behavior. 3 = a correctness defect likely to cause a real bug, or a security issue at a trust boundary. 4 = a data-race or resource-corruption defect, or a security issue with a concrete exploit path.",
+        "criteria": [
+          "No real defect in the changed code; at most style nitpicks",
+          "Only minor, recoverable issues (no wrong behavior expected)",
+          "At least one likely-correctness issue that can cause wrong behavior",
+          "A correctness defect likely to cause a real bug, or a security issue at a trust boundary",
+          "A data-race/corruption or security defect with a concrete exploit path"
+        ],
+        "fail": 2,
+        "warn": 1
+      }
+    }
+  }
+}

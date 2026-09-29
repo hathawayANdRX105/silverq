@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# gate-managed hook — delegates to the gate binary
-# 找二进制: 先 PATH 里的 gate (系统安装), 否则用仓库内 .githooks/gate
+# canon-managed hook — delegates to the canon binary
+# 找二进制: 先 PATH 里的 canon (系统安装), 否则用仓库内 .githooks/canon
 REPO=$(git rev-parse --show-toplevel 2>/dev/null)
-if command -v gate >/dev/null 2>&1; then
-  exec gate commit-msg "$1"
+if command -v canon >/dev/null 2>&1; then
+  exec canon commit-msg "$1"
 fi
-if [ -x "$REPO/.githooks/gate" ]; then
-  exec "$REPO/.githooks/gate" commit-msg "$1"
+if [ -x "$REPO/.githooks/canon" ]; then
+  exec "$REPO/.githooks/canon" commit-msg "$1"
 fi
-echo "gate binary not found (need: gate on PATH, or .githooks/gate)" >&2
+echo "canon binary not found (need: canon on PATH, or .githooks/canon)" >&2
 exit 1

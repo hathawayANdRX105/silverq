@@ -75,7 +75,7 @@ harness stdout **必须**是 JSON 数组（即使一条）：
 # 设预制 findings：
 export CHECKLIST_DEMO_FINDINGS='[{"id":"X-01","severity":"WARN","line":1,"message":"mock finding"}]'
 # 跑 gate：
-gate pre-commit
+canon pre-commit
 # 或直接试 mock：
 ./.githooks/spec/CHECKLIST_DEMO_MOCK.sh
 ```
@@ -90,12 +90,12 @@ cp -r ~/projects/omenic/.githooks ~/projects/<your-project>/
 
 # 2. 装 gate 二进制 + 初始化
 cd ~/projects/<your-project>
-gate init
+canon init
 # 3. 调整 checklist_*.yaml（删 demo，改 prompt 适配你的项目）
 # 4. 验证
-gate pre-commit   # 当前 staged
-gate pre-push     # 当前 push
-gate merge OWNER/REPO 123   # 手动合并前
+canon pre-commit   # 当前 staged
+canon pre-push     # 当前 push
+canon merge OWNER/REPO 123   # 手动合并前
 ```
 
 ## 详细规范

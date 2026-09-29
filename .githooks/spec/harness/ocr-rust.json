@@ -1,0 +1,132 @@
+{
+  "ocr_rust_review": {
+    "intent": "Rust code review against the OpenCodeReview semantic rubric (internal/config/rules/rule_docs/rust.md). Judge the CHANGED Rust code (not the whole file) against each category; a finding is one of the listed conditions actually present in the diff, not a style preference. Favor precision over recall: report only defects likely real; correctness/security findings are blocking, style-only are advisory. Use file_read/code_search context to establish call sites, ownership, and boundaries before claiming a non-local defect; do not infer defects from a function name alone. Before reporting any non-local claim, establish the call site, ownership, synchronization, and trust boundary from the diff and provided context; report a finding only on concrete evidence actually present in the change; prefer a false negative over a false positive; do not turn formatter/linter-enforced style into blocking findings. The overall_severity score counts only defects that survive this guard.",
+    "paths_include": [
+      "**/*.rs"
+    ],
+    "paths_exclude": [
+      "target/",
+      ".wt/"
+    ],
+    "state": {
+      "file": true,
+      "diff": true,
+      "context_files": []
+    },
+    "questions": {
+      "typos": {
+        "type": "noul",
+        "instructions": "Does the changed Rust code have obvious spelling errors at DECLARATION sites (type/function/variable/enum/trait/module names) or in user-facing strings (log/panic/error/diagnostic messages)? Do not report spelling at call sites.",
+        "criteria": {
+          "true": "A declared identifier or user-facing string has a spelling error affecting readability",
+          "false": "No declaration-site or user-facing typos in the changed code"
+        },
+        "fail": 0.8,
+        "warn": 0.6
+      },
+      "ownership_lifetime": {
+        "type": "noul",
+        "instructions": "Ownership/lifetime defects in the changed code: incorrectly returned references or borrowed values escaping their valid scope; excessive/unnecessary clone() where a borrow, iterator, Cow, or ownership transfer is clearer; interior mutability (RefCell/Cell/Mutex) used without a real shared-mutability requirement; reference cycles with Rc<RefCell>/Arc<Mutex> where Weak should break the cycle.",
+        "criteria": {
+          "true": "One of these ownership/lifetime defects is present in the changed code",
+          "false": "Ownership and lifetimes in the changed code are sound"
+        },
+        "fail": 0.8,
+        "warn": 0.6
+      },
+      "error_panic": {
+        "type": "noul",
+        "instructions": "Does the changed Rust code call unwrap()/expect()/panic!()/todo!()/unimplemented!() in a production or library path where the failure is recoverable or should propagate via Result? Or convert errors to strings too early, discard them without context, ignore/swallow Result/Option values, or map them to misleading defaults? Public APIs that panic on ordinary invalid input instead of returning a typed error (unless the panic documents a clear invariant).",
+        "criteria": {
+          "true": "An unjustified panic, error-swallowing, early-to-string, or misleading-default pattern exists in production/library code",
+          "false": "Error handling is appropriate; panics only document clear invariants"
+        },
+        "fail": 0.85,
+        "warn": 0.6
+      },
+      "unsafe_boundaries": {
+        "type": "noul",
+        "instructions": "Does the changed Rust code widen unsafe blocks beyond need or hide unrelated invariants; omit or stale their safety rationale; do raw-pointer derefs without validity/alignment/aliasing/lifetime guarantees; skip FFI validation (null/length/encoding/allocator); or use static mut / unchecked transmute / MaybeUninit / mem::zeroed / manual drop without a documented soundness invariant?",
+        "criteria": {
+          "true": "An unsafe block or FFI boundary lacks a documented soundness invariant or required validation",
+          "false": "No unsafe/FFI in the change, or every unsafe block carries a sound rationale"
+        },
+        "fail": 0.85,
+        "warn": 0.6
+      },
+      "concurrency": {
+        "type": "noul",
+        "instructions": "Concurrency/shared-state defects in the changed code: holding Mutex/RwLock/RefCell guards longer than necessary (across user calls or blocking ops); holding sync locks across .await; blocking I/O/sleeps/CPU-heavy work inside async tasks; check-then-act races; weak/overly-strong atomic orderings; unsafe Send/Sync implementations that do not prove thread-safety under their invariants.",
+        "criteria": {
+          "true": "A concurrency or shared-state defect is present with reachable concurrent state",
+          "false": "Concurrency in the changed code is correct, or no shared state is reachable concurrently"
+        },
+        "fail": 0.8,
+        "warn": 0.6
+      },
+      "async_cancellation": {
+        "type": "noul",
+        "instructions": "Async/cancellation-safety defects in the changed code: dropped JoinHandle that still needs to observe failure/cancellation/shutdown; futures not cancellation-safe around partial writes, locks, transactions, or cleanup; async code using sync fs/network/process APIs in request/worker paths that can block the runtime; retry loops without backoff, timeout, cancellation propagation, or bounded attempts.",
+        "criteria": {
+          "true": "An async or cancellation-safety defect is present in the changed code",
+          "false": "Async code in the change is cancellation-safe, or there is none"
+        },
+        "fail": 0.8,
+        "warn": 0.6
+      },
+      "collections_perf": {
+        "type": "noul",
+        "instructions": "Collections/iterator/performance defects in the changed code: unnecessary allocation in hot paths (repeated String build, format!, collect()/to_vec() where borrowing/streaming suffices); dense iterator chains that obscure errors or side effects; missing preallocation when expected size is known and growth is material; O(n^2) lookups from nested loops where a HashMap/HashSet/sort/index would clearly reduce complexity.",
+        "criteria": {
+          "true": "A material performance/collection defect is present in the changed code",
+          "false": "Collections and complexity in the change are reasonable"
+        },
+        "fail": 0.7,
+        "warn": 0.55
+      },
+      "type_api_design": {
+        "type": "noul",
+        "instructions": "Type/API-design defects in the changed code: modeling domain states with booleans/strings/raw ints where an enum, newtype, or typed ID would make invalid states unrepresentable; missing From/TryFrom/AsRef/Borrow/IntoIterator where a reusable API needs them; public structs/enums/traits/errors with poor names, visibility, or docs for the crate boundary; exposing concrete collection/sync types in public APIs where a slice/iterator/trait would preserve flexibility.",
+        "criteria": {
+          "true": "A type or public-API design defect is present in the changed code",
+          "false": "Type and API design in the change is sound"
+        },
+        "fail": 0.7,
+        "warn": 0.55
+      },
+      "macros": {
+        "type": "noul",
+        "instructions": "Only if the diff actually DEFINES a macro_rules! or procedural macro: an $x:expr fragment interpolated more than once so the caller's expression and side effects run multiple times; exported macros referencing items without $crate:: so resolution breaks cross-crate; $t:tt fragments re-emitted without parentheses where precedence can silently change; procedural macros that unwrap/expect/panic on malformed input instead of emitting syn::Error/compile_error!; macro-hygiene breakage (generated ids relying on call-site scope, or colliding on repeated invocation).",
+        "criteria": {
+          "true": "A macro-definition defect is present",
+          "false": "No macro is defined in the change, or the macro is well-formed"
+        },
+        "fail": 0.8,
+        "warn": 0.6
+      },
+      "security": {
+        "type": "noul",
+        "instructions": "Security defects in the changed code: building shell commands or SQL by unchecked string concatenation; not validating path/URL/command/SQL/serialized input before use; logging secrets/tokens/credentials/private keys/PII; integer conversion or byte-slicing/length arithmetic that can overflow/truncate/hit a UTF-8 boundary; ad-hoc cryptographic/random/auth code instead of well-reviewed crates with explicit error handling. Confirm attacker control or a trust boundary before reporting.",
+        "criteria": {
+          "true": "A concrete security defect at a trust boundary is present in the changed code",
+          "false": "No security-relevant defect, or no untrusted input reaches the changed code"
+        },
+        "fail": 0.85,
+        "warn": 0.6
+      },
+      "overall_severity": {
+        "type": "score",
+        "instructions": "Overall severity of the real defects in the changed Rust code (ignoring advisory-only/style items). 0 = no defects. 1 = minor/recoverable issues only. 2 = at least one likely-correctness issue that can cause wrong behavior. 3 = a correctness defect likely to cause a real bug, or a security issue at a trust boundary. 4 = a soundness/unsafe/FFI defect, or a security issue with a concrete exploit path.",
+        "criteria": [
+          "No real defect in the changed code; at most style nitpicks",
+          "Only minor, recoverable issues (no wrong behavior expected)",
+          "At least one likely-correctness issue that can cause wrong behavior",
+          "A correctness defect likely to cause a real bug, or a security issue at a trust boundary",
+          "A soundness/unsafe/FFI defect, or a security issue with a concrete exploit path"
+        ],
+        "fail": 2,
+        "warn": 1
+      }
+    }
+  }
+}

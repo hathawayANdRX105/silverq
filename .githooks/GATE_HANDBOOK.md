@@ -1,7 +1,7 @@
 # gate 手册
 
 > 本文件是 canon `manual/gate.md` 手册正本（2026-09-23 从 `.githooks/` 移出归并——`.githooks/` 只留运行时：hooks + spec + 兜底二进制）。
-> 规则协议文档在 `rules/docs/`（播种到各仓 `.githooks/spec/docs/`）；issue/PR 操作见 `github.md`；开发流见 `pr-dev-workflow.md` / `worktree.md`；任务书（收尾/功能开发/版本口径）在 `../tasks/`。
+> 规则协议文档在 `specs/docs/`（播种到各仓 `.githooks/spec/docs/`）；issue/PR 操作见 `github.md`；开发流见 `pr-dev-workflow.md` / `worktree.md`；任务书（收尾/功能开发/版本口径）在 `../tasks/`。
 
 gate 是仓库自带的质量门禁：读 `.githooks/spec/*.yaml` 规则 → 调外部命令/LLM → 收 finding → 按严重度放行或拦截。
 **加规则只改 yaml，不改二进制。** 本文件是人能查的一手总览；每条规则的参数以对应 `.githooks/spec/quality/checklist_*.yaml` 为准。
@@ -123,7 +123,7 @@ WARN**（召回不丢、处置照常），绝不静默清零。score 返回值�
 | 规则本体 | `spec/custom/<name>.json` | intent + 信息范围 + 问题（三种原语）+ 阈值 |
 | 接线 | `spec/quality/checklist_<name>.yaml` | mode:file → jev_rule.py --config |
 | 验证 | fixture（含"该抓的"和"该幸存的"） | 真判决 + 无 key 降级两条路径 |
-| 分发 | `bin/gate-sync push <项目>` | 同步给成员仓（custom/ 受保护不覆盖） |
+| 分发 | `scripts/gate-sync push <项目>` | 同步给成员仓（custom/ 受保护不覆盖） |
 
 完整可抄的现成示例：`.githooks/spec/custom/example_spec.json`（含 noul+score 与
 choice+fail_labels 两种形态）和 `example_checklist.yaml`（接线模板，文件名不以
@@ -203,7 +203,7 @@ choice+fail_labels 两种形态）和 `example_checklist.yaml`（接线模板，
 - 语法类检查（缺 alt 属性这种正则可抓的）塞进来 → 又慢又不确定；先正则后 jev。
 - paths 粗细两层都配了但互相矛盾 → 引擎粗过滤先进不来，json 细过滤永远空转。
 
-分发/收集用 `bin/gate-sync`（custom/ 目录受保护，push 不会覆盖项目自有规范）。
+分发/收集用 `scripts/gate-sync`（custom/ 目录受保护，push 不会覆盖项目自有规范）。
 
 ## 怎么豁免
 
@@ -217,7 +217,7 @@ choice+fail_labels 两种形态）和 `example_checklist.yaml`（接线模板，
 - gh 拦截闸门（GT-* 现在产出 Finding，可覆盖/可关）：
   - `github_issues.yaml` 开关：`close_requires_comment`（GT-COMMENT）/ `close_done_when_gate`（GT-04）/ `done_when_judge.enabled`（DWJ 模型评审，见下）/ `epic_sub_issue_gate`（GT-06）/ `merge_fixes_gate`（GT-05）——false = 整块跳过
   - `github_pull_requests.yaml` 开关：`merge_requires_body`（GT-BODY）/ `merge_checkbox_gate`（GT-CHK）/ `merge_title_gate`（CM-01/02 squash 标题）
-  - `github_reviews.yaml`：`merge_review.required: false` 关掉 RV-07 的 CRG+ocr 强制；`merge_review.ocr_timeout_secs` 调 ocr 超时
+  - `github_reviews.yaml`：`merge_review.required: false` 关掉 RV-07 的强制审查（CRG 结构层 + jev ocr_* checklist 语义层）
   - 严重度降级：GT-*/CM-*/RV-07 在 `dispatch.yaml` 的 `severity_overrides:` 段或全局 `severity_overrides.yaml` 按 ID 覆盖（如 `GT-06: "WARN"`）
   - 数据解析/子查询失败仍 fail-closed 硬拦（安全属性，不可配）
 - commit 检查（CM-01/02/03）：`dispatch.yaml` 的 `severity_overrides:` 段。
@@ -247,7 +247,7 @@ choice+fail_labels 两种形态）和 `example_checklist.yaml`（接线模板，
 | 数据错误 | `shared.rs` `load_spec_yaml` | 缺 `dispatch.yaml` / `github_*.yaml`（pre-commit、pre-push、merge） | **否**，fail-closed |
 | git commit | `pre_commit.rs:113` / `:118` / `:141` | `CM-01` 非 conventional / `CM-02` 标题含 CJK / `CM-03` commit type 与 PR type 不一致 | 是（`dispatch.yaml` `severity_overrides`） |
 | git push | `pre_commit.rs` 之后的 l1/l2 链 | 任一 checklist `FAIL`（含 `code_*` 六条工具链、`checklist_ccn`、`rust_no_process_cmd`） | 是（yaml + `severity_overrides.yaml`） |
-| git merge | `merge.rs:140-170` | `RV-07` CRG/ocr 强制（`merge_review.required`） | 是（`github_reviews.yaml` 开关 + override） |
+| git merge | `merge.rs:140-170` | `RV-07` CRG 结构层（ocr 已退役，语义层由 jev ocr_* checklist 承担） | 是（`merge_review.required` 开关 + override） |
 | git merge | `cleanup.rs:47-90` | `CL-01` 分支已合并/孤儿/临时前缀需清理 | 是（`cleanup_branch_cleanup.yaml`） |
 | gh issue create | `gh_wrap.rs:371-553` | `GT-01`/`GT-03` 标题/正文/label/父子关联（映射 `IS-*`） | 是（`github_issues.yaml` + override） |
 | gh issue close | `gh_wrap.rs:555-731` | `GT-04` Done when 未勾 / `GT-05` 缺 Fixes / `GT-06` epic 子 issue / `GT-07` 关联 PR | 是（同上，含 `done_when_judge`） |
@@ -273,6 +273,6 @@ choice+fail_labels 两种形态）和 `example_checklist.yaml`（接线模板，
 | 注释存在性门禁 | `RUSTFLAGS="-W missing_docs"`（public 59 处存量）；`clippy::missing_docs_in_private_items`（更严） | 存量清账前按 crate 灰度启用 |
 | 测试强度 | `cargo-mutants` nightly（验证 agent 测试是否真在检验，抓自证测试）；轻量方案已落地：`done_when_judge`（close 时 jev 逐条判 p(未达标)，≥0.85 硬拦） | 轻量方案已上线；mutants 待接入 |
 | 质量曲线 | `gate check --json` 每次 commit 落 jsonl（clippy 数/LOC/CRG risk/findings 分布） | 待接入 |
-| 函数复杂度 | 已上线 `ccn` checklist（ccn 天花板 6 + ratchet 记账：`ccn_gate.py` 进 `rules/harness/`，`ratchet.tsv` 进仓）；余 lizard 进 CI 镜像 | 已接入 |
+| 函数复杂度 | 已上线 `ccn` checklist（ccn 天花板 6 + ratchet 记账：`ccn_gate.py` 进 `specs/harness/`，`ratchet.tsv` 进仓）；余 lizard 进 CI 镜像 | 已接入 |
 | AI slop 二进制 | `cargo install antislop` 进 CI 镜像（未装时 `antislop` 规则静默跳过） | 待接入 |
 | 模块循环依赖 | `cargo-modules dependencies --lib --acyclic`（工具未装） | 待装 |

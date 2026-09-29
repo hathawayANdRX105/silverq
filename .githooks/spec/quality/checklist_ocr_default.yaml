@@ -1,0 +1,48 @@
+# ocr-review 替代品（通用 / 其他语言）
+# 忠实移植 alibaba/open-code-review 的 internal/config/rules/rule_docs/default.md：
+# 5 通用维度（correctness/security/performance/maintainability/test）+ 总分（score）。
+# 只审 rust/go/js/jsx/ts/tsx 之外的文件——这 6 个扩展名由对应的语言 checklist 承接，
+# 本规则不重复审（mirrors ocr「语言规则替换 default」的行为）。
+# 判决由 jev_rule.py 读取 ocr-default.json（意图 + 5 类 noul + 总分 + 反误报 guardrail）。
+enabled: true
+hooks: [merge]
+sla: l2
+fail_severity: WARN
+mode: file
+match:
+  paths_include:
+    - "**/*.py"
+    - "**/*.sh"
+    - "**/*.bash"
+    - "**/*.sql"
+    - "**/*.rb"
+    - "**/*.php"
+    - "**/*.cs"
+    - "**/*.java"
+    - "**/*.kt"
+    - "**/*.c"
+    - "**/*.cc"
+    - "**/*.cpp"
+    - "**/*.h"
+    - "**/*.yml"
+    - "**/*.yaml"
+    - "**/*.toml"
+    - "**/*.json"
+  paths_exclude:
+    - "target/"
+    - ".wt/"
+    - "vendor/"
+    - "node_modules/"
+    - "**/*.lock"
+    - "**/package-lock.json"
+    - "**/*.min.js"
+    - "**/testdata/**"
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/jev_rule.py"
+    - "--config"
+    - ".githooks/spec/harness/ocr-default.json"
+  # 语义审查按变更文件喂，冷路径（merge）跑，不拖 pre-commit
+optional: true
+timeout: 300
