@@ -1,0 +1,24 @@
+# 接线模板 — 把 example_spec.json 挂进 gate 的写法。
+# 本文件名不以 checklist_ 开头，引擎不会加载它 —— 它只是模板。
+# 真正启用时：cp 这个文件到 spec/quality/checklist_<名字>.yaml 并改 --config 路径。
+#
+# hooks 建议挂 pre-push / merge（每个命中文件一次 jev 调用，别放 pre-commit 热路径）。
+# enabled: false 的存量示例没人引用；直接改这份再复制亦可。
+
+enabled: false
+hooks: [merge]
+sla: l2
+fail_severity: WARN
+mode: file
+match:
+  # 引擎级粗过滤（决定哪些变更文件进 stdin）——与 json 里的细过滤互补
+  paths_include: ["**/*.rs", "**/*.md"]
+  paths_exclude: ["target/", ".wt/"]
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/jev_rule.py"
+    - "--config"
+    - ".githooks/spec/custom/example_spec.json"
+optional: true
+timeout: 300

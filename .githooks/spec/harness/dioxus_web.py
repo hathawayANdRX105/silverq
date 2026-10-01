@@ -23,7 +23,7 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 
 # ── 语法识别 ──────────────────────────────────────────────────────
 RSX_START = re.compile(r'\brsx!\s*\{')
@@ -76,16 +76,18 @@ def peak_nesting(src: str) -> list[tuple[int, int, int]]:
     out = []
     for m in RSX_START.finditer(src):
         start = src.count('\n', 0, m.start()) + 1
-        stack = ['root']
-        peak = 0
         j = m.end()                      # 已越过 rsx! 的开括号
-        while j < len(src) and stack:
+        stack = ['rsx!']                 # 哨兵代表本块的开括号
+        peak = 0
+        while j < len(src):
             c = src[j]
             if c == '{':
                 ls = src.rfind('\n', 0, j) + 1
                 stack.append(classify_brace(src[ls:j]))
                 peak = max(peak, stack.count('element'))   # 必须在遍历中取
-            elif c == '}' and len(stack) > 1:
+            elif c == '}':
+                if len(stack) == 1:
+                    break                # 本块的收尾括号
                 stack.pop()
             j += 1
         if peak:
@@ -107,9 +109,98 @@ def scan_nesting(path: str, src: str, limit: int) -> list[Finding]:
                 "crate 的 components/ 下，父层只留一次调用 + 传 props。"
             ),
         )
+        # limit = 允许的嵌套层数（R1「最多 1 层」）；peak 元素深度 = 层数 + 2
+        # （块根 + 顶层元素 + N 层嵌套）。违规 = 嵌套层数 > limit = peak >= limit + 2。
+        # 2026-10-01 二轮审计两次修阈值：原 >= limit 把可接受层全报了；
+        # 其后 > limit 仍把「顶层 div 混排子元素」（2 层嵌套）报了——jev 裁定
+        # R1 管的是嵌套层数，div{class,span,button} 这种 1 层嵌套（peak=3）
+        # 不在违规面。真违规 = div>div>div 起（peak>=4）。
         for depth, start, end in peak_nesting(src)
-        if depth >= limit
+        if depth >= limit + 2
     ]
+
+# ── style 模式：内联 class 散落 / 硬编码颜色（ui-component-principles §4.1）──
+# 三类 finding：
+#   DIOXUS-INLINE-CLASS   内联 class 串 ≥ --class-limit 字符 → 样式该抽成常量或用 ui-kit 常量
+#   DIOXUS-HARDCODED-COLOR  类串/样式串里 #hex 硬编码颜色
+#   DIOXUS-RAW-PALETTE  原始色板类（bg-zinc-800 / text-white / text-red-400 …）绕开语义 token
+# 重要取舍：不要求「所有 class 都得是常量」——单个原子类（flex / gap-2）提常量是
+# 过度抽象，比散落更难维护。只在成组出现（串过长）时抽。
+# 色板类判的是「有没有语义等价物」：text-muted-foreground / bg-card / border-border /
+# text-destructive 这类语义类不报；text-zinc-N、text-red-N 等原始色板报。
+# 阈值口径（来自 ferrite 实测）：存量仓全仓 1971 条（RAW-PALETTE 1401 集中在正在
+# 迁移的 ui-components 副本里）→ 规则是「新代码不许新增散落」（--scope changed），
+# 存量债走 merge 全仓审计 + 书面驳回，不在热路径里报。
+
+# 布局/原子 utility 前缀（出现 2 个以上才认为是 class 串，避免误伤散文字符串）
+_UTIL_PREFIX = re.compile(
+    r'^(?:flex|grid|hidden|block|inline|table|relative|absolute|fixed|sticky|float|'
+    r'w|h|size|p|px|py|ps|pe|pt|pb|pl|pr|m|mx|my|ms|me|mt|mb|ml|mr|gap|space|'
+    r'rounded|ring|border|shadow|bg|text|font|leading|tracking|uppercase|lowercase|'
+    r'items|justify|self|content|place|object|overflow|transition|duration|delay|ease|'
+    r'z|top|right|bottom|left|inset|opacity|cursor|outline|select|appearance|touch|'
+    r'scale|rotate|translate|skew|origin|min|max|aspect|line-clamp|col|row|order)'
+)
+
+# 原始色板类：修饰语 - 色族（-shade）(/opacity)。语义色（-foreground/-muted-…）不在此列。
+_RAW_PALETTE = re.compile(
+    r'\b(?:text|bg|border|ring|from|to|via|fill|stroke|outline|decoration|divide|'
+    r'accent|caret|placeholder|selection|shadow)'
+    r'-(?:zinc|slate|neutral|stone|gray|red|orange|amber|yellow|lime|green|emerald|'
+    r'teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose|white|black)'
+    r'(?:-\d{1,3})?(/\d{1,3})?(?![a-z])'
+)
+_HEX = re.compile(r'#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b')
+
+
+def _looks_like_class_list(value: str) -> bool:
+    toks = value.split()
+    hits = sum(1 for t in toks if _UTIL_PREFIX.match(t))
+    return len(toks) >= 2 and hits >= 2
+
+
+def scan_style(path: str, src: str, class_limit: int) -> list[Finding]:
+    out: list[Finding] = []
+    for lineno, line in enumerate(src.split('\n'), 1):
+        stripped = line.lstrip()
+        if stripped.startswith(('//', '*')):
+            continue                      # 注释/文档里的字符串不算
+        for value in STRING_LIT.findall(line):
+            if not _looks_like_class_list(value):
+                continue
+            if len(value) >= class_limit:
+                out.append(Finding(
+                    id="DIOXUS-INLINE-CLASS",
+                    severity="WARN",
+                    path=path, line=lineno,
+                    message=(
+                        f"内联 class 串 {len(value)} 字符（≥{class_limit}）：成组样式散落在 rsx 里，"
+                        "换主题要逐处改。重构：抽成命名常量（或引用 ui-kit styles.rs 的语义常量），"
+                        "rsx 里只留一次引用。单个原子类（flex / gap-2）不要提常量——过度抽象。"
+                    ),
+                ))
+            for m in _RAW_PALETTE.finditer(value):
+                out.append(Finding(
+                    id="DIOXUS-RAW-PALETTE",
+                    severity="WARN",
+                    path=path, line=lineno,
+                    message=(
+                        f"原始色板类 {m.group(0)} 绕开语义 token（ui-component-principles §4.1"
+                        " token 唯一来源）。重构：换成语义类（text-muted-foreground / bg-card / "
+                        "border-border / text-destructive …），色板值只住在 token 层（theme.css）。"
+                    ),
+                ))
+            for m in _HEX.finditer(value):
+                out.append(Finding(
+                    id="DIOXUS-HARDCODED-COLOR",
+                    severity="WARN",
+                    path=path, line=lineno,
+                    message=(
+                        f"硬编码颜色 {m.group(0)}：未走设计 token，换主题会失效。"
+                        "重构：值进 token 层（theme.css 变量），类上引用语义类。"
+                    ),
+                ))
+    return out
 
 
 def scan_spec(path: str, src: str) -> list[Finding]:
@@ -192,7 +283,7 @@ def tracked_rs_files(root: str) -> list[str]:
     """用 git ls-files 取扫描集：gitignore 感知，不会扫进 target/ 与 .wt/。"""
     out = subprocess.run(
         ['git', 'ls-files', '-z', '--', '*.rs'],
-        cwd=root, capture_output=True,
+        cwd=root, capture_output=True, check=False,
     )
     if not out.returncode:
         return [p for p in out.stdout.decode('utf-8', 'replace').split('\0') if p]
@@ -211,7 +302,7 @@ def changed_rs_files(root: str, base: str) -> list[str]:
     for spec in (f'{base}...HEAD', f'{base}..HEAD', base):
         out = subprocess.run(
             ['git', 'diff', '--name-only', '-z', spec, '--', '*.rs'],
-            cwd=root, capture_output=True,
+            cwd=root, capture_output=True, check=False,
         )
         if out.returncode == 0:
             return [p for p in out.stdout.decode('utf-8', 'replace').split('\0') if p]
@@ -222,9 +313,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--max', type=int, default=40,
                     help='单次最多输出多少条 finding（防止刷屏）；统计真实量级时传 0')
-    ap.add_argument('--only', choices=['nesting', 'spec', 'layering'], default=None)
-    ap.add_argument('--nesting-limit', type=int, default=2,
-                    help='R1 要求 tab-page/ 元素嵌套 ≤1 层；默认 2 = 报「超过 1 层」')
+    ap.add_argument('--only', choices=['nesting', 'spec', 'layering', 'style'], default=None)
+    ap.add_argument('--class-limit', type=int, default=72,
+                    help='style: 内联 class 串超过该字符数报 DIOXUS-INLINE-CLASS')
+    ap.add_argument('--nesting-limit', type=int, default=1,
+                    help='允许的元素嵌套层数（R1「最多 1 层」→ 传 1）；peak 元素深度 >= limit+2 才报')
     ap.add_argument('--scope', choices=['repo', 'changed'], default='repo',
                     help='repo=全仓审计(CI/merge 用)；changed=只看基线以来的改动(hook 热路径用)')
     ap.add_argument('--base', default=None,
@@ -234,7 +327,7 @@ def main() -> int:
 
     root = args.root or subprocess.run(
         ['git', 'rev-parse', '--show-toplevel'],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     ).stdout.strip() or '.'
 
     if args.scope == 'changed':
@@ -246,12 +339,20 @@ def main() -> int:
     findings: list[Finding] = []
     for rel in targets:
         try:
-            src = open(f'{root}/{rel}', encoding='utf-8', errors='replace').read()
+            with open(f'{root}/{rel}', encoding='utf-8', errors='replace') as fh:
+                src = fh.read()
         except OSError:
             continue
         # 判据是**内容**不是路径名：按目录名过滤会让 web crate 一改名就静默失效，
         # 表现为「规则没报=通过」的假绿。带 rsx! 的文件才是 web UI 代码。
         if 'rsx!' not in src and '/views/' not in rel.replace('\\', '/'):
+            continue
+        # demo/ = 视觉回归 fixture（ui-kit AGENTS：视觉改动过 demo 页面），不在
+        # R1/§4.1 生产代码纪律范围。这是**范围判定**（哪类代码受纪律管），与上面
+        # 的「按内容不按路径」判据不冲突——判据照旧，只是 demo 页面不进纪律。
+        # 2026-10-01 二轮审计：ui-kit demo 嵌套发现 12/12 被 jev 判误报。
+        rel2 = rel.replace('\\', '/')
+        if rel2.startswith('demo/') or '/demo/' in rel2:
             continue
         if args.only in (None, 'nesting'):
             findings += scan_nesting(rel, src, args.nesting_limit)
@@ -259,6 +360,8 @@ def main() -> int:
             findings += scan_spec(rel, src)
         if args.only in (None, 'layering'):
             findings += scan_layering(rel, src)
+        if args.only in (None, 'style'):
+            findings += scan_style(rel, src, args.class_limit)
 
     findings.sort(key=lambda f: (f.path, f.line))
     total = len(findings)

@@ -27,7 +27,7 @@ from pathlib import Path
 
 try:
     import lizard
-except Exception:  # pragma: no cover - environment-dependent
+except ImportError:  # pragma: no cover - environment-dependent
     lizard = None
 
 RATCHET = "ratchet.tsv"
@@ -42,8 +42,13 @@ def is_code(rel: str) -> bool:
     return Path(rel).suffix.lower() in CODE_EXTS
 
 
+def _skip(rel: str, exc: BaseException) -> None:
+    """Unparseable input is skipped, never a finding: note it on stderr."""
+    print(f"ccn_gate: skip {rel}: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 def tracked_files(root: Path) -> list[str]:
-    out = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True, text=True)
+    out = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True, text=True, check=False)
     if out.returncode != 0:
         return []
     return [line for line in out.stdout.splitlines() if line.strip()]
@@ -76,8 +81,9 @@ def find_over(root: Path, ceiling: int, files: list[str]):
             continue
         try:
             result = lizard.analyze_file(str(path))
-        except Exception:
-            continue  # unparseable / unsupported: not a gate finding
+        except Exception as exc:  # noqa: BLE001 - foreign input parse failure, not a finding
+            _skip(rel, exc)
+            continue
         for fn in result.function_list:
             if fn.cyclomatic_complexity > ceiling:
                 yield rel, fn
@@ -120,7 +126,8 @@ def cmd_judge(args: argparse.Namespace) -> None:
             continue
         try:
             result = lizard.analyze_file(str(path))
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - foreign input parse failure, not a finding
+            _skip(rel, exc)
             continue
         current_keys: set[str] = set()
         for fn in result.function_list:

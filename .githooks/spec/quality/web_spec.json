@@ -1,0 +1,160 @@
+{
+  "_comment": "canon-owned semantic web/UI spec layer. Rule body = intent below (this text IS the rule). Deterministic parts (raw palette classes / inline class scatter / rsx nesting / rsx-per-component / Chinese-in-rsx / import direction) live in the l1 checklists that run dioxus_web.py — do NOT re-judge them here; this config only covers meaning-level rules a grep cannot. Deployed to ferrite/omenic/ui-kit via canon-sync; keep paths portable (no repo-specific layout in this file). Calibration (2026-10-01, jev-latest @ knox endpoint, 6-fixture run): hardcoded_text v2 criteria separates violators (p 0.95) from props-driven/internal/API-default files (p <= 0.08) -> fail 0.85 / warn 0.6; reuse_overlap with README context separates a hand-rolled pill duplicating Badge (p 0.96) from distinct-role components (p <= 0.19) -> fail 0.9 / warn 0.65. Both criteria v1 were tested and rejected (props interpolation scored 0.51 in v1). 判决边界(2026-10-01): 全部问句按 Dioxus/Rust 家族约定写死（on_* 契约词、GlobalSignal、rsx 片段）——部署到 React/TS/Svelte 仓时 paths 若含 .ts/.tsx 会批量误报；非 Dioxus 仓只启用语言无关问句（stable key / no hardcoded text / 分层）并改写条款，或新建独立 config。",
+  "web_spec": {
+    "intent": "Web UI component specification for Dioxus/Rust web code (component crates, page crates, apps that render rsx). Canonical sources: ui-component-principles.md (component creation baseline) and web-code-review-guide.md (readability + refactor discipline), as deployed in the consuming repo's todo/. Rules: (P1 OWNERSHIP) a shared component crate (ui-kit src/, omenic crates/web-ui, ferrite crates/web/ui-components) must never import business types — contract, api client, page DTO, or page state; business semantics in a shared component is an ownership error, move it back to the page. One-off layout compositions stay inline in rsx; only cross-page (>=2 pages) or cross-app reusable primitives get extracted. (P2 OVERLAY MATRIX) single-field editing (price, multiplier, note, toggle) = click-triggered Popover per field; dangerous confirmation or atomic input (delete confirm, paste secret) = modal Dialog; create / multi-field full edit = Sheet drawer; read-only detail = card + tabs; right-click context menus are forbidden; checkbox batch operations are forbidden (batch goes through NL agent). (P3 API) controlled-first: value + on_change; an uncontrolled internal truth source must state the reason; closed style sets use a variant enum, never render_x: bool switch bloat; props <= 7, beyond that split into subcomponents or a parameter object; callback names on_change / on_open_change / on_select, never handle_*; data-fetching components model idle/loading/ready/error explicitly and render each state (busy-poll without a loading state is the documented #230 incident). (P4 VISUALS) colors/radius/typography route through the design token layer; a raw Tailwind shade color utility where a semantic token covers the same role is a violation; state colors are semantically fixed — destructive only for irreversible operations, warning only for recoverable risk. (P5 A11Y) interactive elements carry data-testid (value = name) and containers carry role + aria-label; overlay components implement APG keyboard/focus (Escape closes without submitting, outside click closes, focus trap, focus returns to trigger); icon buttons have an accessible name with the icon aria-hidden; any hover-triggered interaction must also work via click/tap. (G1 DIOXUS ANTI-PATTERNS) no effect that writes a signal it reads (self-loop); no busy-polling to wait for data (model loading); no use_effect doing derived work that should be use_memo; list keys must be stable business ids, never array indexes; event closures must not capture stale values — read current values through signals. (G2 STRUCTURE) page files do not grow past one screen — numbered paragraphs become subcomponents; state ownership is three levels (component-local signal -> page store -> global session/i18n) and state is hoisted only when it crosses pages, never 'just in case'; rsx nesting beyond ~3 levels gets extracted; an if/else-if chain beyond 3 branches becomes match + enum; naming is verb-noun (fetch_channel_models not do_config; signals store data, events are verbs). (G3 REFACTOR TRIGGERS) the same semantic rsx block in 2+ places or a subtree over ~30 lines with a clear boundary extracts into a subcomponent; derived values written via effect become use_memo; long nested boolean expressions in rsx become named functions; repeated condition fragments keep only the diff; props >= 8 collapse into a struct; logic that tests cannot reach moves to pure modules in the page crate. Refactors never change behavior: data-testid, aria role/label, class strings, state branches, button text/order survive byte-for-byte. Judge ONLY from evidence visible in the file or diff; non-component rust, test fixtures, and trivial diffs are no_action.",
+    "message": "web_spec semantic finding: check the question ids in this finding's extras against the intent above; fix the highest-severity one first, keep behavior byte-for-byte.",
+    "paths_include": ["**/*.rs"],
+    "paths_exclude": ["target/", ".wt/", "node_modules/", "**/tests/", "**/benches/", "**/migrations/**"],
+    "state": {
+      "file": true,
+      "diff": true,
+      "context_files": ["README.md"]
+    },
+    "questions": {
+      "effect_antipattern": {
+        "type": "noul",
+        "instructions": "Does the file or diff contain a Dioxus anti-pattern: an effect that writes a signal it reads (self-loop), busy-polling for data without a loading state, use_effect doing work that use_memo should derive, array-index list keys, or event closures capturing stale values?",
+        "criteria": {
+          "true": "One of those five patterns is visible in the code (e.g. `use_effect(|| { ... x.set(...) })` where x is also read in the effect body; a polling loop with no idle/loading/ready/error states; `key: i` or index-derived keys on a data list; a move-closure capturing a value that later changes).",
+          "false": "Effects only observe external sources (timers, storage, other components' outputs), derived values use use_memo, list keys are business ids, and closures read through signals or capture immutable owned values."
+        },
+        "fail": 0.99,
+        "warn": 0.6
+      },
+      "overlay_matrix": {
+        "type": "noul",
+        "instructions": "Does the diff assign the wrong overlay primitive: single-field editing via modal Dialog, a create/multi-field full edit via Popover, a right-click context menu, or checkbox batch operations?",
+        "criteria": {
+          "true": "A single-field edit (price/ratio/note/toggle/secret) is implemented as a modal Dialog or full-page form; a dangerous confirm or atomic input uses a Popover; a create-or-multi-field-full-edit uses a Popover instead of a Sheet; or any context-menu / multi-select-batch UI appears.",
+          "false": "Single-field edits are click-triggered Popovers, dangerous confirms and atomic inputs are modal Dialogs, create/multi-field edits are Sheet drawers, read-only details are cards/tabs, and no context-menu or checkbox-batch UI is present."
+        },
+        "fail": 0.99,
+        "warn": 0.6
+      },
+      "api_contract": {
+        "type": "noul",
+        "instructions": "Does a component in the file or diff violate the API discipline: uncontrolled state without a stated reason, render_x boolean switch bloat, callback names like handle_*, or a data-fetching component with no idle/loading/ready/error modeling?",
+        "criteria": {
+          "true": "A `handle_*` prop/callback name exists; a `render_something: bool` / `show_something: bool` prop toggles whole UI regions; an uncontrolled internal truth source has no doc comment stating why; or a component fetches data but renders no distinct loading/error/empty states.",
+          "false": "value + on_change controlled pattern with any uncontrolled case documented; closed style sets use variant enums; callbacks are on_*; fetching components render each of the four states."
+        },
+        "fail": 0.99,
+        "warn": 0.6
+      },
+      "props_bloat": {
+        "type": "noul",
+        "instructions": "Does any #[component] in the file or diff take 8 or more props without collapsing them into a parameter struct or splitting subcomponents?",
+        "criteria": {
+          "true": "A #[component] declares 8+ #[prop] fields and none is grouped into a struct (e.g. PagerProps-style parameter object).",
+          "false": "Every #[component] has 7 or fewer props, or the large flat list is grouped into a named struct prop."
+        },
+        "fail": 0.99,
+        "warn": 0.6
+      },
+      "ownership_imports": {
+        "type": "noul",
+        "instructions": "Does a shared component crate file import business types (contract records, api client, page DTOs, page stores) — an ownership violation for shared code?",
+        "criteria": {
+          "true": "A file in a shared component library (ui-kit src/, omenic crates/web-ui shared parts, ferrite ui-components) has `use` lines pulling in a contract/api/domain type that encodes page or backend semantics.",
+          "false": "The file is page-local code (ownership of business types is correct there), or the shared file only imports framework/UI primitives and its own types."
+        },
+        "fail": 0.99,
+        "warn": 0.6
+      },
+      "state_ownership": {
+        "type": "noul",
+        "instructions": "Does the diff mislayer state: component-private state hoisted to a page/global store, or cross-page state trapped in one component with no documented reason?",
+        "criteria": {
+          "true": "A signal that only one component reads/writes lives in a page or global store; or state needed by two pages lives inside a single component without lifting.",
+          "false": "Component-local signals stay local, cross-component state lives in the page, cross-page state lives in the global/session layer, and hoisting follows actual use."
+        },
+        "fail": 0.99,
+        "warn": 0.6
+      },
+      "rsx_readability": {
+        "type": "noul",
+        "instructions": "Does the rsx exceed readability limits: nesting beyond ~3 element levels, an if/else-if chain beyond 3 branches not converted to match + enum, or non-verb-noun naming on functions/signals/events?",
+        "criteria": {
+          "true": "A rsx! block nests meaningful elements deeper than ~3 levels; a conditional rendering chain has 4+ if/else-if arms; or a function/event/signal name is not verb-noun (do_config, process_data, channels_data vs fetch_channel_models, on_rename).",
+          "false": "Deep subtrees are extracted into named subcomponents, long chains are match arms over an enum, and names follow the verb-noun / data-signal / event-verb convention."
+        },
+        "fail": 0.99,
+        "warn": 0.6
+      },
+      "refactor_trigger": {
+        "type": "noul",
+        "instructions": "Does the diff keep a known refactor smell that the guide says must be refactored: the same semantic rsx block in 2+ places, a subtree over ~30 lines with a clear boundary, a long nested boolean in rsx, or untestable logic left inside a component?",
+        "criteria": {
+          "true": "Two near-identical semantic rsx blocks coexist in the file; a dense 30+-line subtree with an obvious boundary stays inline; a boolean expression nested in rsx is long enough to need a named predicate; or a component body does work (parsing, mapping, api) that a pure module would make testable.",
+          "false": "Repeated blocks are already extracted into a subcomponent or shared style constant, dense subtrees are split, long booleans have named functions, and testable logic sits in the page crate's api/pure-function modules."
+        },
+        "fail": 0.99,
+        "warn": 0.6
+      },
+      "a11y_gap": {
+        "type": "noul",
+        "instructions": "Does the diff leave accessibility gaps: interactive elements without data-testid, containers missing role/aria-label, icon buttons without an accessible name, or hover-only interactions with no click/tap path?",
+        "criteria": {
+          "true": "A button/input/select in the diff has no data-testid; a landmark or composite widget lacks role + aria-label; an icon-only button is not aria-hidden-icon + named; or the only trigger for a panel/tooltip/form is :hover.",
+          "false": "Interactive elements carry data-testid (value = name), containers carry role + aria-label, icon buttons are accessible, and every hover-triggered interaction also has a click/tap trigger (APG + WCAG 1.4.13)."
+        },
+        "fail": 0.99,
+        "warn": 0.6
+      },
+      "web_spec_kind": {
+        "type": "choice",
+        "instructions": "Classify the primary issue visible in this file and diff. Use mixed when two or more non-trivial categories apply; use no_action when nothing above applies.",
+        "criteria": {
+          "antipattern": "A Dioxus effect/loop/key/closure anti-pattern is the main problem.",
+          "overlay": "The wrong overlay primitive (matrix P2) is the main problem.",
+          "api": "API discipline (controlled/variant/on_*/four-state) is the main problem.",
+          "props": "Props bloat without a parameter object.",
+          "ownership": "A shared component imports business types.",
+          "state": "State is on the wrong layer.",
+          "readability": "Nesting/branching/naming exceeds limits.",
+          "refactor": "An unrefactored repeated block / dense subtree / untestable logic.",
+          "a11y": "Missing testid/role/aria or hover-only interaction.",
+          "hardcoded_text": "User-visible text hardcoded as literals instead of props/t().",
+          "reuse": "A new component duplicates an existing shared component's semantics.",
+          "mixed": "At least two of the above categories apply.",
+          "no_action": "The file satisfies the spec; nothing to change."
+        },
+        "fail_labels": ["antipattern", "overlay", "api", "props", "ownership", "state", "readability", "refactor", "a11y", "hardcoded_text", "reuse", "mixed"],
+        "fail": 0.99,
+        "warn": 0.6
+      },
+      "web_spec_severity": {
+        "type": "score",
+        "instructions": "How urgent is the spec work this finding points at, for the web-dev lane?",
+        "criteria": [
+          "0: the file already satisfies the spec; the finding is noise.",
+          "1: a local advisory — one naming issue, one missing testid, one extractable block that can wait.",
+          "2: the diff creates a real violation now — wrong overlay primitive, business import in shared code, effect self-loop, or state on the wrong layer.",
+          "3: the diff introduces a structural violation that blocks merge or changes observable behavior (behavior drift in a 'move-only' refactor, missing four-state on a shipping data path)."
+        ],
+        "fail": 3,
+        "warn": 1
+      },
+      "hardcoded_text": {
+        "type": "noul",
+        "instructions": "Does the file hardcode end-user-visible text instead of routing it through props or the i18n t() mechanism? Only count text that the end user actually reads.",
+        "criteria": {
+          "true": "a literal string with end-user wording that renders as-is: an rsx text node like `span { \"关闭\" }`, or an attribute value like `aria-label: \"统计横幅\"` / `placeholder: \"搜索\"` where the value itself is the user-facing wording, not derived from props, state, or a t() lookup",
+          "false": "text whose value comes from props/children/signal interpolation (e.g. `\"{label}\"`, `\"{label}：{count}\"`), t()/t_in()/plural() lookups, CSS class strings, data-testid values, ARIA state attributes, internal-only strings (log keys, join separators, format! machinery), #[props(default)] API defaults, or commented-out text"
+        },
+        "fail": 0.85,
+        "warn": 0.6
+      },
+      "reuse_overlap": {
+        "type": "noul",
+        "instructions": "Does this new or changed component duplicate the structure of an existing shared component in this repo instead of reusing or composing it?",
+        "criteria": {
+          "true": "a component whose rendered structure substantially overlaps an existing shared primitive listed in the repo's component inventory (README / module header docs in the spec context): same role, near-identical element tree and class shape, hand-rolling its own class strings instead of that primitive or its variant enum",
+          "false": "a genuinely distinct role with no counterpart in the inventory; one-off layout compositions inline in rsx; private subcomponents within one file; or the overlap is superficial (similar markup, different semantics)"
+        },
+        "fail": 0.9,
+        "warn": 0.65
+      }
+    }
+  }
+}

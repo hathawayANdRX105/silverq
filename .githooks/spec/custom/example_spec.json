@@ -1,0 +1,59 @@
+{
+  "error_handling": {
+    "intent": "Error handling hygiene: production code paths must not use bare unwrap()/expect() without context; tests and example code are exempt",
+    "paths_include": ["**/*.rs"],
+    "paths_exclude": ["target/", "**/tests/**", "**/test_*.rs", "benches/"],
+    "state": {
+      "file": true,
+      "diff": false,
+      "context_files": []
+    },
+    "questions": {
+      "bare_panic": {
+        "type": "noul",
+        "instructions": "Does this file contain bare unwrap()/expect()/panic!() in production code paths where a handled error or a context message is expected?",
+        "criteria": {
+          "true": "A production call site panics on a failure mode that callers could reasonably handle (I/O, parsing, locking), with no context about why",
+          "false": "The call site is in test/example code, the invariant is locally provable (const/known-good literal), or the error carries a context message and a comment justifying the panic"
+        },
+        "fail": 0.85,
+        "warn": 0.6
+      },
+      "panic_severity": {
+        "type": "score",
+        "instructions": "How risky is the panicking call site if the failure mode triggers at runtime?",
+        "criteria": [
+          "Safe: provable invariant or non-production path",
+          "Risky: reachable at runtime under plausible input; service would crash on user data",
+          "Critical: reachable on the main request/startup path; a malformed input takes the whole process down"
+        ],
+        "fail": 2,
+        "warn": 1
+      }
+    }
+  },
+  "docs_tone": {
+    "intent": "Docs hygiene: user-facing markdown must not contain placeholder sections (TBD, TODO, lorem ipsum) and should read as tutorial or reference",
+    "paths_include": ["**/*.md"],
+    "paths_exclude": ["target/", "todo/", "**/node_modules/**"],
+    "state": {
+      "file": true,
+      "context_files": []
+    },
+    "questions": {
+      "doc_state": {
+        "type": "choice",
+        "instructions": "Classify this markdown document's readiness for users.",
+        "criteria": {
+          "finished": "Every section has real content; no placeholder markers remain",
+          "draft": "Real content overall, but clearly marked draft sections or TODO notes for missing parts",
+          "placeholder": "Mostly skeleton: TBD/TODO/lorem-ipsum body, headings without content",
+          "not_docs": "The file is not user-facing documentation (changelog scratch, meeting notes, generated file)"
+        },
+        "fail_labels": ["placeholder"],
+        "fail": 0.8,
+        "warn": 0.55
+      }
+    }
+  }
+}

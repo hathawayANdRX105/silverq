@@ -46,10 +46,10 @@ POOL = 8
 
 SECRET_PAT = re.compile(
     r"(password|passwd|secret|api_key|apikey|token|auth_token|access_token"
-    r"|private_key|connection_string)\s*[:=]\s*[\"'][^\"'\s]{8,}[\"']", re.I)
+    r"|private_key|connection_string)\s*[:=]\s*[\"'][^\"'\s]{8,}[\"']", re.IGNORECASE)
 SECRET_EXCLUDE = re.compile(
     r"(your-|xxx|todo|placeholder|example|test-key|mock|fake|dummy"
-    r"|change-me|replace-me|insert-|changeme|replaceme)", re.I)
+    r"|change-me|replace-me|insert-|changeme|replaceme)", re.IGNORECASE)
 SLOP_PATS = [
     re.compile(r"\bStep\s*\d+\b"),
     re.compile(r"\b[一二三四五六七八九十]+\s*步\b"),
@@ -91,8 +91,7 @@ def candidates_slop_comment(files):
         lines = content.splitlines()
         for i, line in enumerate(lines, 1):
             stripped = line.strip()
-            if not (stripped.startswith("//") or stripped.startswith("#")
-                    or stripped.startswith("*") or stripped.startswith("///")):
+            if not stripped.startswith(("//", "#", "*", "///")):
                 continue
             code = re.sub(r"^[/*#\s]+", "", stripped)
             if len(code) < 8:
@@ -113,7 +112,7 @@ def candidates_rust_test_no_assert(files):
         i = 0
         while i < len(lines):
             if TEST_FN.search(lines[i]):
-                fn_name, j, body = "", i, []
+                fn_name, _, body = "", i, []
                 k = i + 1
                 while k < len(lines):
                     m = FN_NAME.match(lines[k])
@@ -138,10 +137,10 @@ def candidates_rust_test_no_assert(files):
 # placeholder-marker(TODO/FIXME) 不在此列: 裸 TODO 的执法归 rust_todo_needs_issue
 # （MECE——antislop 只抓其他规则不覆盖的拖延/对冲/搁置/空桩）
 ANTISLOP_RES = [
-    ("deferral",           re.compile(r"\b(for now|temporar\w*|provisional)\b", re.I)),
-    ("placeholder-word",   re.compile(r"\b(placeholder|stub|dummy)\b", re.I)),
-    ("hedging",            re.compile(r"\b(hopefully|should work|works in theory|might not)\b", re.I)),
-    ("revisit",            re.compile(r"\b(revisit|reconsider|circle back)\b", re.I)),
+    ("deferral",           re.compile(r"\b(for now|temporar\w*|provisional)\b", re.IGNORECASE)),
+    ("placeholder-word",   re.compile(r"\b(placeholder|stub|dummy)\b", re.IGNORECASE)),
+    ("hedging",            re.compile(r"\b(hopefully|should work|works in theory|might not)\b", re.IGNORECASE)),
+    ("revisit",            re.compile(r"\b(revisit|reconsider|circle back)\b", re.IGNORECASE)),
     ("rust-stub",          re.compile(r"\bfn\s+\w+[^{;]*\{\s*\}")),
 ]
 
@@ -238,7 +237,8 @@ def finding(rule, cand, severity, extra):
 def main():
     args = sys.argv[1:]
     rule = args[args.index("--rule") + 1] if "--rule" in args else ""
-    cfg = json.loads(open(CONFIG).read())
+    with open(CONFIG) as fh:
+        cfg = json.loads(fh.read())
     if rule not in cfg or rule not in EXTRACTORS:
         print(json.dumps([])); return
     rule_cfg = cfg[rule]
@@ -255,7 +255,7 @@ def main():
             for i, fut in futs.items():
                 try:
                     judged[i] = fut.result()
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - judge failure degrades to a note
                     judged[i], notes[i] = None, f"{type(e).__name__}: {e}"[:120]
     else:
         for i in range(len(cands)):
