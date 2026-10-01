@@ -1,4 +1,4 @@
-<!-- managed by canon agents.yaml @ 2026-10-01 -->
+<!-- managed by canon agents.yaml @ 2026-10-02 -->
 ## silverq 约定
 
 > 本文件写**每个会话都必须遵守的硬约束**，和**遇到什么情况该读哪份文档**。
@@ -183,6 +183,23 @@ CPU 密集型命令（编译/测试/装包）一律 `cpulimit -l 65 -i --` 前�
 - lint 报错逐条判断：真问题就修；误报就在规则允许的方式下局部豁免并写明理由，
   不整文件关掉。
 
+## Rust 开发性能
+
+本仓 `.cargo/config.toml` 已配 `jobs = 4`（多会话并发上限）与
+`rustc-wrapper = sccache`（跨 worktree 编译缓存），`Cargo.toml` 已关增量、
+降 debuginfo。配置随 cargo 向上搜索对 `.wt/*` worktree 自动生效。
+
+- 跑测试用 `just test-fast`：testless 函数级影响分析，只跑本次改动可能破坏的
+  测试；testless 异常/零命中自动降级全量，绝不静默跳过。全量务必
+  `cargo test --workspace`（根包 workspace 下裸 `cargo test` 只跑根包）。
+- 不要在会话里自行 `export RUSTC_WRAPPER` 或改 jobs——统一走仓配置；
+  重命令照旧套 `cpulimit -l 70 -i`。
+- 增量编译已关（缓存优先）：同树连续小改动按 crate 级重编是预期行为，不是
+  回归；若本仓热重载明显变慢，提 issue 议局部放开。
+- 新建 `.wt` worktree 直接用；旧布局 worktree 若报 workspace 收编错误，
+  根因与修法见 canon 仓 `Cargo.toml` 的 `exclude` 注释。
+- 配置细节、坑清单与实测基线：skill `rust-dev-perf`。
+
 ## 破坏性操作与敏感信息
 
 ### 删除
@@ -221,18 +238,6 @@ CPU 密集型命令（编译/测试/装包）一律 `cpulimit -l 65 -i --` 前�
 - 一个 commit 一件事。不把无关改动、格式化噪声、生成物混进逻辑改动。
 - 提交前跑对应检查（`canon pre-commit` / `canon pre-push`），不靠推送失败才发现。
 
-### 提交身份
-
-- commit 作者固定是维护者本人账号 `hathawayANdRX105`（大小写逐字一致）。
-- **不得**用 `git -c user.name=... -c user.email=...` 覆盖身份提交。历史上
-  `agent@local` / `ci@local` 这类签名就是这么来的：GitHub 账号对不上，
-  贡献归属、追责、审计全丢。
-- 提交前若 `git config user.name` / `user.email` 不是上面这个账号，先改成本仓配置
-  （`git config user.name hathawayANdRX105`），别带着错的身份往下走。
-- 邮箱两套都算合法：`2635254302@qq.com`（本地提交）与 GitHub 的
-  `61958173+hathawayANdRX105@users.noreply.github.com`（服务端 squash 落库时写的）。
-- 禁止 `Co-authored-by:`  trailer 署其他人或机器人账号。
-
 ### Issue
 
 - 标题中文；正文 heading 英文、内容中文。
@@ -247,18 +252,6 @@ CPU 密集型命令（编译/测试/装包）一律 `cpulimit -l 65 -i --` 前�
 - 关联 issue 用 `Fixes #<n>` 收尾行；draft 阶段用 `Related #<n>`，合并授权前改 `Fixes`。
 - 开启或更新 PR 后看 CI 结果到底（`gh pr checks`），红了就修，不等用户来问。
 - 被 canon 拦下就修代码，**不改规则**。规则确有缺陷 → 开 issue 交维护者裁决。
-
-### 合并
-
-- **只走 squash merge**：
-  `gh pr merge <N> --squash --delete-branch --body "Agent 🤖 - Merge: <原因>"`。
-- 禁用 `--merge` / `--rebase`（含 `-m` / `-r` 短形式）。merge commit 会让 PR
-  记录的分支历史消失，同一分支再合要重新三方合并、当初的冲突裁决全部丢失；
-  rebase-merge 还会逐个改写 commit 作者。两者都让 `main` 失去审计价值。
-- 不带任何合并方式的 `gh pr merge` 会弹交互菜单 —— agent 不该触发交互，一律显式
-  写 `--squash`。
-- 禁止本地 `git merge <分支>` 直接合进 `main` 再推 remote。要合就走 PR。
-- 各仓 GitHub 设置已关闭 merge commit 与 rebase merge，squash 是唯一可选项。
 
 ### 收尾
 

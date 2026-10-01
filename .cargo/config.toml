@@ -1,0 +1,9 @@
+# canon 体系性能配置（rust-dev-perf skill）
+
+# ── canon 体系性能配置（rust-dev-perf skill）────────────────────
+[build]
+# 多会话并发上限：每个 cargo 进程最多 4 个并行编译单元
+jobs = 4
+# sccache 跨 worktree 编译缓存
+# （勿用 [env] RUSTC_WRAPPER：cargo 启动时自读该变量，[env] 够不着）
+rustc-wrapper = "sccache"
