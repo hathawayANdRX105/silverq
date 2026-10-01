@@ -1,4 +1,4 @@
-<!-- managed by canon agents.yaml @ 2026-09-24 -->
+<!-- managed by canon agents.yaml @ 2026-10-01 -->
 ## silverq 约定
 
 > 本文件写**每个会话都必须遵守的硬约束**，和**遇到什么情况该读哪份文档**。
@@ -96,13 +96,13 @@ CPU 密集型命令（编译/测试/装包）一律 `cpulimit -l 65 -i --` 前�
 
 ## 发现处置纪律
 
-自动检查（gate 的 `FAIL`/`WARN`、`jev` L3 语义发现、CRG / `ocr review` 审查意见）
+自动检查（canon 的 `FAIL`/`WARN`、`jev` L3 语义发现、CRG / `ocr review` 审查意见）
 产出的是**发现**，不是判决。每条发现都必须被显式处置，不存在"绕过"这个选项。
 
 ### 先读规范，再改代码
 
 1. 拿到 finding，先读规则原文，确认这条发现到底要求什么：
-   - gate 规则总览：`.githooks/GATE_HANDBOOK.md`（无则 `canon/manual/gate.md`）
+   - canon 规则总览：`gate-spec` skill（正本）；各仓 `.githooks/spec/docs/SPEC_OVERVIEW.md` 为播种副本
    - 单条规则的参数（匹配范围 / 严重度 / harness）：`.githooks/spec/**/<rule>.yaml`
    - 项目适配说明（本仓为什么这么定）：`.agent/rules/gates.md`
 2. 不确定 finding 是否成立时，读完规则仍不能判定 → **记为待裁决**并在交付记录里写明，
@@ -121,7 +121,7 @@ CPU 密集型命令（编译/测试/装包）一律 `cpulimit -l 65 -i --` 前�
 
 ### 禁止糊弄式修复
 
-以下动作一律视为违规（无论 gate 是否因此变绿）：
+以下动作一律视为违规（无论 canon 是否因此变绿）：
 
 | 禁止 | 为什么 | 正确做法 |
 |---|---|---|
@@ -143,7 +143,7 @@ CPU 密集型命令（编译/测试/装包）一律 `cpulimit -l 65 -i --` 前�
 
 ### 规范层级
 
-- `.githooks/` 是 gate 领地：agent 不改规则。
+- `.githooks/` 是 canon 领地：agent 不改规则。
 - `.agent/rules/`、`specs/rules/` 是规范正本：发现规则与现实冲突 → 提 issue，不自行改写。
 - 本纪律与各仓既有条款冲突时，以本纪律为准（它更严格）。
 
@@ -219,7 +219,19 @@ CPU 密集型命令（编译/测试/装包）一律 `cpulimit -l 65 -i --` 前�
   `test:` / `ci:` / `build:` / `perf:` / `style:` / `revert:`）。
 - 标题**用英文**，正文可用中文。
 - 一个 commit 一件事。不把无关改动、格式化噪声、生成物混进逻辑改动。
-- 提交前跑对应检查（`gate pre-commit` / `gate pre-push`），不靠推送失败才发现。
+- 提交前跑对应检查（`canon pre-commit` / `canon pre-push`），不靠推送失败才发现。
+
+### 提交身份
+
+- commit 作者固定是维护者本人账号 `hathawayANdRX105`（大小写逐字一致）。
+- **不得**用 `git -c user.name=... -c user.email=...` 覆盖身份提交。历史上
+  `agent@local` / `ci@local` 这类签名就是这么来的：GitHub 账号对不上，
+  贡献归属、追责、审计全丢。
+- 提交前若 `git config user.name` / `user.email` 不是上面这个账号，先改成本仓配置
+  （`git config user.name hathawayANdRX105`），别带着错的身份往下走。
+- 邮箱两套都算合法：`2635254302@qq.com`（本地提交）与 GitHub 的
+  `61958173+hathawayANdRX105@users.noreply.github.com`（服务端 squash 落库时写的）。
+- 禁止 `Co-authored-by:`  trailer 署其他人或机器人账号。
 
 ### Issue
 
@@ -234,7 +246,19 @@ CPU 密集型命令（编译/测试/装包）一律 `cpulimit -l 65 -i --` 前�
   实现步骤 / 交付记录 / 怎么验证 / 检查清单。
 - 关联 issue 用 `Fixes #<n>` 收尾行；draft 阶段用 `Related #<n>`，合并授权前改 `Fixes`。
 - 开启或更新 PR 后看 CI 结果到底（`gh pr checks`），红了就修，不等用户来问。
-- 被 gate 拦下就修代码，**不改规则**。规则确有缺陷 → 开 issue 交维护者裁决。
+- 被 canon 拦下就修代码，**不改规则**。规则确有缺陷 → 开 issue 交维护者裁决。
+
+### 合并
+
+- **只走 squash merge**：
+  `gh pr merge <N> --squash --delete-branch --body "Agent 🤖 - Merge: <原因>"`。
+- 禁用 `--merge` / `--rebase`（含 `-m` / `-r` 短形式）。merge commit 会让 PR
+  记录的分支历史消失，同一分支再合要重新三方合并、当初的冲突裁决全部丢失；
+  rebase-merge 还会逐个改写 commit 作者。两者都让 `main` 失去审计价值。
+- 不带任何合并方式的 `gh pr merge` 会弹交互菜单 —— agent 不该触发交互，一律显式
+  写 `--squash`。
+- 禁止本地 `git merge <分支>` 直接合进 `main` 再推 remote。要合就走 PR。
+- 各仓 GitHub 设置已关闭 merge commit 与 rebase merge，squash 是唯一可选项。
 
 ### 收尾
 
