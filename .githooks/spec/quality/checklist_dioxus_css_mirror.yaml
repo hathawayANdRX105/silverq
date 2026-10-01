@@ -1,0 +1,67 @@
+# CK-DIOXUS-CSS-MIRROR: theme.css .dark 镜像不变量（REFACTOR-RULES R8 补充条款 2）
+# 拆分来源: checklist_dioxus_css_layering.yaml（2026-10-01 审计拆出——两条
+#   不变量严重度不同：镜像无存量债可 FAIL，reduced-motion 有债只能 WARN）。
+#
+# 为什么: theme.css 的 .dark 段必须是**语义** :root 块的同内容镜像（shadcn
+#   语义 token 块）；刻度/点阵 :root 块各起一块，不进镜像。用「第一个含
+#   --background 的 :root 块」定位语义块（比「第一个 :root 块」稳——块序
+#   将来调整时仍选对；当前 theme.css 语义块在行 36 含 --background ✓）。
+# 口径: 整文件不变量，恒全仓扫描、无视 scope，毫秒级。无 theme.css 或无
+#   .dark 块的仓自动安静（可移植）。
+# 升级依据: 2026-10-01 三仓数据——镜像当前一致（0 发现）→ 直接 FAIL 零成本；
+#   新增 :root 变量忘记同步 .dark 会在 pre-push 当场被拦（主题切换暗色破图
+#   是最难肉眼发现的回归，值得硬门）。
+# 静默=未验证（2026-10-01 二轮审计）: 不按 theme.css/animation.css 命名约定的仓自动 0 发现——
+# 门禁绿不代表查过；该仓若要 CSS 分层门禁，改 paths 探测名或建适配器。
+enabled: true
+hooks: [pre-push, merge]
+sla: l1
+fail_severity: FAIL
+match:
+  paths_include: ["**/*.css"]
+  paths_exclude: ["target/", ".wt/", "node_modules/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      # 取某类块：列首 sel 开始、到首个列首 } 止
+      first_block() { awk -v sel="$1" 'index($0, sel) == 1 { if (seen) exit; seen=1; f=1; next } f && /^\}/{ exit } f' "$2"; }
+      # 语义 :root 块 = 第一个含 --background 的 :root 块（无则回落第一个）
+      semantic_root() {
+        awk '
+          index($0, ":root {") == 1 {
+            if (inb) blocks[nb - 1] = buf
+            buf = $0; inb = 1; next
+          }
+          inb {
+            buf = buf "\n" $0
+            if ($0 ~ /^}/) { blocks[nb++] = buf; inb = 0 }
+          }
+          END {
+            pick = 0
+            for (i = 0; i < nb; i++) if (blocks[i] ~ /--background/) { pick = i; break }
+            if (nb > 0) print blocks[pick]
+          }' "$1"
+      }
+      root="$(git rev-parse --show-toplevel 2>/dev/null)" || { printf '[]'; exit 0; }
+      cd "$root"
+      theme="$(git ls-files -- '*.css' | grep -E '(^|/)theme\.css$' | head -1)"
+      if [ -n "$theme" ] && grep -q '^\.dark[[:space:]]*{' "$theme"; then
+        rv="$(semantic_root "$theme" | grep -oE -- '--[A-Za-z0-9-]+' | sort -u)"
+        dv="$(first_block '.dark {' "$theme" | grep -oE -- '--[A-Za-z0-9-]+' | sort -u)"
+        t1="$(mktemp)"; t2="$(mktemp)"
+        printf '%s\n' "$rv" > "$t1"; printf '%s\n' "$dv" > "$t2"
+        missing="$(comm -23 "$t1" "$t2" | wc -l | tr -d ' ')"; extra="$(comm -13 "$t1" "$t2" | wc -l | tr -d ' ')"
+        rm -f "$t1" "$t2"
+        if [ "$missing" -gt 0 ] || [ "$extra" -gt 0 ]; then
+          printf '[{"id":"CSS-LAYER-DARK-MIRROR","severity":"FAIL","path":"%s","line":0,"message":".dark 镜像与语义 :root 块不一致（缺 %s 个 / 多 %s 个变量）：镜像必须同内容（REFACTOR-RULES R8 补充条款 2）；:root 增删 token 时同步 .dark"}]' "$theme" "$missing" "$extra"
+        else
+          printf '[]'
+        fi
+      else
+        printf '[]'
+      fi
+optional: false
+timeout: 60

@@ -1,0 +1,56 @@
+{
+  "api_endpoint_security": {
+    "intent": "API endpoint security validation: public endpoints should validate input and sanitize outputs; production code must not expose internal error details",
+    "paths_include": ["**/*.rs", "**/*.py", "**/*.js", "**/*.ts"],
+    "paths_exclude": ["target/", ".wt/", "node_modules/", "**/*test*", "**/tests/**"],
+    "state": {
+      "file": true,
+      "diff": false,
+      "context_files": [".githooks/spec/docs/api_security.md"]
+    },
+    "questions": {
+      "input_validation_missing": {
+        "type": "noul",
+        "instructions": "Does this file contain public API endpoints that handle user input without validation or sanitization?",
+        "criteria": {
+          "true": "A public API function/endpoint reads request parameters directly without validation (regex/email/integer checks, length limits) or sanitization (escape, stringify, parameter binding)",
+          "false": "All public API endpoints have proper input validation (regex, type checks, length bounds) or use parameterized queries/ORM safe methods, or the endpoint is internal/private"
+        },
+        "fail": 0.85,
+        "warn": 0.6
+      },
+      "output_sanitization_missing": {
+        "type": "noul",
+        "instructions": "Does this file contain public API endpoints that output data without proper sanitization?",
+        "criteria": {
+          "true": "A public API endpoint returns user-controlled data (query params, form data, path parameters) without escaping or sanitization, potentially enabling XSS or injection attacks",
+          "false": "All API endpoints sanitize outputs (HTML escape, JSON encoding, proper content-type) or return only non-user data, or use template engines with auto-escaping"
+        },
+        "fail": 0.85,
+        "warn": 0.6
+      },
+      "error_handling_exposure": {
+        "type": "choice",
+        "instructions": "Classify this file's error handling in public API endpoints.",
+        "criteria": {
+          "safe": "Errors are properly caught, logged internally, and return generic user-facing messages without internal details",
+          "risky": "Errors expose stack traces, internal paths, database queries, or sensitive system information to users",
+          "not_api": "File does not contain public API endpoints or uses error handling patterns appropriate for internal code"
+        },
+        "fail_labels": ["risky"],
+        "fail": 0.9,
+        "warn": 0.7
+      },
+      "authentication_missing": {
+        "type": "noul",
+        "instructions": "Does this file contain API endpoints that should require authentication but don't validate any auth tokens?",
+        "criteria": {
+          "true": "A public API function/endpoint reads request data without checking authentication tokens, API keys, or other auth mechanisms where auth is required",
+          "false": "All API endpoints either are explicitly public (marked @public) or properly validate authentication tokens/API keys/tokens"
+        },
+        "fail": 0.9,
+        "warn": 0.7
+      }
+    }
+  }
+}

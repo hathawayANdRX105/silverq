@@ -1,0 +1,30 @@
+# CK-WEB-SPEC-FULL: web_spec 语义层全仓审计通道（增量版是 checklist_web_spec.yaml）
+#
+# 定位: 增量审查（pre-push）只喂变更文件；全仓审计需要把**全部跟踪文件**
+#   分批喂给同一份 web_spec.json——引擎没有这个通道，且 jev_rule.py 的
+#   MAX_FILES=20 会静默截断。本接线补上：mode:grep（stdin 空、harness 自扫）
+#   → jev_rule_batch.py 按 ≤16 文件/批循环调 jev_rule.py 并合并 findings。
+# 口径: 挂 merge（合并前全量把关）；也可手动 `canon check web-spec-full --sla l2`。
+#   判决/阈值/降级全是 jev_rule.py 的语义，本层只拆批与合并。去重（2026-10-01
+#   审计：同一 merge gate 里 web_spec 已判 diff 文件，批再判全量 = 双份 jev
+#   成本 + 同一发现两条报）：引擎导出 GATE_BASE 时批处理跳过 diff 内文件
+#   （增量判归 checklist_web_spec，union 仍覆盖全仓）；无 GATE_BASE 手动跑 = 全量。
+# 成本: ui-kit src/ 排除 icons 后 ~50 个 .rs → 4 批 × 13 问句一次判决，
+#   并发 8，分钟级；无 key 时降级为逐文件 candidates-raw WARN（召回不丢）。
+# 可移植: 扫描集 git ls-files，paths 跟 web_spec.json 保持一致，无仓内布局。
+enabled: true
+hooks: [merge]
+sla: l2
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/", "node_modules/"]
+mode: grep
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/jev_rule_batch.py"
+    - "--config"
+    - ".githooks/spec/quality/web_spec.json"
+optional: true
+timeout: 900

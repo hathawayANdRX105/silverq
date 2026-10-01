@@ -1,0 +1,45 @@
+# CK-REACT-LIST-KEY: React/JSX 列表 key 稳定性（REFACTOR-RULES R1 补充，React 语言适配器）
+#
+# 为什么: R1「stable business ids, never array indexes」是语言无关意图，但
+#   dioxus_list_key 的 l1 模式（rsx `key: "{i}"`）对 React/TS 仓全盲——门禁
+#   绿了实际什么都没查（可移植性陷阱：无 .rs 文件的仓自动安静 ≠ 干净）。
+#   本条是 R1 的 React 适配器：JSX 属性 `key={i}` / `key={index}` / `key={idx}`。
+# 口径: 同 dioxus 家族（scope $0：changed = diff GATE_BASE/origin/main，repo = 全仓）；
+#   排除注释行与测试目录；NUL 流先落行再过滤（NUL 直接进 grep -v 会把全流
+#   当成一行、任何路径段命中即吞掉整个流——2026-10-01 实测 refs 全 0 的根因）。React 惯用法里没有「handle_ 前缀」问题，但 key 惯用法
+#   差异大：`key={item.id}` 是正解、`key={i}` 是债——与 Dioxus 同源。
+# 语言适配边界（2026-10-01 二轮审计）: 本家族 l1 都是语法锁定的——
+#   dioxus_* 只认 .rs，本条只认 .tsx/.jsx；Svelte（{#each} 默认按元素身份
+#   跟踪，`{:key}` 误用才出问题）与 Solid 暂不建 l1，走 web_spec 语义层问句。
+enabled: true
+hooks: [pre-push, merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.tsx", "**/*.jsx"]
+  paths_exclude: ["target/", ".wt/", "node_modules/", "dist/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      scope="${0:-changed}"
+      root="$(git rev-parse --show-toplevel 2>/dev/null)" || { printf '[]'; exit 0; }
+      cd "$root"
+      scan() {
+        xargs -0r grep -HnE 'key=\{(i|index|idx)\}' -- 2>/dev/null |
+          grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*|<!--)' |
+          jq -Rs 'split("\n") | map(select(length > 0) | capture("^(?<path>.+):(?<line>[0-9]+):")) |
+                  map({id: "JSX-INDEX-KEY", severity: "WARN",
+                       path, line: (.line | tonumber),
+                       message: "JSX 数组下标 key={i}：可增删/重排的列表必须用稳定业务 id（REFACTOR-RULES R1 补充，React 适配器）；静态固定序列表可书面驳回——逐个人审"})'
+      }
+      if [ "$scope" = "changed" ]; then
+        git diff "${GATE_BASE:-origin/main}" --name-only -z -- '*.tsx' '*.jsx' | scan
+      else
+        git ls-files -z -- '*.tsx' '*.jsx' | tr '\0' '\n' | grep -vE '(^|/)(tests|__tests__|spec)/' | tr '\n' '\0' | scan
+      fi
+    - changed
+optional: false
+timeout: 60

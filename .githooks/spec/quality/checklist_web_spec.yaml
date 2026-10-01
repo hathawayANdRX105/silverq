@@ -1,0 +1,30 @@
+# CK-WEB-SPEC: web-spec 语义层（ui-component-principles + web-code-review-guide 全量规范）
+#
+# 定位: 「能数得清」的判给 l1 确定性层（dioxus_web.py: style 散落 / nesting 嵌套 /
+#   spec 单 rsx+中文 / layering import 方向），本层只判 grep 判不了的意义级规则:
+#   Dioxus 反模式、弹层矩阵、受控 API、props 膨胀、归属 import、状态分层、
+#   rsx 可读性、重构触发、a11y。两条源文档的条款全文写在 web_spec.json 的
+#   intent 里（规则本体即条文，不靠仓内文档 context）。
+# 机制: mode:file —— 每个匹配文件 = 一个 jev state（file + diff），11 问句一次
+#   批量判决；低于 warn 的判决直接丢弃（假阳性过滤器）。无 key / 离线时候选
+#   原样降 WARN（召回不丢，处置照常），绝不静默清零。
+# 口径: hooks [pre-push, merge]（每个命中文件一次 jev 调用，不挂 pre-commit 热路径）；
+#   fail_severity WARN + sla l2 = 非阻断处置型（存量债大，先 WARN 处置再谈升 FAIL）。
+# 可移植: paths 是 **/*.rs（三仓 ferrite web crates / omenic web-ui / ui-kit kit
+#   全部是 Rust 源），不写死任一仓的目录布局。
+enabled: true
+hooks: [pre-push, merge]
+sla: l2
+fail_severity: WARN
+mode: file
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/", "node_modules/", "**/tests/", "**/benches/"]
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/jev_rule.py"
+    - "--config"
+    - ".githooks/spec/quality/web_spec.json"
+optional: true
+timeout: 300

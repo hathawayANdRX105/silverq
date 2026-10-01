@@ -1,0 +1,37 @@
+# CK-DIOXUS-CSS-LAYERING: 动画层 reduced-motion 不变量（REFACTOR-RULES R8 补充条款 3）
+# 拆分: .dark 镜像不变量拆到 checklist_dioxus_css_mirror.yaml（可独立 FAIL；
+#   2026-10-01 审计：单规则单不变量才能独立校准严重度——reduced-motion 有存量
+#   债必须 WARN，镜像无债可 FAIL，混在一条里只能互相拖着取低）。
+#
+# 为什么: theme.css 的 @utility role-* 原子与 components.css 都无 reduced-motion
+#   关停分支，动画层自身是唯一该管它的地方（components.css 2 处、icon-anim.css
+#   1 处已有局部处理，动画层没有）。
+# 口径: 这是「整个文件的不变量」而非「改动行的问题」，恒全仓扫描、无视 scope；
+#   只解析一个文件，毫秒级。无 animation.css 的仓自动安静（可移植）。
+# 升级条件: P3 清单把 prefers-reduced-motion 分支补进 animation.css 后，本条升
+#   FAIL（新动效缺分支直接拦），或届时已无意义则删。
+# 静默=未验证（2026-10-01 二轮审计）: 不按 theme.css/animation.css 命名约定的仓自动 0 发现——
+# 门禁绿不代表查过；该仓若要 CSS 分层门禁，改 paths 探测名或建适配器。
+enabled: true
+hooks: [pre-push, merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.css"]  # harness 只解析 CSS；原 *.rs 条目是误导（2026-10-01 审计修）
+  paths_exclude: ["target/", ".wt/", "node_modules/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      root="$(git rev-parse --show-toplevel 2>/dev/null)" || { printf '[]'; exit 0; }
+      cd "$root"
+      anim="$(git ls-files -- '*.css' | grep -E '(^|/)animation\.css$' | head -1)"
+      if [ -n "$anim" ] && ! grep -q 'prefers-reduced-motion' "$anim"; then
+        printf '[{"id":"CSS-LAYER-REDUCED-MOTION","severity":"WARN","path":"%s","line":0,"message":"动画层无 prefers-reduced-motion 关停分支：新动效必须带分支（REFACTOR-RULES R8 补充条款 3）；存量进 P3 清单，分支落地后本条升 FAIL 或删除"}]'
+      else
+        printf '[]'
+      fi
+optional: false
+timeout: 60

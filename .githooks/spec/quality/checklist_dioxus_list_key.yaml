@@ -1,0 +1,51 @@
+# CK-DIOXUS-LIST-KEY: 列表 key 稳定性（REFACTOR-RULES R1 补充）
+#
+# 为什么: 动态列表用数组下标当 key，重排/删除时节点复用错配、状态错位；
+#   web_spec.json 的 G1 已把「stable business ids, never array indexes」列为
+#   语义问句，本条是它的 l1 确定性前置——正则出候选（免费、高召回），
+#   处置需人判「静态序列表（tabs/导航）可接受 vs 动态列表违规」，所以 WARN 不拦。
+#   阈值校准（2026-10-01 三仓 jev_noul 裁定）：11 处命中 7 处静态豁免 + 1 处书面
+#   驳回（NodeKey 载荷伪报），73% 豁免率 → 升 FAIL 会造成静态 tabs 大规模
+#   误拦，维持 WARN。
+# 口径: 内联 sh（gate-spec 既定模式），最后一个 argv 即 scope（$0）：
+#   changed（默认）= 对基线的 diff（引擎在门禁时导出 env GATE_BASE，本地缺省回落
+#   origin/main）只报改动文件——git diff HEAD 在已提交的门禁树上是空集（2026-10-01
+#   审计发现：pre-push/merge 上规则休眠、只有脏工作区才命中，属误报口径）；
+#   repo = 全仓审计手动跑：sh -c '<本 yaml 的 -c 参数原文>' repo。
+# 可移植: 扫描集 git ls-files/diff（worktree 安全、gitignore 感知），tests 排除在
+#   文件列表上；NUL 流全程不落变量（sh 变量吃 NUL 会静默假绿），直接管道进 xargs -0。
+# 语言范围声明（2026-10-01 二轮审计）: 本规则锁定 Rust/Dioxus 语法（rsx/#[component]）。
+# 无 .rs 的仓（React/TS/Svelte）自动安静——安静=未验证，≠ 干净；非 Dioxus 仓的前端门禁
+# 需要语言适配器（R1 的 React 适配器见 checklist_react_list_key；Svelte/Solid 暂走语义层）。
+enabled: true
+hooks: [pre-push, merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/", "node_modules/"]
+mode: grep
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      scope="${0:-changed}"
+      root="$(git rev-parse --show-toplevel 2>/dev/null)" || { printf '[]'; exit 0; }
+      cd "$root"
+      scan() {
+        xargs -0r grep -HnE 'key: "\{(index|i|idx)\}"' -- 2>/dev/null |
+          grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*)' |
+          jq -Rs 'split("\n") | map(select(length > 0) | capture("^(?<path>.+):(?<line>[0-9]+):")) |
+                  map({id: "RSX-INDEX-KEY", severity: "WARN",
+                       path, line: (.line | tonumber),
+                       message: "数组下标 key：静态序列表（tabs/导航）可接受；会重排/删除/插入的动态列表必须用稳定业务 id（REFACTOR-RULES R1 补充）——逐个人审"})'
+      }
+      if [ "$scope" = "changed" ]; then
+        git diff "${GATE_BASE:-origin/main}" --name-only -z -- '*.rs' | scan
+      else
+        git ls-files -z -- '*.rs' | tr '\0' '\n' | grep -vE '(^|/)(tests|benches)/' | tr '\n' '\0' | scan
+      fi
+    - changed
+optional: false
+timeout: 60

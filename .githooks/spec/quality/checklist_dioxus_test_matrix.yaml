@@ -1,0 +1,44 @@
+# CK-DIOXUS-TEST-MATRIX: 新组件缺契约测试（REFACTOR-RULES R12）
+#
+# 为什么: tests/ 与被测模块同名对应是本家族既定纪律（AGENTS.md「测试」节），
+#   README 口径「纯函数契约优先、渲染断言归消费方 e2e」。本条不判测试质量
+#   （那是 rust_test_no_assert + jev 的活），只查完整性：本次变更新增了
+#   src/ 下的 #[component] 公开组件、而 tests/ 一行未动 → 提示按矩阵选型
+#   补测试。（demo/ fixture 组件不计数——2026-10-01 审计：diff 未按路径
+#   过滤时 demo 组件误触发。）
+# 口径: mode:diff——stdin 就是本次变更 diff，「新增组件数」与「tests/ 是否
+#   动过」都从 diff 里取，天然随引擎 scope 走（merge = GATE_BASE range）；
+#   提示型规则只挂 merge（CHECKLIST_SPEC：提示型 l1 不拖日常提交）。
+#   确实无行为可测 → 书面驳回（发现处置纪律），不塞凑数测试。
+# 语言范围声明（2026-10-01 二轮审计）: 本规则锁定 Rust/Dioxus 语法（rsx/#[component]）。
+# 无 .rs 的仓（React/TS/Svelte）自动安静——安静=未验证，≠ 干净；非 Dioxus 仓的前端门禁
+# 需要语言适配器（R1 的 React 适配器见 checklist_react_list_key；Svelte/Solid 暂走语义层）。
+enabled: true
+hooks: [merge]
+sla: l1
+fail_severity: WARN
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+mode: diff
+harness:
+  command: "sh"
+  args:
+    - "-c"
+    - |
+      diff_in="$(cat)"
+      added="$(printf '%s\n' "$diff_in" | awk '
+        /^diff --git/ { srcf = (index($0, " b/src/") > 0); c = 0; next }
+        !/^\+/ { c = 0; next }
+        srcf && /#\[component\]/ { c = 1; next }
+        srcf && c && /pub fn/ { n++; c = 0 }
+        END { print n + 0 }
+      ')"
+      tests="$(printf '%s\n' "$diff_in" | grep -c '^diff --git a/tests/' || true)"
+      if [ "$added" -gt 0 ] && [ "$tests" -eq 0 ]; then
+        printf '[{"id":"DIOXUS-TEST-MATRIX","severity":"WARN","path":".","line":0,"message":"新增 '"$added"' 个 src/ #[component] 公开组件但 tests/ 未动：按 R12 测试矩阵补同名契约测试（纯函数契约优先）；确无可测行为则书面驳回"}]'
+      else
+        printf '[]'
+      fi
+optional: false
+timeout: 60
