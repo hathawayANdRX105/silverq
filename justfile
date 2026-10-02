@@ -2,14 +2,19 @@
 default:
     @just --list
 
-# 全量测试（--workspace；根包 workspace 下裸 cargo test 只跑根包）
+# 全量测试（--workspace：根包 workspace 下裸 `cargo test` 只跑根包，不是全量）。
+# 日常开发优先用 `just test-fast`（只跑受影响测试，比全量快一个数量级）；
+# ★ 本配方用于 CI / 合并前全量验收，日常不建议直接用
 test:
     cargo test --workspace
 
 # ── canon 体系：testless 函数级测试选择（rust-dev-perf skill）──
-# 开发内环：只跑本次改动可能破坏的测试；三重降级保险（testless 异常/
-# JSON 异常/零命中 → 全量 workspace），绝不静默跳过。
-# 用法：just test-fast（对比 HEAD）/ just test-fast main
+# 作用：替代 `cargo test` 跑日常开发——testless 做函数级影响分析，
+# 只跑「本次改动可能破坏的测试」，比全量快一个数量级（canon 实测 27s→0.1s 级）。
+# 安全网：testless 异常 / JSON 异常 / 过滤器零命中 → 自动降级 `cargo test --workspace` 全量，
+# 绝不静默跳过任何测试。CI 与合并前仍以全量 `just test` 为准。
+# 用法：just test-fast（对比 HEAD）/ just test-fast main（对比 main）
+# ★ 强烈推荐：日常默认入口，优先于 cargo test / just test
 test-fast base="HEAD":
     #!/usr/bin/env bash
     set -uo pipefail
