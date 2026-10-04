@@ -13,10 +13,7 @@
 #
 # 口径: 用栈逐个花括号判类别，不正则数 `Name {` 的行数。峰值必须在遍历中取——
 #       块结束时栈已弹平，那时再数恒为 0（这个坑踩过一次）。
-# 阈值: --nesting-limit 1 = 允许嵌套 1 层（R1「最多 1 层」）；peak 元素深度 >= 3 才报
-#   （2026-10-01 二轮审计两次修阈值：原 >=limit=2 把可接受层全报；>limit 报 peak>=3
-#   仍把「顶层 div 混排子元素」算入——正确口径是嵌套层数 >1 = 第 3 个元素深度起报，
-#   脚本内 limit+2 偏移实现；三仓 jev 裁定 v3 样本 86-96% 真债支持此口径）。
+# 阈值: --nesting-limit 2 = 报「超过 1 层」，直接对应 R1 的 ≤1。
 # 范围: --scope changed。存量债不在热路径里追，走 merge 的全仓审计 + 书面驳回。
 # 工具: dioxus_web.py（l1 确定性，零 LLM，~1s）
 enabled: true
@@ -36,6 +33,6 @@ harness:
     - "--scope"
     - "changed"
     - "--nesting-limit"
-    - "1"
+    - "2"
 optional: false
 timeout: 60

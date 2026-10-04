@@ -43,9 +43,8 @@
 #   RV-02: FAIL — reply 缺少 intent word
 #   RV-03: WARN — reply 缺少详细理由
 #   RV-04: FAIL — inline review 格式错误
-#   RV-05: FAIL — 缺少 CRG Review
 #   RV-06: FAIL — inline review 无 reply
-#   RV-07: FAIL — 审查未完成
+
 #
 # === WORKSPACE (WS) ===
 #   WS-01: WARN — 目录树不合规

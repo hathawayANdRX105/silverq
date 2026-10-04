@@ -65,7 +65,7 @@ canon check web_spec --sla l2             # 语义层（需 jev key；无 key �
 | 仓 | web 代码 | 特殊点 |
 |---|---|---|
 | ferrite | `crates/web/**` + `apps/*-web/**` | 已有仓内 `custom/web_refactor.json`（ferrite 页面 crate 专用 13 问句）；本 spec 是跨仓通用层，两者并存不冲突（custom 受 canon-sync 保护） |
-| omenic | `crates/web-ui/**` | 层级约束实测：views/ 内放组件是刻意设计，`layering` 只判反向 import |
+| kymido | `crates/web-ui/**` | 层级约束实测：views/ 内放组件是刻意设计，`layering` 只判反向 import |
 | ui-kit | `src/**`（kit 本体） | 共享组件 crate：`ownership_imports` 问句主要服务它（kit 禁业务 import） |
 
 ## 5. 验收口径

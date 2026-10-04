@@ -6,7 +6,7 @@
 
 - **零硬编码检查项**：每条检查 = 一份 yaml，gate 不懂检查含义。
 - **harness 任意**：claude / 9router / vLLM / 本地 sh 都行，gate 只调 `argv/stdin → stdout`。
-- **复用 finding 协议**：跟 `code.rs` / `ocr` / `code-review-graph` 同一种 `Finding { id, severity, path, line, message }` 结构，统一走 gate 的 FAIL/WARN/INFO 出口。
+- **复用 finding 协议**：跟 `code.rs` 同一种 `Finding { id, severity, path, line, message }` 结构，统一走 gate 的 FAIL/WARN/INFO 出口。
 - **可拓展**：加检查 = 加 yaml，gate 不需要重新发版。
 
 ## 文件位置与发现
@@ -149,7 +149,7 @@ gate 根据 `mode` 给 harness 三种输入之一：
    **`.gitignore` 就是排除配置**：目录被 gitignore 即自动出扫描集；按规则细化排除在文件列表上
    `grep -zvE '(^|/)xx/'`（或 pathspec `:(exclude)...`）。
 
-2. **不写死目录层级**（`crates/*/src` 等 omenic 专属布局）：`git ls-files` 输出仓库根相对路径，
+2. **不写死目录层级**（`crates/*/src` 等 kymido 专属布局）：`git ls-files` 输出仓库根相对路径，
    硬编码布局在别的仓库静默扫 0 文件、假绿（比报错更危险）。
 
 3. **跨语言测试文件命名一并排除**（`tests/` 目录挡不住同目录 `*_test.go` / `test_*.py` /

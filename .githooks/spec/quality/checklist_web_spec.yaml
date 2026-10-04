@@ -10,7 +10,7 @@
 #   原样降 WARN（召回不丢，处置照常），绝不静默清零。
 # 口径: hooks [pre-push, merge]（每个命中文件一次 jev 调用，不挂 pre-commit 热路径）；
 #   fail_severity WARN + sla l2 = 非阻断处置型（存量债大，先 WARN 处置再谈升 FAIL）。
-# 可移植: paths 是 **/*.rs（三仓 ferrite web crates / omenic web-ui / ui-kit kit
+# 可移植: paths 是 **/*.rs（三仓 ferrite web crates / kymido web-ui / ui-kit kit
 #   全部是 Rust 源），不写死任一仓的目录布局。
 enabled: true
 hooks: [pre-push, merge]

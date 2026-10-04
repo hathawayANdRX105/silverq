@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # canon-managed hook — delegates to the canon binary
 # 找二进制: 先 PATH 里的 canon (系统安装), 否则用仓库内 .githooks/canon
-REPO=$(git rev-parse --show-toplevel 2>/dev/null)
 if command -v canon >/dev/null 2>&1; then
-  exec canon commit-msg "$1"
+  exec canon commit-msg "$@"
 fi
 if [ -x "$REPO/.githooks/canon" ]; then
-  exec "$REPO/.githooks/canon" commit-msg "$1"
+  exec "$REPO/.githooks/canon" commit-msg "$@"
 fi
 echo "canon binary not found (need: canon on PATH, or .githooks/canon)" >&2
 exit 1

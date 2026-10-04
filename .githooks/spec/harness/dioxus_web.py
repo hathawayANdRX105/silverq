@@ -76,18 +76,16 @@ def peak_nesting(src: str) -> list[tuple[int, int, int]]:
     out = []
     for m in RSX_START.finditer(src):
         start = src.count('\n', 0, m.start()) + 1
-        j = m.end()                      # 已越过 rsx! 的开括号
-        stack = ['rsx!']                 # 哨兵代表本块的开括号
+        stack = ['root']
         peak = 0
-        while j < len(src):
+        j = m.end()                      # 已越过 rsx! 的开括号
+        while j < len(src) and stack:
             c = src[j]
             if c == '{':
                 ls = src.rfind('\n', 0, j) + 1
                 stack.append(classify_brace(src[ls:j]))
                 peak = max(peak, stack.count('element'))   # 必须在遍历中取
-            elif c == '}':
-                if len(stack) == 1:
-                    break                # 本块的收尾括号
+            elif c == '}' and len(stack) > 1:
                 stack.pop()
             j += 1
         if peak:
@@ -109,14 +107,8 @@ def scan_nesting(path: str, src: str, limit: int) -> list[Finding]:
                 "crate 的 components/ 下，父层只留一次调用 + 传 props。"
             ),
         )
-        # limit = 允许的嵌套层数（R1「最多 1 层」）；peak 元素深度 = 层数 + 2
-        # （块根 + 顶层元素 + N 层嵌套）。违规 = 嵌套层数 > limit = peak >= limit + 2。
-        # 2026-10-01 二轮审计两次修阈值：原 >= limit 把可接受层全报了；
-        # 其后 > limit 仍把「顶层 div 混排子元素」（2 层嵌套）报了——jev 裁定
-        # R1 管的是嵌套层数，div{class,span,button} 这种 1 层嵌套（peak=3）
-        # 不在违规面。真违规 = div>div>div 起（peak>=4）。
         for depth, start, end in peak_nesting(src)
-        if depth >= limit + 2
+        if depth >= limit
     ]
 
 # ── style 模式：内联 class 散落 / 硬编码颜色（ui-component-principles §4.1）──
@@ -256,7 +248,7 @@ def scan_spec(path: str, src: str) -> list[Finding]:
 def scan_layering(path: str, src: str) -> list[Finding]:
     """层级约束的可判定信号是 **import 方向**，不是「组件放在哪个目录」。
 
-    实测（omenic）：`views/config.rs` 里放 6 个 `#[component]` 是他们刻意的做法
+    实测（kymido）：`views/config.rs` 里放 6 个 `#[component]` 是他们刻意的做法
     ——「一文件一 pub 组件 + 私有子组件同文件」。按目录一刀切会误报 6 处。
     反过来 `components/` 不得 `use crate::views::` 在现状是 0 违例，是干净硬约束。
     """
@@ -316,8 +308,8 @@ def main() -> int:
     ap.add_argument('--only', choices=['nesting', 'spec', 'layering', 'style'], default=None)
     ap.add_argument('--class-limit', type=int, default=72,
                     help='style: 内联 class 串超过该字符数报 DIOXUS-INLINE-CLASS')
-    ap.add_argument('--nesting-limit', type=int, default=1,
-                    help='允许的元素嵌套层数（R1「最多 1 层」→ 传 1）；peak 元素深度 >= limit+2 才报')
+    ap.add_argument('--nesting-limit', type=int, default=2,
+                    help='R1 要求 tab-page/ 元素嵌套 ≤1 层；默认 2 = 报「超过 1 层」')
     ap.add_argument('--scope', choices=['repo', 'changed'], default='repo',
                     help='repo=全仓审计(CI/merge 用)；changed=只看基线以来的改动(hook 热路径用)')
     ap.add_argument('--base', default=None,
@@ -346,13 +338,6 @@ def main() -> int:
         # 判据是**内容**不是路径名：按目录名过滤会让 web crate 一改名就静默失效，
         # 表现为「规则没报=通过」的假绿。带 rsx! 的文件才是 web UI 代码。
         if 'rsx!' not in src and '/views/' not in rel.replace('\\', '/'):
-            continue
-        # demo/ = 视觉回归 fixture（ui-kit AGENTS：视觉改动过 demo 页面），不在
-        # R1/§4.1 生产代码纪律范围。这是**范围判定**（哪类代码受纪律管），与上面
-        # 的「按内容不按路径」判据不冲突——判据照旧，只是 demo 页面不进纪律。
-        # 2026-10-01 二轮审计：ui-kit demo 嵌套发现 12/12 被 jev 判误报。
-        rel2 = rel.replace('\\', '/')
-        if rel2.startswith('demo/') or '/demo/' in rel2:
             continue
         if args.only in (None, 'nesting'):
             findings += scan_nesting(rel, src, args.nesting_limit)

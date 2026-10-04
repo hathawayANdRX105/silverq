@@ -85,8 +85,8 @@ canon pre-commit
 ## 在新项目启用
 
 ```bash
-# 1. 复制 omenic 的 .githooks 整目录
-cp -r ~/projects/omenic/.githooks ~/projects/<your-project>/
+# 1. 复制 kymido 的 .githooks 整目录
+cp -r ~/projects/kymido/.githooks ~/projects/<your-project>/
 
 # 2. 装 gate 二进制 + 初始化
 cd ~/projects/<your-project>

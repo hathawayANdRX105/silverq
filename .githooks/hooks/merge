@@ -3,10 +3,10 @@
 # 找二进制: 先 PATH 里的 canon (系统安装), 否则用仓库内 .githooks/canon
 REPO=$(git rev-parse --show-toplevel 2>/dev/null)
 if command -v canon >/dev/null 2>&1; then
-  exec canon merge
+  exec canon merge "$@"
 fi
 if [ -x "$REPO/.githooks/canon" ]; then
-  exec "$REPO/.githooks/canon" merge
+  exec "$REPO/.githooks/canon" merge "$@"
 fi
 echo "canon binary not found (need: canon on PATH, or .githooks/canon)" >&2
 exit 1
