@@ -3,7 +3,7 @@
 # 检测: 任何 rs 文件含有 allow(dead_code) 且后面没有解释理由的注释
 # grep 模式, 零 LLM
 enabled: true
-hooks: [merge]
+hooks: [pre-commit, pre-push, merge]
 sla: l1
 fail_severity: WARN
 match:

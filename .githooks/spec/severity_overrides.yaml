@@ -10,7 +10,7 @@
 #   PR-02: WARN — 标题非 conventional commit
 #   PR-03: FAIL — 缺少必填 heading
 #   PR-04: FAIL — heading 含 CJK / What 无中文
-#   PR-05: WARN — 缺少 Fixes # 关联
+#   PR-05: INFO — 缺少 Fixes # 关联（PR-first：关联可选；fixes_linkage_mode 可升 WARN/FAIL）
 #   PR-06: FAIL — 缺少 type label
 #   PR-07: FAIL — Construction plan/Checklist checkbox < 2
 #   PR-08: FAIL — 分支名前缀不在白名单
@@ -55,8 +55,7 @@
 #   CL-02: FAIL — checklist 格式错误
 #   CL-03: WARN — checklist 缺少必要项
 #
-# 示例: 把 PR-05 改成 INFO，不再阻塞无 Fixes # 的 PR
-# severity_overrides:
-#   PR-05: "INFO"
+# 注意: 只有 FAIL 会拦截，WARN 仅提示。想让 PR 强制关联 issue，
+# 用 github_pull_requests.yaml 的 fixes_linkage_mode，不要用本文件覆盖。
 
 severity_overrides: {}

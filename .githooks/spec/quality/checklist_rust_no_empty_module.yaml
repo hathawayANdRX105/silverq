@@ -3,7 +3,7 @@
 # 检测: .rs 文件去除注释/空行后 <= 2 行, 且不含逻辑实现 (不含 fn/struct/impl)
 # grep 模式, 零 LLM
 enabled: true
-hooks: [merge]
+hooks: [pre-commit, pre-push, merge]
 sla: l1
 fail_severity: WARN
 match:

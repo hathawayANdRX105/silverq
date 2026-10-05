@@ -2,8 +2,9 @@
 # 使用方式: gate Rust PR validator 读取本文件, 规则参数从 YAML 读取。
 # 审查评论格式契约请参考 #103 (github_reviews.yaml)。
 
-# 必填的 body 段 (按出现顺序检查)
-required_body_headings: ["Issue", "What", "Why", "Construction plan", "Delivery record", "How to test", "Checklist"]
+# 必填的 body 段 (按出现顺序检查)。PR 是工作单元，issue 是追踪单元：
+# 模板不要求 ## Issue 段，纯 PR 开发（无 issue）是合法默认形态。
+required_body_headings: ["What", "Why", "Construction plan", "Delivery record", "How to test", "Checklist"]
 
 # 必填的标题 (可自定义)
 required_title_headings: ["Goal", "Background", "Done when", "Suspected areas", "Out of scope"]
@@ -50,6 +51,11 @@ allowed_branch_prefixes:
 # Fixes 关键词
 fixes_keywords: ["Fixes", "Closes", "Resolves"]
 
+# PR-05 缺少 Fixes # 关联时的严重级别。缺省/不写 = INFO（PR-first 工作流：
+# 关联可选，审查修复走同一 PR，issue 只用于遗留与记录）。
+# 仍要求一 PR 一 issue 的仓写 "WARN" 或 "FAIL"。多个 Fixes 恒为 WARN。
+# fixes_linkage_mode: "FAIL"
+
 # type label (从 label_policy 读取)
 type_labels_cfg: ["bug", "enhancement", "feature", "documentation", "chore", "refactor", "tests", "epic"]
 
@@ -86,6 +92,15 @@ linkage_check:
   plain_text_links_severity: "INFO"   # Part of/Related 提示级别
   fixes_epic_severity: "WARN"         # Fixes 目标是 parent issue 时提示级别
 
+# ── merge 门禁开关（GT-* @ gh pr merge 拦截）────────────────────
+# 四项都缺省为 true（见 gh_wrap::gate_switch），写出来是为了让本仓的
+# 强制策略在 spec 层可见、可按仓覆盖。
+merge_requires_body: true    # GT-BODY — 合并必须带 --body 说明原因
+merge_checkbox_gate: true    # GT-CHK — PR 内 checkbox 必须全勾
+merge_title_gate: true       # CM-01/02 — squash 标题须为 conventional commit
+merge_requires_squash: true  # GT-METHOD — 只允许 squash（--merge/--rebase/--auto 一律拒绝）
+# 走 merge commit 的仓（自身有例外约定）设 false。
+
 # 规则严重级别覆盖 (可选)
 # 格式: "规则ID": "FAIL" | "WARN" | "INFO"
 # 默认严重级别如下, 按需调整:
@@ -93,22 +108,21 @@ linkage_check:
 #   PR-02: WARN — 标题非 conventional commit
 #   PR-03: FAIL — 缺少必填 heading
 #   PR-04: FAIL — heading 含 CJK
-#   PR-05: WARN — 缺少 Fixes # 关联
+#   PR-05: INFO — 缺少 Fixes # 关联（缺省可选；fixes_linkage_mode 可升 WARN/FAIL；多个 Fixes 恒 WARN）
 #   PR-06: FAIL — 缺少 type label
 #   PR-07: FAIL — Construction plan/Checklist checkbox < 2
 #   PR-08: FAIL — 分支名前缀不在白名单
 #   PR-10: INFO — Part of/Related 纯文本
 #   PR-06: WARN — 关键词与 label 不对齐
 #
-# 示例: 把 PR-05 改成 INFO，不再警告缺少 issue 关联
-# severity_overrides:
-#   PR-05: "INFO"
+# 示例: 仍要求 issue 关联的仓优先用 fixes_linkage_mode，而不是覆盖严重级别
+# severity_overrides: {}
 severity_overrides:
   # PR-01: "FAIL"  — 标题含 CJK
   # PR-02: "WARN"  — 标题非 conventional commit
   PR-03: "FAIL"   # 缺少必填 heading
   PR-04: "FAIL"   # heading 含 CJK / What 无中文
-  PR-05: "WARN"   # 缺少 Fixes # 关联 (改成 INFO 则不阻塞)
+  # PR-05 缺省 INFO；要恢复强制 issue 关联用 fixes_linkage_mode，不要动这里
   PR-06: "FAIL"   # 缺少 type label
   PR-07: "FAIL"   # Construction plan/Checklist checkbox < 2
   PR-08: "FAIL"   # 分支名前缀不在白名单

@@ -2,7 +2,7 @@
 # 只扫注释与 todo!/unimplemented! 宏, 避开字符串字面量里的关键字表
 # 扫仓库根, 不假设 crate 嵌套深度
 enabled: true
-hooks: [merge]
+hooks: [pre-commit, pre-push, merge]
 sla: l1
 fail_severity: WARN
 match:

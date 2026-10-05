@@ -2,7 +2,7 @@
 # 为什么: Cargo 对 tests/ 目录默认只在 cargo test 编译, 写 #[cfg(test)] 是重复且错误的 boilerplate
 # grep 模式, 零 LLM
 enabled: true
-hooks: [merge]
+hooks: [pre-commit, pre-push, merge]
 sla: l1
 fail_severity: WARN
 match:

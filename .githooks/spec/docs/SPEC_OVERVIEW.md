@@ -73,7 +73,7 @@
 - PR-02 Conventional Commit 格式 — WARN
 - PR-03 必填 body 段完整性 — FAIL
 - PR-04 heading 英文、What 段中文 — FAIL/WARN
-- PR-05 一个 PR 一个主 issue（Fixes 数量）— WARN
+- PR-05 issue 关联可选（缺省 INFO；`fixes_linkage_mode` 可升 WARN/FAIL；多个 Fixes 恒 WARN）
 - PR-06 label 存在性 + type label — FAIL
 - PR-07 Construction plan/Checklist 至少 2 个 checkbox — FAIL
 - PR-08 分支前缀合法 — FAIL
@@ -99,6 +99,7 @@
 - GT-04 issue close 前只查 Done when 段 checkbox 全勾 + 必须 --comment 理由（Implementation Order 进度格不拦）— FAIL 拒（开关 `close_done_when_gate`/`close_requires_comment`，严重度可经 severity_overrides 降级）— 触发：gh issue close
 - GT-04b issue close 前 PR 关联检查：epic 豁免（完成信号是 GT-06 sub 全关）；非 epic 无关联仅提示不阻塞 — WARN — 触发：gh issue close
 - GT-05 pr merge 前 checkbox 全勾 + 关联 Fixes issue Done when 全勾（epic 目标豁免，由 GT-06 保障）+ --body 理由 + squash 标题 CM-01/CM-02 — FAIL 拒（开关 `merge_checkbox_gate`/`merge_fixes_gate`/`merge_requires_body`/`merge_title_gate`）— 触发：gh pr merge
+- GT-METHOD 只允许 squash merge：无 `--squash` 或出现 `--merge`/`--rebase`/`--auto`/`--ff-only`/`--no-squash`（含 `-m`/`-r`/`-F` 短形式）即拒 — FAIL（开关 `merge_requires_squash`）— 触发：gh pr merge
 - GT-06 epic close/merge 前所有 sub-issues 已关闭（开关 `epic_sub_issue_gate`；sub 查询失败仍 fail-closed 硬拒，不可配）— FAIL 拒 — 触发：gh issue close / gh pr merge
 - GT-07 merge 后自动在 PR 留言 + 删除本地 head 分支（安全模式）— 行为（无拦截）— 触发：gh pr merge
 

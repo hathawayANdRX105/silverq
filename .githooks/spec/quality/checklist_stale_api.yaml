@@ -3,7 +3,7 @@
 #       std::sync::ONCE_INIT / std::cell::BorrowError
 # grep 模式, 零 LLM
 enabled: true
-hooks: [merge]
+hooks: [pre-commit, pre-push, merge]
 sla: l1
 fail_severity: WARN
 match:
