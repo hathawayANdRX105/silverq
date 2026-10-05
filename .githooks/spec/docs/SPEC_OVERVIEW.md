@@ -36,6 +36,11 @@
 原由二者承担的语义层由 jev 驱动的 `ocr_rust` / `ocr_go` / `ocr_javascript` /
 `ocr_default` checklist 承接（yv8 与 open-code-review 的规则文档移植，非 ocr 二进制）。
 - 任意 LLM CLI（`claude` / `codex` / `ollama` 等，被 checklist harness 调用；非必须，缺失按 `optional` 处理）
+- `cargo-machete`：未使用依赖检测（`dep_hygiene` 的执行器）
+- `upx`：二进制压缩（canon 部署产物，构建期使用）
+- 缺失的工具按 yaml 的 `optional` 处理（默认 WARN 跳过）
+
+> 后三行来自各成员仓根层 `SPEC_OVERVIEW.md`（ferrite / gugu / silverq / deskctl / kime）的外部工具依赖清单。
 
 ## 本文档用途
 
@@ -45,6 +50,8 @@
 - **新增/修改规则后必须更新本文档**
 - 规则编号采用**主题前缀 + 连续编号**（IS/PR/RV/GT/WS/CD/CL/CM/CK）
 - commit 标题规则 CM-01/02/03 实现在 `canon pre-commit`，语义与 PR-01/PR-02 对齐
+- 各成员仓根层还留有旧的 `.githooks/spec/SPEC_OVERVIEW.md`；其中**项目侧独有**的规则行
+  已并入本文档（见「项目侧 checklist」小节，行尾标注来源项目），正本是唯一总览
 
 ## 主题一：GitHub 规则（IS/PR/RV）
 
@@ -166,6 +173,23 @@
 - CK-03 finding 兼容:单 object / 数组 / "text + [...JSON...]" 末尾数组三种都能解析
 - CK-04 `mode: grep`:harness 收空 stdin,跑任意静态检查(grep/find/自定义脚本),finding 自身带 path/line. 适合铁律类规则(禁路径模式、必放位置) — 零 LLM token,毫秒级
 
+## 路径无关性（重要）
+
+> 项目侧规则（ferrite / gugu / silverq / mono 根层 SPEC_OVERVIEW「路径无关性」小节）。
+
+harness 一律扫仓库根加 `--exclude-dir`，**不假设 crate 嵌套深度**。
+
+ferrite 是两层布局（`crates/<domain>/<crate>/src`），而规则原先写死一层的 `crates/*/src/`，导致 45 个 crate 里只有 1 个被扫到——其余 44 个的代码从未被检查，gate 却报 `ALL PASS`。静默失效比直接报错更危险，所以新增规则不得再写死目录层级。
+
+## 明确不做的（项目侧约定：不写规范、不检查）
+
+> 项目侧规则（ferrite / gugu / silverq / mono 根层 SPEC_OVERVIEW「明确不做的」小节，Dioxus 前端仓约定）。
+
+- class：不抽文件、不抽 const，直接写 rsx（改动频繁，就近维护）
+- i18n：单语言阶段不上 fluent / rust-i18n
+- rsx 语法：编译器通过即可
+- constants crate：不建独立 crate，文案按共享范围就近 const
+
 
 ## 触发式（lazy）规则映射
 
@@ -177,6 +201,18 @@
 - git commit → CM-01、CM-02、CM-03、WS-01、WS-02、CD-01~06、checklist（每 yaml 自身 `hooks` 过滤）
 - git push → WS-01、WS-02、CD-01~06、checklist（同上）
 > 清单更新顺序：按文件名字典序（加 `00_`/`10_` 前缀可强制提前）。
+
+## 审计命令（canon audit）
+
+> 项目侧章节（deskctl / new-api / kime 根层 SPEC_OVERVIEW「每日合规检查」）。
+
+- `canon audit [owner/repo] [--issues=N,M] [--recent=N] [--limit=N] [--workers=N]`：
+  用 Rust issue/PR 规则 + gh API 扫描**存量** issue/PR 的 checkbox 与规则合规，
+  与钩子解耦，可按 `--recent` 时间窗跑（实现 `crates/gate/src/tools/audit.rs`）。
+- 触发：CI 每日 → 最近 1 天创建的 issue/PR 全规则。deskctl / new-api / kime 曾配
+  `.github/workflows/daily_audit.yml`（UTC 0:30 跑 `gate audit --recent=1`，
+  旧文档记载 FAIL 会自动建 issue 记录、支持 workflow_dispatch）；
+  **当前成员仓均未部署该 workflow**，需要的仓自行配置。
 
 ## 主题十：手动运行检查（canon check）
 
@@ -211,11 +247,38 @@
 
 close 路径另有 `done_when_judge`（`github_issues.yaml`）：GT-04 机械门过后，Done when 每条过同一套三档模型评审（问题集 `harness/jev_questions_done_when.json`，`default_fail: 0.85`），p(未达标)≥0.85 FAIL 硬拦；任何基础设施失败降 `DWJ-SKIPPED` INFO 不阻断。
 
+### 项目侧 checklist（成员仓自带，未收录进 canon `specs/quality/`）
+
+> 来源：ferrite / gugu / silverq / mono 根层 `.githooks/spec/SPEC_OVERVIEW.md` 的规则清单。
+> 严重度与触发以各仓 `.githooks/spec/quality/checklist_*.yaml` 的 `hooks:` / `fail_severity` 为准
+> （与旧文档不一致处已在行内注明）。`doc_sync` 一行已随该规则 2026-10-06 整条删除，不再列出
+> （见 `todo/problem/gate-doc-sync-readme-drift.md`）。
+
+| 名字 | SLA | 触发 | 严重度 | 检测内容 |
+|---|---|---|---|---|
+| `structure_check` | l1 | pre-commit, pre-push, merge | FAIL | crate 分层与数据边界（面板禁直接 `use mock::`，禁旧嵌套路径）— ferrite/gugu |
+| `shared_components_check` | l1 | pre-commit, pre-push, merge | FAIL | ≥2 个 page 共用的组件必须放共享 crate，page 内禁 `src/ui.rs` — ferrite/gugu/silverq |
+| `no_nested_types` | l1 | pre-commit, pre-push, merge | FAIL | 禁止在 `fn` 体内定义 `struct` / `enum` — ferrite/gugu/silverq |
+| `no_nested_worktree` | l1 | pre-commit, pre-push, merge | FAIL | 禁止 `.wt/` 下嵌套 worktree（历史事故：13 层嵌套 + 321G 产物）— ferrite/gugu/silverq |
+| `tests_check` | l1 | pre-commit, pre-push, merge | WARN | 测试代码划分与命名 — ferrite/gugu/silverq |
+| `copy_constants_check` | l1 | pre-push, merge | WARN | 文案常量：同一中文字面量复用 2+ 次要抽 const；慢检查不进 pre-commit（旧文档写三个钩子，以 yaml 为准）— ferrite/gugu/silverq |
+| `pr_labels` | l1 | merge | FAIL | PR 至少挂 1 个 type label（bug/feature/chore/refactor/tests/documentation/epic）；标题命中域关键词但缺域 label 时给建议（gh api 取数，取数失败输出「跳过、请人工核对」）— ferrite/gugu/silverq |
+| `pr_crg_review` | l1 | merge | FAIL | PR 讨论区需留结构层审查结论；记录提到问题/风险时须附修复/回应记录（Fix/采纳/驳回 + commit 或验证结论），只统计 PR 创建后的评论（CRG 二进制已退役，yaml 的标记词仍接受 `结构层`/`ocr` 等文案）— ferrite/gugu/silverq |
+| `code_doc` | l1 | merge | WARN | 公共 API 缺 `///` rust doc、模块头缺 `//!`（只查本次 PR diff 触碰的 `.rs`，不追责存量；旧文档写三个钩子，以 yaml 为准）— ferrite/gugu/silverq |
+| `diff_scope` | l1 | pre-commit, pre-push, merge | WARN | 本 diff 文件按 scope（src/proxy、src/dataplane…）归类，跨 ≥2 个 scope 的单改动给 WARN，确认拆分或在 PR 里写清耦合 — silverq |
+
+> 漂移备注：mono / silverq 的根层文档也列了 `structure_check` 等行，但其
+> `.githooks/spec/quality/` 下没有对应 yaml；mono 还列了 `pr_labels` / `pr_crg_review` /
+> `code_doc` 而无 yaml —— 上表来源列只写**实际有 yaml** 的仓。
+
 ### SLA 分层
 
 - **l1 结构层**：零 token，毫秒～分钟级（grep / clippy / 静态分析）。FAIL 硬门槛。
 - **l2 语义层**：轻量，秒级（影响面 / 重复检测）。FAIL 硬门槛。
 - **l3 LLM 层**：按需，秒~分钟级（`review_chain` 三档降级：jev → 小模型 → 无；`ferrite_oversize` wildtoken `fast-l`）。INFO/score/confidence，不阻断；per-question fail 阈值命中时 FAIL。深度语义审查由 L2/L3 checklist 承接。
+
+重规则（`clippy` / `dep_hygiene` / `duplication` / `crg_impact`）设 `hooks: [merge]`，不拖慢日常提交
+（来源：ferrite / gugu / silverq / mono 根层 SPEC_OVERVIEW 的 SLA 分层说明；与各仓 yaml 一致）。
 
 `canon check` 默认只跑 l1；`--sla l2` 或 `l3` 解锁更高层。
 l3 默认 hooks: [merge]，本地用 `canon check <l3-name> --sla l3` 触发。
