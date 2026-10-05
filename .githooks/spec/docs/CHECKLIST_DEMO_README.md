@@ -1,14 +1,14 @@
 # Checklist 检查清单 — 用户使用指南
 
-`.githooks/spec/checklist_*.yaml` 是项目级 LLM 检查清单的入口。每份 yaml = 一条检查，gate 会按字典序全部跑（可改名加前缀控顺序：`00_`、`10_`、`99_`）。
+`.githooks/spec/quality/checklist_*.yaml` 是项目级 LLM 检查清单的入口。每份 yaml = 一条检查，gate 按**目录内**文件名字典序全部跑（可改名加前缀控顺序：`00_`、`10_`、`99_`）；规则只有落在 `quality|code|cleanup|workspace|github` 子目录里才会被 catalog 路由，spec 根层的 yaml 不生效。
 
 ## 三步上手
 
 ### 1. 复制 demo
 
 ```bash
-cp .githooks/spec/checklist_no_debug_log_demo.yaml \
-   .githooks/spec/checklist_my_rule.yaml
+cp .githooks/spec/quality/checklist_no_debug_log_demo.yaml \
+   .githooks/spec/quality/checklist_my_rule.yaml
 ```
 
 ### 2. 改 harness 段

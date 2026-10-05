@@ -15,16 +15,16 @@
 .githooks/
 ├── spec/
 │   ├── dispatch.yaml          # hook → topic（已有；加 checklist topic）
-│   ├── quality/checklist_*.yaml  # 检查清单（新增；glob 自动发现，递归）
+│   ├── quality/checklist_*.yaml  # 检查清单（catalog::load 扫 5 个子目录，非递归、目录内排序）
 │   └── ...
 ```
 
-启动时 `crates/spec/src/tools/checklist.rs` glob `.githooks/spec/checklist_*.yaml`，**顺序按文件名字典序**（用户想让谁先跑就改名加前缀，如 `00_`、`10_`）。
+启动时 `crates/gate/src/catalog.rs` 的 `catalog::load()` 扫 `.githooks/spec/{quality,code,cleanup,workspace,github}/` 下的 yaml（spec 根层与 `custom/` 不在扫描范围），**顺序按文件名字典序**（用户想让谁先跑就改名加前缀，如 `00_`、`10_`）。
 
 ## YAML Schema
 
 ```yaml
-# .githooks/spec/checklist_<name>.yaml
+# .githooks/spec/quality/checklist_<name>.yaml
 # name 来自文件名（去 .yaml），与 finding.id 前缀一致
 
 enabled: true                  # 默认 true；false → INFO 跳过
@@ -203,7 +203,7 @@ pub fn run_all(scope: HookScope, target_files: &[PathBuf]) -> Vec<Finding> {
 ### 实现清单（建议 ~120 行）
 
 1. `pub struct ChecklistSpec { name, enabled, hooks, match_, mode, harness, timeout, optional, fail_severity }`，serde_yaml 派生
-2. `glob(".githooks/spec/checklist_*.yaml")` 列举
+2. `catalog::load()` 对 5 个子目录 `read_dir` + 按路径排序列举（不递归）
 3. `run_one(spec, scope) -> Vec<Finding>`：
    - 取 `git diff --unified=3 <scope>` → bytes
    - `Command::new(spec.harness.command).args(spec.harness.args).stdin(diff).output()`
@@ -284,7 +284,7 @@ timeout: 30
 1. 加 `crates/spec/src/tools/checklist.rs`（~120 行）
 2. `src/main.rs` 在 PreCommit/PrePush/Merge 路径里调 `run_all`
 3. `.githooks/spec/dispatch.yaml` 加 `checklist` topic
-4. `.githooks/spec/SPEC_OVERVIEW.md` 加「主题九：Checklist（CK-01）」章节
+4. `.githooks/spec/docs/SPEC_OVERVIEW.md` 加「主题九：Checklist（CK-01）」章节
 5. demo yaml + mock harness 脚本（不需真调 LLM；echo mock JSON 即可）
 6. `ferrite` 加 `.githooks/` + `canon init` → 跑 `canon pre-push` 验证
 

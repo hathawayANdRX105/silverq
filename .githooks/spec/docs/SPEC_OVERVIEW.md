@@ -160,7 +160,9 @@
 
 ## 主题八：Checklist（CK-01，gate checklist，**已实现**）
 
-- `.githooks/spec/checklist_*.yaml`：项目级 LLM 检查清单；glob 自动发现，按字典序跑
+- `.githooks/spec/quality/checklist_*.yaml`：项目级 LLM 检查清单；catalog 只扫
+  `quality|code|cleanup|workspace|github` 五个子目录（spec 根层与 `custom/` 不加载），
+  目录内按字典序跑
 - `mode: diff`（默认）传 `git diff <scope>` 给 harness；`mode: file` 每个变更文件单独传全文
 - harness = 任意可执行文件，stdout 必须是 finding JSON 数组（与 code/ocr/CRG 同协议）
 - 严重度合并：harness 报的与 yaml `fail_severity` **就高取大**（harness FAIL 永远阻断）
@@ -256,20 +258,22 @@ close 路径另有 `done_when_judge`（`github_issues.yaml`）：GT-04 机械门
 
 | 名字 | SLA | 触发 | 严重度 | 检测内容 |
 |---|---|---|---|---|
-| `structure_check` | l1 | pre-commit, pre-push, merge | FAIL | crate 分层与数据边界（面板禁直接 `use mock::`，禁旧嵌套路径）— ferrite/gugu |
-| `shared_components_check` | l1 | pre-commit, pre-push, merge | FAIL | ≥2 个 page 共用的组件必须放共享 crate，page 内禁 `src/ui.rs` — ferrite/gugu/silverq |
-| `no_nested_types` | l1 | pre-commit, pre-push, merge | FAIL | 禁止在 `fn` 体内定义 `struct` / `enum` — ferrite/gugu/silverq |
-| `no_nested_worktree` | l1 | pre-commit, pre-push, merge | FAIL | 禁止 `.wt/` 下嵌套 worktree（历史事故：13 层嵌套 + 321G 产物）— ferrite/gugu/silverq |
-| `tests_check` | l1 | pre-commit, pre-push, merge | WARN | 测试代码划分与命名 — ferrite/gugu/silverq |
-| `copy_constants_check` | l1 | pre-push, merge | WARN | 文案常量：同一中文字面量复用 2+ 次要抽 const；慢检查不进 pre-commit（旧文档写三个钩子，以 yaml 为准）— ferrite/gugu/silverq |
-| `pr_labels` | l1 | merge | FAIL | PR 至少挂 1 个 type label（bug/feature/chore/refactor/tests/documentation/epic）；标题命中域关键词但缺域 label 时给建议（gh api 取数，取数失败输出「跳过、请人工核对」）— ferrite/gugu/silverq |
-| `pr_crg_review` | l1 | merge | FAIL | PR 讨论区需留结构层审查结论；记录提到问题/风险时须附修复/回应记录（Fix/采纳/驳回 + commit 或验证结论），只统计 PR 创建后的评论（CRG 二进制已退役，yaml 的标记词仍接受 `结构层`/`ocr` 等文案）— ferrite/gugu/silverq |
-| `code_doc` | l1 | merge | WARN | 公共 API 缺 `///` rust doc、模块头缺 `//!`（只查本次 PR diff 触碰的 `.rs`，不追责存量；旧文档写三个钩子，以 yaml 为准）— ferrite/gugu/silverq |
+| `structure_check` | l1 | pre-commit, pre-push, merge | FAIL | crate 分层与数据边界（面板禁直接 `use mock::`，禁旧嵌套路径）— ferrite/gugu/mono |
+| `shared_components_check` | l1 | pre-commit, pre-push, merge | FAIL | ≥2 个 page 共用的组件必须放共享 crate，page 内禁 `src/ui.rs` — ferrite/gugu/silverq/mono |
+| `no_nested_types` | l1 | pre-commit, pre-push, merge | FAIL | 禁止在 `fn` 体内定义 `struct` / `enum` — ferrite/gugu/silverq/mono/algorchemy |
+| `no_nested_worktree` | l1 | pre-commit, pre-push, merge | FAIL | 禁止 `.wt/` 下嵌套 worktree（历史事故：13 层嵌套 + 321G 产物）— ferrite/gugu/silverq/mono/algorchemy |
+| `tests_check` | l1 | pre-commit, pre-push, merge | WARN | 测试代码划分与命名 — ferrite/gugu/silverq/mono |
+| `copy_constants_check` | l1 | pre-push, merge | WARN | 文案常量：同一中文字面量复用 2+ 次要抽 const；慢检查不进 pre-commit（旧文档写三个钩子，以 yaml 为准）— ferrite/gugu/silverq/mono/algorchemy |
+| `pr_labels` | l1 | merge | FAIL | PR 至少挂 1 个 type label（bug/feature/chore/refactor/tests/documentation/epic）；标题命中域关键词但缺域 label 时给建议（gh api 取数，取数失败输出「跳过、请人工核对」）— ferrite/gugu/silverq/mono |
+| `pr_crg_review` | l1 | merge | FAIL | PR 讨论区需留结构层审查结论；记录提到问题/风险时须附修复/回应记录（Fix/采纳/驳回 + commit 或验证结论），只统计 PR 创建后的评论（CRG 二进制已退役，yaml 的标记词仍接受 `结构层`/`ocr` 等文案）— ferrite/gugu/silverq/mono |
+| `code_doc` | l1 | merge | WARN | 公共 API 缺 `///` rust doc、模块头缺 `//!`（只查本次 PR diff 触碰的 `.rs`，不追责存量；旧文档写三个钩子，以 yaml 为准）— ferrite/gugu/silverq/mono/algorchemy |
+| `notes_open_markers` | l1 | pre-commit, pre-push, merge | FAIL | 未完成批注不得进提交：diff 新增 `TODO(...)` / `ASK(...)` 即 FAIL（`TODO(#123)` 豁免，由 `rust_todo_needs_issue` 管）— ferrite/mono |
 | `diff_scope` | l1 | pre-commit, pre-push, merge | WARN | 本 diff 文件按 scope（src/proxy、src/dataplane…）归类，跨 ≥2 个 scope 的单改动给 WARN，确认拆分或在 PR 里写清耦合 — silverq |
 
-> 漂移备注：mono / silverq 的根层文档也列了 `structure_check` 等行，但其
-> `.githooks/spec/quality/` 下没有对应 yaml；mono 还列了 `pr_labels` / `pr_crg_review` /
-> `code_doc` 而无 yaml —— 上表来源列只写**实际有 yaml** 的仓。
+> 「生效仓」列按各仓 `.githooks/spec/quality/` 的实际 yaml 列出（2026-10-06 核对）。
+> 漂移备注：mono 的根层 11 个 checklist 已于 2026-10-06 归位进 `quality/`，文档与 yaml 一致；
+> silverq 的根层文档列了 `structure_check` 但其 `quality/` 无该 yaml；algorchemy 从未有根层
+> SPEC_OVERVIEW，却实际持有表中 4 条 —— 以 yaml 为准，不以旧文档为准。
 
 ### SLA 分层
 
