@@ -6,6 +6,7 @@
 use crate::proxy::meow::Registry;
 use crate::proxy::route::{Route, RouteCache, RouteOutcome};
 use crate::scheduler::node::Node;
+use meow_common::Metadata;
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -74,7 +75,7 @@ pub async fn run(
     pinned: Arc<AtomicBool>,
     china: Arc<crate::proxy::dns::ChinaSet>,
     routes: Arc<crate::proxy::route::RouteCache>,
-    /// 调度节点池：数据面把实际流量成败归因回各 tag 的健康度（HP）。
+    // 调度节点池：数据面把实际流量成败归因回各 tag 的健康度（HP）。
     pool: SharedPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(listener_addr).await?;
@@ -854,7 +855,7 @@ pub async fn race_relay<'a>(
     let mut sent: Vec<u8> = replay.to_vec();
     let mut cbuf = vec![0u8; 16 * 1024];
 
-    struct LiveSide<'x> {
+    struct LiveSide {
         route: Route,
         tag: Option<String>,
         pr: tokio::io::ReadHalf<Box<dyn meow_common::conn::ProxyConn>>,
@@ -871,7 +872,7 @@ pub async fn race_relay<'a>(
         Dial(usize, Option<Box<dyn meow_common::conn::ProxyConn>>),
     }
 
-    let mut live: Vec<LiveSide<'_>> = Vec::new();
+    let mut live: Vec<LiveSide> = Vec::new();
     let mut wave_idx = 0;
     // None = 已 resolve 的失败槽（保留索引到本轮事件处理完，再统一清走）
     let mut pending: Vec<(Route, Option<String>, Option<SideFut<'a>>)> = Vec::new();
@@ -1416,11 +1417,6 @@ fn route_cache_eligible(host: &str, pinned: bool, china_hit: bool) -> bool {
     !pinned && !is_local_target(host) && !china_hit && host.parse::<std::net::IpAddr>().is_err()
 }
 
-/// 处理 UDP ASSOCIATE：绑中继 socket → 回其地址 → 跑中继循环直到 TCP 断开。
-///
-/// RFC 1928 要求 TCP 控制连接是 association 的生命周期锚点：TCP 一断，
-/// 服务端必须回收该 association 的所有 UDP 状态。这里用 oneshot 通知中继循环退出。
-
 /// 按 selection 顺序取前 `max_attempts` 个候选 adapter，返回 (tag, adapter) 对。
 /// tag 是实际流量成败的 HP 归因落点；缺失 tag（配置漂移/节点被摘）跳过。
 ///
@@ -1438,6 +1434,10 @@ pub fn pick_candidates(
         .collect()
 }
 
+/// 处理 UDP ASSOCIATE：绑中继 socket → 回其地址 → 跑中继循环直到 TCP 断开。
+///
+/// RFC 1928 要求 TCP 控制连接是 association 的生命周期锚点：TCP 一断，
+/// 服务端必须回收该 association 的所有 UDP 状态。这里用 oneshot 通知中继循环退出。
 async fn handle_udp_associate(
     mut socket: TcpStream,
     registry: &Registry,
@@ -1501,7 +1501,7 @@ async fn handle_udp_associate(
 mod tests {
     use super::{
         is_local_target, race_relay, read_socks5_target, replay_race_safe, route_cache_eligible,
-        RaceOutcome, SharedPool, SideFut, SideSpec,
+        RaceOutcome, SharedPool, SideSpec,
     };
     use crate::proxy::route::{Route, RouteCache};
     use std::sync::Arc;

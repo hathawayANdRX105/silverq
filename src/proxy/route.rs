@@ -179,6 +179,7 @@ impl RouteCache {
                         e.direct_fails = 0;
                     } else {
                         e.slow = e.last_fr > RACE_THRESHOLD; // 旧路线仍慢，限频后再比
+                        e.recheck_after = now + SLOW_RECHECK_INTERVAL;
                     }
                 } else {
                     e.last_fr = fr;
