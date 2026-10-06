@@ -218,7 +218,7 @@ async fn handle_one(
         Host,
         Ip(std::net::IpAddr),
     }
-    let mut direct: DirectDial = if ctx.pinned.load(Ordering::Relaxed) {
+    let direct: DirectDial = if ctx.pinned.load(Ordering::Relaxed) {
         // 钉住语义优先于直连判定：钉住 = 所有流量只走该节点、fail 就 fail，
         // 直连旁路会破坏该语义（e2e pinned_* 回归锁定）。
         DirectDial::None
@@ -423,17 +423,17 @@ async fn handle_one(
                 let wave2: Vec<SideSpec<'_>> = candidates[1..]
                     .iter()
                     .map(|(tag, adapter)| {
-                        let t = tag.clone();
+                        let log_tag = t.clone();
                         let side: SideFut<'_> = Box::pin(async move {
                             match tokio::time::timeout(dial_timeout, adapter.dial_tcp(md)).await {
                                 Ok(Ok(c)) => Some(c),
                                 Ok(Err(e)) => {
-                                    tracing::info!(tag = t.as_str(), "dial failed: {e}");
+                                    tracing::info!(tag = log_tag.as_str(), "dial failed: {e}");
                                     None
                                 }
                                 Err(_) => {
                                     tracing::info!(
-                                        tag = t.as_str(),
+                                        tag = log_tag.as_str(),
                                         "dial 超时 {dial_timeout:?}，竞速侧弃用"
                                     );
                                     None
