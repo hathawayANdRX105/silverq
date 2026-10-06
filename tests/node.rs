@@ -4,7 +4,9 @@
 //! - 重尾分布下线性 EWMA 会给出不存在的中间值（对数域才对）
 //! - 半死节点必须被乘性压下去（加性罚分压不住）
 //! - 未测带宽的节点不奖不罚（乐观初值，探索）
-use silverq::scheduler::node::{Node, DEFAULT_BW_PENALTY_PER_EFOLD_MS, DEFAULT_FAILURE_PENALTY_MS};
+use silverq::scheduler::node::{
+    Node, DEFAULT_BW_PENALTY_PER_EFOLD_MS, DEFAULT_FAILURE_PENALTY_MS, HP_INITIAL, HP_MAX,
+};
 
 /// 稳定性窗口里塞入指定数量的成败结果。
 fn outcomes(n: &mut Node, oks: &[bool]) {
@@ -220,4 +222,157 @@ fn restore_bw_rejects_invalid_values() {
     assert!(n.bw_bps().is_none(), "bw_samples=0 必须被拒");
     n.restore_bw(12.0, 3);
     assert!(n.bw_bps().is_some(), "合法值必须接受");
+}
+
+// ── 健康度（HP）：只有下行语义 ─────────────────────────────────────────────
+
+/// HP 在 0..=100 饱和：探活/实际流量奖惩再多也不会溢出或下穿。
+#[test]
+fn hp_saturates_at_bounds() {
+    let mut n = Node::new("s", "1.1.1.1", 443);
+    for _ in 0..200 {
+        n.note_probe_success();
+    }
+    assert_eq!(n.hp, HP_MAX, "成功加分必须封顶 100");
+    for _ in 0..500 {
+        n.note_probe_failure();
+    }
+    assert_eq!(n.hp, 0, "失败扣分必须托底 0");
+}
+
+/// 评分里 HP 只做下行：50 及以上罚分恒为 0（再健康也不奖），
+/// 50 以下按跌幅线性罚，罚分恰好不超过一个 `timeout_penalty`
+/// （hp=0 时等于一个罚分）——保守策略：健康度顶多抵消一整次超时罚分。
+#[test]
+fn hp_penalty_is_downside_only_and_bounded() {
+    let penalty = DEFAULT_FAILURE_PENALTY_MS;
+
+    // 满血（100）与中性（50）评分必须完全相同：50 以上零贡献
+    let mut healthy = Node::new("h", "1.1.1.1", 443);
+    healthy.update(100.0);
+    for _ in 0..100 {
+        healthy.note_probe_success();
+    }
+    let neutral = Node::new("m", "1.1.1.1", 443);
+    let mut neutral = neutral;
+    neutral.update(100.0);
+    assert_eq!(
+        healthy.score_with(penalty, 0.0),
+        neutral.score_with(penalty, 0.0),
+        "hp >= 50 不得产生奖励（评分必须与 50 基线相同）"
+    );
+
+    // hp=0：罚分恰好一个 timeout_penalty
+    let mut dead = Node::new("d", "1.1.1.1", 443);
+    dead.update(100.0);
+    for _ in 0..50 {
+        dead.note_probe_failure(); // 50 - 250 → 0
+    }
+    assert_eq!(dead.hp, 0);
+    let delta = dead.score_with(penalty, 0.0) - neutral.score_with(penalty, 0.0);
+    assert!(
+        (delta - penalty).abs() < 1e-9,
+        "hp=0 的下行罚分必须恰为一个 timeout_penalty，实际 {delta}"
+    );
+
+    // hp=25：半跌幅 → 半个 timeout_penalty（单调有界）
+    let mut mid = Node::new("i", "1.1.1.1", 443);
+    mid.update(100.0);
+    for _ in 0..5 {
+        mid.note_probe_failure(); // 50 - 25 = 25
+    }
+    assert_eq!(mid.hp, 25);
+    let delta_mid = mid.score_with(penalty, 0.0) - neutral.score_with(penalty, 0.0);
+    assert!(
+        (delta_mid - penalty / 2.0).abs() < 1e-9,
+        "hp=25 应罚半个 timeout_penalty，实际 {delta_mid}"
+    );
+}
+
+/// 实际流量 dial 失败（超时/报错）-15 并打上瞬态失败时刻（冷却排序依据），
+/// 成功 +2 且清掉失败时刻与失败计数。
+#[test]
+fn runtime_hp_outcomes_reset_transient_state() {
+    let mut n = Node::new("r", "1.1.1.1", 443);
+    n.penalize(); // 先攒一次调度侧失败
+    assert_eq!(n.consecutive_failures, 1);
+
+    n.note_proxy_failure();
+    assert_eq!(n.hp, HP_INITIAL - 15);
+    assert!(n.last_runtime_failure.is_some(), "失败必须落瞬态时刻");
+
+    n.note_proxy_success();
+    assert_eq!(n.hp, HP_INITIAL - 15 + 2);
+    assert!(n.last_runtime_failure.is_none(), "成功必须清瞬态时刻");
+    assert_eq!(n.consecutive_failures, 0, "实际流量成功必须清失败计数");
+}
+
+/// 存档恢复：越界 HP 钳到 0..=[`HP_MAX`]（手改/被写入的脏值不污染排序）。
+#[test]
+fn restore_hp_clamps_out_of_range() {
+    let mut n = Node::new("c", "1.1.1.1", 443);
+    n.restore_hp(255);
+    assert_eq!(n.hp, HP_MAX);
+    n.restore_hp(37);
+    assert_eq!(n.hp, 37, "合法值原样接受");
+}
+
+/// reload 接管分数时 HP 必须一起带走（换库不换健康）：节点库 reload
+/// 后新 Node 不能把刚被实际流量打下来的节点顶回中性位置。
+#[test]
+fn adopt_score_carries_hp() {
+    let mut old = Node::new("x", "1.1.1.1", 443);
+    old.update(100.0);
+    for _ in 0..5 {
+        old.note_proxy_failure(); // 50 → 25
+    }
+    let mut fresh = Node::new("x", "1.1.1.1", 443);
+    fresh.adopt_score(&old);
+    assert_eq!(fresh.hp, 25, "adopt 必须带走健康度");
+}
+
+// ── 先验存活证据（ever_responded）────────────────────────────────────────
+
+/// 实际流量首字节成功（`note_proxy_success`）是唯一证据来源；探测成功
+/// （`note_probe_success`）不算——探测成功会写 `samples`，本来就有独立的
+/// 存活语义，两种证据不能混淆。
+#[test]
+fn proxy_success_marks_evidence_probe_does_not() {
+    let mut n = Node::new("t", "1.2.3.4", 443);
+    assert!(!n.ever_responded, "新节点无先验证据");
+    n.note_probe_success();
+    assert!(!n.ever_responded, "探测成功不是实际流量证据");
+    n.note_proxy_success();
+    assert!(n.ever_responded, "实际流量首字节即先验证据");
+}
+
+/// reload 接管时证据必须随分数迁移（换库不丢证据）：曾拿过实际流量
+/// 响应的节点，reload 换出新 Node 后仍保有 `ever_responded`，
+/// `retire_stale` 才不会再把它当无证据僵尸立即摘除。
+#[test]
+fn adopt_score_carries_evidence() {
+    let mut old = Node::new("x", "1.1.1.1", 443);
+    old.note_proxy_success();
+    assert!(old.ever_responded);
+    let mut fresh = Node::new("x", "1.1.1.1", 443);
+    fresh.adopt_score(&old);
+    assert!(fresh.ever_responded, "adopt 必须带走证据");
+
+    let stale = Node::new("z", "2.2.2.2", 443);
+    let mut fresh_z = Node::new("z", "2.2.2.2", 443);
+    fresh_z.adopt_score(&stale);
+    assert!(!fresh_z.ever_responded, "从未拿过流量的节点接管后仍无证据");
+}
+
+/// `hp_extra` 恢复只写 HP 与证据，不写任何探测样本/EWMA——
+/// 不能伪造 `samples`/`ewma` 把「没测过」伪装成「测通过」。
+#[test]
+fn restore_hp_extra_never_fakes_probe_samples() {
+    let mut n = Node::new("g", "3.3.3.3", 443);
+    n.restore_hp_extra(22, true);
+    assert_eq!(n.hp, 22);
+    assert!(n.ever_responded);
+    assert_eq!(n.samples, 0, "不得伪造探测样本数");
+    assert!(n.ewma.is_infinite(), "不得伪造 EWMA");
+    assert!(n.bw_bps().is_none(), "不得伪造带宽分数");
 }

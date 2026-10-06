@@ -5,8 +5,8 @@
 //!    先到者胜**（#23），赢家路线写回缓存；双败后并行拨第 2、3 名候选，
 //!    全败才诚实失败。用户路径上不存在失败等待。
 //! 2. 命中 → 按缓存里的路线走，谁上次成功听谁的
-//! 3. 走代理的首响应超过 [`RACE_THRESHOLD`] → 标记 slow → 下次并行竞速
-//!    （判胜同样是首字节）
+//! 3. 当前路线首响应超过 [`RACE_THRESHOLD`] → 标记 slow，最多每 30 秒重新竞速一次，
+//!    避免上游持续慢时每个连接都重复双探
 //! 4. 换路线走滞回：新路线要快过旧路线一半才接管；旧路线从没测通过
 //!    （无耗时基线）时不享受滞回，成功的路线直接接管
 //! 5. 缓存 TTL [`ROUTE_TTL`]，到期待重新观察
@@ -21,8 +21,10 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// 代理首响应超过该阈值 → 标记 slow，下次访问触发竞速。
+/// 首响应超过该阈值 → 标记 slow，在限频后重新竞速。
 pub const RACE_THRESHOLD: Duration = Duration::from_secs(2);
+/// 持续慢的路线最多每 30 秒重新比一次，失败则立即重试其他路线。
+const SLOW_RECHECK_INTERVAL: Duration = Duration::from_secs(30);
 /// 路线缓存 TTL。
 ///
 /// 3 分钟：命中即续期，活跃域名不过期；只管闲置域名多久后重新进入
@@ -69,6 +71,8 @@ struct Entry {
     last_fr: Duration,
     /// 当前路线慢 → 下次访问触发竞速
     slow: bool,
+    /// 下次允许慢路线重新竞速的时刻；失败不走限频。
+    recheck_after: Instant,
     direct_fails: u32,
     until: Instant,
 }
@@ -87,26 +91,32 @@ impl RouteCache {
 
     /// 路线决策：命中按缓存走，未命中/过期并行竞速首字节定胜负（#23）。
     ///
-    /// 未命中/过期返回 [`Decision::Race`] —— 调用方同时发起直连与代理
-    /// 候选，上游首字节先到者胜，赢家路线被 [`RouteCache::record`] 写回
-    /// 缓存，下次直接照走复用终点。
+    /// 未命中/过期返回 [`Decision::Race`]；持续慢的路线也会重新竞速，
+    /// 但两次重试至少间隔 30 秒，其他连接沿用最后能工作的路线。
+    /// 失败不等冷却，下次立刻比另一条路线。
     pub fn decide(&self, host: &str) -> Decision {
+        let now = Instant::now();
         let mut m = self.entries.lock();
         let Some(e) = m.get_mut(host) else {
             return Decision::Race; // 无缓存：并行竞速，首字节定胜负
         };
-        if Instant::now() >= e.until {
+        if now >= e.until {
             m.remove(host);
             return Decision::Race; // 过期回未命中语义：同样进竞速
         }
-        match e.route {
-            Route::Direct if e.slow => Decision::Race, // 直连路线也慢 → 竞速换路线
-            Route::Direct => Decision::Direct,
-            Route::Proxy if e.slow => Decision::Race,
-            Route::Proxy => Decision::Proxy,
+        if e.slow && now >= e.recheck_after {
+            e.recheck_after = now + SLOW_RECHECK_INTERVAL;
+            Decision::Race
+        } else {
+            match e.route {
+                Route::Direct => Decision::Direct,
+                Route::Proxy => Decision::Proxy,
+            }
         }
     }
 
+    /// 记录 `host` 经过 `route` 的实际首响或失败。
+    /// 失败会废掉该路线的旧速度基线，让成功的兜底路线即时接管；不会返回错误。
     pub fn record(&self, host: &str, route: Route, outcome: RouteOutcome) {
         let mut m = self.entries.lock();
         let now = Instant::now();
@@ -123,11 +133,17 @@ impl RouteCache {
             last_fr: Duration::ZERO,
             slow: false,
             direct_fails: 0,
+            recheck_after: now,
             until: now + ROUTE_TTL,
         });
 
         match outcome {
             RouteOutcome::Failed => {
+                if e.route == route {
+                    // 刚失败的路线没有可信的首响基线，兜底成功不受旧成绩滞回阻拦。
+                    e.last_fr = Duration::ZERO;
+                }
+                e.recheck_after = now;
                 if route == Route::Direct {
                     e.direct_fails += 1;
                     if e.direct_fails >= DIRECT_FAILS_TO_SWITCH {
@@ -159,10 +175,10 @@ impl RouteCache {
                     if e.last_fr.is_zero() || fr * 2 < e.last_fr {
                         e.route = route;
                         e.last_fr = fr;
-                        e.slow = false;
+                        e.slow = fr > RACE_THRESHOLD;
                         e.direct_fails = 0;
                     } else {
-                        e.slow = false; // 没快到值得切：保留旧路线
+                        e.slow = e.last_fr > RACE_THRESHOLD; // 旧路线仍慢，限频后再比
                     }
                 } else {
                     e.last_fr = fr;

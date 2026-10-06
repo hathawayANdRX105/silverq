@@ -76,10 +76,31 @@ pub struct Node {
     /// `consecutive_failures` 一次成功就清零，掩盖了「两次挂一次」的间歇性劣化；
     /// 这个窗口看长期成功率，补上这个盲区。
     outcomes: VecDeque<bool>,
+    /// 节点健康度 HP（0..=100，初始 [`HP_INITIAL`]）：探测成功 +1 / 失败 -5，
+    /// 实际流量首字节成功 +2 / 实际流量 dial 失败（Err/超时）-15（饱和钳制；
+    /// 首字节缺失是目标相关因素，不在此全局扣 HP，由 per-host 路线缓存记账）。
+    /// 随分数存档持久化；排序里只作为 50 以下的下行加性罚分（最大一个
+    /// `timeout_penalty`），50 以上不奖励。
+    pub hp: u8,
+    /// 最近一次实际流量 dial 失败（超时/报错）的时刻。不持久化——数据面
+    /// 用它做下一连接的候选重排（刚失败者后移），成功即清除。
+    pub last_runtime_failure: Option<Instant>,
+    /// 该节点拿过实际流量响应（代理首字节到手）的先验存活证据。
+    /// `samples` 只由探测成功累加，「被真实流量命中过但从未被探测」
+    /// （`samples==0`）的节点在 `retire_stale` 里同样按有证据处理
+    /// （延长保活而非立即摘除），并随 HP 一起进存档 `hp_extra`。
+    /// 只有 `note_proxy_success` 置位（探测成功不算），持久化、随
+    /// `adopt_score` 迁移（换库不丢证据）。
+    pub ever_responded: bool,
 }
 
 /// 每节点保留的延迟历史点数。
 pub const HISTORY_CAP: usize = 48;
+/// 节点健康度初始值：保守中点——新节点/重启节点不奖不罚，
+/// 评分只看 50 以下的下行惩罚。
+pub const HP_INITIAL: u8 = 50;
+/// 节点健康度上限（0..=100 饱和）。
+pub const HP_MAX: u8 = 100;
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -105,6 +126,9 @@ impl Node {
             last_measured: None,
             recent: VecDeque::with_capacity(EWMA_WINDOW),
             history: VecDeque::with_capacity(HISTORY_CAP),
+            hp: HP_INITIAL,
+            last_runtime_failure: None,
+            ever_responded: false,
         }
     }
 
@@ -185,6 +209,42 @@ impl Node {
         self.last_measured = Some(Instant::now());
     }
 
+    /// 记一次探测成功：健康度 +1（饱和到 100，见 [`HP_MAX`]）。
+    /// 探测 = 调度侧延迟/带宽测速，成功即节点存活证据。
+    pub fn note_probe_success(&mut self) {
+        self.hp = self.hp.saturating_add(1).min(HP_MAX);
+    }
+
+    /// 记一次探测失败：健康度 -5（饱和到 0）。
+    /// 失败的幅度比成功大：保守策略，半死节点的代价高于活节点的收益。
+    pub fn note_probe_failure(&mut self) {
+        self.hp = self.hp.saturating_sub(5);
+    }
+
+    /// 记一次实际流量成功（上游首字节到手）：健康度 +2（饱和到 100），
+    /// 并清掉失败计数与 `failing_since`——真实握手成功即存活证据，
+    /// 与探测成功同权，防止 `retire_stale` 摘掉活节点。
+    /// 同时置位 `ever_responded`：先验存活证据的唯一来源（「被流量
+    /// 命中过但从未被探测」的 `samples==0` 节点凭它获得延长保活，
+    /// 并随 HP 进存档 `hp_extra`）；探测成功（`note_probe_success`）
+    /// 不算，不混淆两种证据。
+    /// 50 以上不再多奖励（评分只认 50 以下的下行罚分）。
+    pub fn note_proxy_success(&mut self) {
+        self.hp = self.hp.saturating_add(2).min(HP_MAX);
+        self.ever_responded = true;
+        self.consecutive_failures = 0;
+        self.failing_since = None;
+        self.last_runtime_failure = None;
+    }
+
+    /// 记一次实际流量失败（dial 超时/报错）：健康度 -15（饱和到 0）并记下
+    /// 时刻——数据面用它把该节点移出下一连接的首试位置（有界冷却，不 P2C）。
+    /// 首字节未到手不再走这里（目标相关，走 per-host 路线缓存失败记账）。
+    pub fn note_proxy_failure(&mut self) {
+        self.hp = self.hp.saturating_sub(15);
+        self.last_runtime_failure = Some(Instant::now());
+    }
+
     /// 记一次探测成败到稳定性窗口。成功失败都记：
     /// 只记失败会把「两次挂一次」的间歇性劣化算成完全健康。
     pub fn record_outcome(&mut self, ok: bool) {
@@ -209,11 +269,18 @@ impl Node {
     /// 复用延迟侧的自适应 alpha（变异系数 + 方向因子）：吞吐波动同样是
     /// 「该快追还是该稳」的问题，无需另造一套。输入取对数后 EWMA 的语义
     /// 从算术平均变成几何平均，对重尾分布正确。
+    ///
+    /// 有效样本 = 节点存活的证据：清掉 `consecutive_failures` / `failing_since`
+    /// （同延迟侧 `update` 的语义）——否则带宽成功的路径在 `apply_batch` 里
+    /// 被误计失败后，`retire_stale` 会凭旧 `failing_since` 把刚证明存活的
+    /// 节点摘掉（根因修复点）。
     pub fn update_bw(&mut self, bps: f64) {
-        // bps <= 0 或 NaN 对数域无定义，静默丢弃
+        // bps <= 0 或 NaN 对数域无定义，静默丢弃（保留既有失败计数）
         if !bps.is_finite() || bps <= 0.0 {
             return;
         }
+        self.consecutive_failures = 0;
+        self.failing_since = None;
         let x = bps.ln();
         if self.bw_samples == 0 {
             self.bw_log = x;
@@ -281,7 +348,7 @@ impl Node {
 
     /// 复合排序分数（越小越好）：
     /// ```text
-    /// score = (延迟 + 连续失败罚分) / 稳定性  +  带宽罚分
+    /// score = (延迟 + 连续失败罚分) / 稳定性  +  带宽罚分  +  健康度下行罚分
     /// ```
     /// - **稳定性做分母（乘性）**：半死节点的有效代价按 1/成功率 放大
     ///   （50% 成功率 → 分数翻倍）。加性罚分做不到成比例：
@@ -291,6 +358,9 @@ impl Node {
     ///   淹没另一方；归一化为「每 e 倍吞吐差 = N ms 延迟」后量纲统一。
     /// - **未测过带宽的节点带宽项为 0**（不奖不罚）：首轮靠延迟+稳定性
     ///   排序，下一轮带宽数据进来再修正——乐观初值，SW-UCB 的探索精神。
+    /// - **健康度只做下行**（见 [`Node::hp_penalty`]）：50 以下按跌幅
+    ///   加性罚分，封顶一个 `timeout_penalty`；50 以上零贡献——保守策略，
+    ///   节点健康不产生「比基线更快」的奖励。
     ///
     /// 同 `score()`，罚分幅度可指定（配置里的 `timeout_penalty` 与 `bw_penalty_per_efold_ms`）。
     pub fn score_with(&self, penalty_ms: f64, bw_penalty_per_efold_ms: f64) -> f64 {
@@ -302,6 +372,7 @@ impl Node {
         // 稳定性为 0（窗口内全失败）时除零 → 地板兜住，保证分数有限可排序。
         let stab = self.stability().max(0.05);
         let mut score = base / stab;
+        score += self.hp_penalty(penalty_ms);
         if self.bw_samples > 0 && self.bw_log.is_finite() {
             // 对数域落差：比 BW_REF_BPS 慢多少个 e 倍，每个 e 倍罚
             // bw_penalty_per_efold_ms 毫秒。线性差在重尾分布下毫无意义
@@ -311,6 +382,17 @@ impl Node {
             score += gap * bw_penalty_per_efold_ms;
         }
         score
+    }
+
+    /// 健康度下行罚分项：`hp < 50` 时 = (50 - hp) / 50 × 一个
+    /// `timeout_penalty`（hp=0 时恰好一个罚分，单调递减到 0）；
+    /// `hp >= 50` 恒为 0——50 以上没有奖励语义。
+    pub fn hp_penalty(&self, penalty_ms: f64) -> f64 {
+        if self.hp >= HP_INITIAL {
+            0.0
+        } else {
+            (HP_INITIAL - self.hp) as f64 / HP_INITIAL as f64 * penalty_ms
+        }
     }
 
     /// 从存档恢复分数。`recent` 窗口不恢复（只影响自适应 alpha 的头几次取值，
@@ -329,11 +411,28 @@ impl Node {
         }
     }
 
+    /// 从存档恢复健康度。越界值钳到 0..=[`HP_MAX`]（防御旧/被改写的存档）。
+    pub fn restore_hp(&mut self, hp: u8) {
+        self.hp = hp.min(HP_MAX);
+    }
+
+    /// 从存档的 `hp_extra`（无探测样本节点专用表）恢复健康度与先验存活证据。
+    /// 与主 `Score` 恢复相互独立：仅当 tag 匹配且存档整体新鲜时应用
+    ///（load 路径对整份存档有 6h 年龄上限）；HP 越界钳到 0..=[`HP_MAX`]
+    ///（同 `restore_hp`，防御被改写的存档）。不写任何假的探测样本/EWMA。
+    pub fn restore_hp_extra(&mut self, hp: u8, ever_responded: bool) {
+        self.hp = hp.min(HP_MAX);
+        self.ever_responded = ever_responded;
+    }
+
     /// 从另一个 Node 接管 EWMA 状态（配置热加载时保留分数）。
     ///
     /// `ewma` 必须接管：`select_top` 现在按 `ewma.is_finite()` 过滤节点，
     /// reload 后新 Node 全是 INFINITY —— 不接管 = 整池被滤空 = selection
     /// 清空 = 数据面无候选可拨（reload 一度把代理打成纯直连的回归）。
+    ///
+    /// 健康度与先验存活证据（`ever_responded`）随接管带走（reload 换库
+    /// 不换健康、不丢证据）；`last_runtime_failure` 是数据面瞬态时刻，不随接管迁移。
     pub fn adopt_score(&mut self, other: &Node) {
         self.ewma = other.ewma;
         self.consecutive_failures = other.consecutive_failures;
@@ -344,5 +443,7 @@ impl Node {
         self.bw_samples = other.bw_samples;
         self.bw_recent = other.bw_recent.clone();
         self.outcomes = other.outcomes.clone();
+        self.hp = other.hp;
+        self.ever_responded = other.ever_responded;
     }
 }

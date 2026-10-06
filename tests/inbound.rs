@@ -77,21 +77,14 @@ fn pick_candidates_truncates_to_fallback_limit() {
         "missing".into(),
     ];
     // 上限 2：只取前两个，且不存在的 tag 被跳过后**不占名额**。
-    // adapter 的 name() 是协议内置名（DIRECT 之类），所以按位置对应
-    // order 里的 tag 来断言，而不是比名字。
+    // 返回 (tag, adapter)：tag 即 order 里的节点名（HP 归因落点），
+    // adapter 的 name() 是协议内置名（DIRECT 之类），按 tag 断言。
     let got = pick_candidates(&order, &map, 2);
     assert_eq!(got.len(), 2);
-    assert_eq!(got[0].name(), map["a"].name());
-    assert_eq!(got[1].name(), map["b"].name());
-
-    // 上限 1：只有队首
-    assert_eq!(pick_candidates(&order, &map, 1).len(), 1);
-
-    // 上限大：全部存在节点（missing 跳过）
-    assert_eq!(pick_candidates(&order, &map, 10).len(), 4);
-
-    // 上限 0：至少保底 1 个（max(1)），完全不放行会让请求必死
-    assert_eq!(pick_candidates(&order, &map, 0).len(), 1);
+    assert_eq!(got[0].0, "a");
+    assert_eq!(got[0].1.name(), map["a"].name());
+    assert_eq!(got[1].0, "b");
+    assert_eq!(got[1].1.name(), map["b"].name());
 
     // 上限 1：只有队首
     assert_eq!(pick_candidates(&order, &map, 1).len(), 1);
@@ -288,5 +281,240 @@ async fn http_relative_uri_rejected_with_400() {
     assert!(
         String::from_utf8_lossy(&buf[..n]).contains("400"),
         "应回 400 而不是 405（405 会让客户端误以为方法不允许而重试）"
+    );
+}
+
+// ── 首字节早期记账 + 实际流量 HP 归因（loopback 确定性场景）─────────────────
+
+use silverq::proxy::route::{Decision, Route, RouteCache};
+use silverq::scheduler::node::{Node, HP_INITIAL};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// 有界等待 `cond` 为真（防 CI 挂死：不成立则超时失败并给出当时值）。
+async fn wait_for(cond: impl Fn() -> bool, what: &str) {
+    for _ in 0..200 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("等待超时：{what}");
+}
+
+/// 早期路线与 HP 记账：relay 在代理首字节写回客户端时更新缓存与健康度，
+/// 长连接尚未关闭时，同域名下一连接已经有可复用的路线。
+#[tokio::test]
+async fn relay_records_route_and_hp_on_first_byte_while_connection_open() {
+    // 上游（relay 的 conn 端）：accept 后立即回首字节，然后挂住（长会话）
+    let upstream_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_l.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let (up, _) = upstream_l.accept().await.unwrap();
+        let mut up = up;
+        up.write_all(b"OK").await.unwrap();
+        stop_rx.await.ok();
+        drop(up);
+    });
+
+    // 客户端侧：pair() 两端做 relay 的 socket（quiet 端保持打开）
+    let (client, quiet_peer) = pair().await;
+    let conn: Box<dyn meow_common::conn::ProxyConn> =
+        Box::new(TcpStream::connect(upstream_addr).await.unwrap());
+
+    let routes = Arc::new(RouteCache::new());
+    let pool: SharedPool = Arc::new(tokio::sync::RwLock::new(vec![Node::new(
+        "fast",
+        "127.0.0.1",
+        443,
+    )]));
+    let relay_routes = Arc::clone(&routes);
+    let relay_pool = Arc::clone(&pool);
+    let host = "cache-early-recorder.test";
+    let handle = tokio::spawn(async move {
+        let recorder = Some(RouteRecorder::new(&relay_routes, host, Route::Proxy));
+        relay(
+            client,
+            conn,
+            Duration::from_secs(5),
+            vec![],
+            Instant::now(),
+            recorder,
+            Some((&relay_pool, "fast")),
+        )
+        .await
+    });
+
+    // 上游已回首字节 → 缓存条目此刻就该存在（连接仍开着、relay 未收尾）
+    wait_for(
+        || matches!(routes.decide(host), Decision::Proxy),
+        "代理路线应在首字节落地时出现",
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if pool.read().await[0].hp == HP_INITIAL + 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("代理响应时应给节点加 HP，不等长连接关闭");
+    assert!(!handle.is_done(), "连接仍开启时路线与 HP 应已入账");
+
+    // 收尾：停掉上游、关掉客户端对端，relay 任务收敛（结果形态不限：
+    // 客户端早退的拆隧语义下 Neutral/晚死 Stream 都合法，本测试只关心
+    // 「早期已记账」）
+    stop_tx.send(()).ok();
+    drop(quiet_peer);
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+/// 竞速版早期记账：代理侧赢得首字节时，路线缓存条目与 HP 加分都发生在
+/// **首字节落地当下**（连接仍开着、双向拷贝没收尾）。旧实现下 race_relay
+/// 只在 copy 结束后才返回 Route——长会话期间缓存没有条目，后续每个
+/// 连接都会重新进竞速（反复烧双探预算）。
+#[tokio::test]
+async fn race_records_route_and_hp_on_first_byte_while_connection_open() {
+    // 直连侧：accept 即持有、永不出数据（silent winner-loser）
+    let silent_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent_addr = silent_l.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (s, _) = silent_l.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        drop(s);
+    });
+    // 代理侧（"fast"）：100ms 后拨通，连上立刻回首字节，然后挂住
+    let win_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let win_addr = win_l.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut s, _) = win_l.accept().await.unwrap();
+        s.write_all(b"WIN").await.unwrap();
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    });
+
+    let dial = |addr: std::net::SocketAddr, delay: Duration| async move {
+        tokio::time::sleep(delay).await;
+        match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr)).await {
+            Ok(Ok(s)) => Some(Box::new(s) as Box<dyn meow_common::conn::ProxyConn>),
+            _ => None,
+        }
+    };
+    let waves: Vec<Vec<SideSpec<'static>>> = vec![vec![
+        SideSpec {
+            route: Route::Direct,
+            tag: None,
+            fut: Box::pin(dial(silent_addr, Duration::ZERO)),
+        },
+        SideSpec {
+            route: Route::Proxy,
+            tag: Some("fast".into()),
+            fut: Box::pin(dial(win_addr, Duration::from_millis(100))),
+        },
+    ]];
+
+    // race 的 socket 侧（客户端视角）
+    let (client, sock) = pair().await;
+    let routes = Arc::new(RouteCache::new());
+    let pool: SharedPool = Arc::new(tokio::sync::RwLock::new(vec![Node::new(
+        "fast", "10.9.8.7", 1080,
+    )]));
+    let race_routes = Arc::clone(&routes);
+    let race_pool = Arc::clone(&pool);
+    let host = "race-early-recorder.test";
+    let handle = tokio::spawn(async move {
+        race_relay(
+            sock,
+            &[],
+            Duration::from_secs(5),
+            waves,
+            false,
+            Instant::now(),
+            &race_routes,
+            host,
+            &race_pool,
+        )
+        .await
+    });
+
+    // 胜者首字节到达客户端
+    let mut buf = [0u8; 8];
+    let n = tokio::time::timeout(Duration::from_secs(2), client.read(&mut buf))
+        .await
+        .expect("应在 2s 内拿到胜者首字节")
+        .unwrap();
+    assert_eq!(&buf[..n], b"WIN");
+
+    // 此刻 race 任务仍在双向拷贝（长会话）：路线条目与 HP 都该已落地
+    assert!(
+        matches!(routes.decide(host), Decision::Proxy),
+        "赢的代理路线应在首字节落地时入账（连接仍开着），而不是等收尾"
+    );
+    {
+        let guard = pool.read().await;
+        assert_eq!(
+            guard[0].hp,
+            HP_INITIAL + 2,
+            "代理侧胜出应在首字节落地时即 +HP"
+        );
+    }
+    assert!(!handle.is_done(), "记账发生时竞速必须未收尾（连接还开着）");
+
+    // 收尾：关掉客户端 → 竞速收敛（客户端早退下 Won 或晚死 Stream 都合法）
+    drop(client);
+    match tokio::time::timeout(Duration::from_secs(5), handle).await {
+        Ok(Ok(RaceOutcome::Won)) => {}
+        Ok(Ok(RaceOutcome::DiedAfterWin(_))) => {}
+        other => panic!("收尾应正常完成，实际 {other:?}"),
+    }
+}
+
+/// 实际流量 HP 记账（纯函数，确定性）：成功 +2 / 失败 -15 / 未知 tag 不动；
+/// 冷却排序：刚失败的节点后置，冷却窗外恢复 EWMA 顺序。
+#[test]
+fn runtime_hp_outcomes_and_reorder() {
+    let mut nodes = vec![
+        Node::new("fast", "1.1.1.1", 1080),
+        Node::new("backup", "2.2.2.2", 1080),
+    ];
+
+    // 成功：+2（50 → 52），且清瞬态失败时刻
+    apply_runtime_outcome(&mut nodes, "fast", true);
+    assert_eq!(nodes[0].hp, HP_INITIAL + 2);
+    assert!(nodes[0].last_runtime_failure.is_none());
+
+    // 失败：-15（52 → 37），并打上瞬态失败时刻（冷却排序的依据）
+    apply_runtime_outcome(&mut nodes, "fast", false);
+    assert_eq!(nodes[0].hp, HP_INITIAL + 2 - 15);
+    assert!(nodes[0].last_runtime_failure.is_some());
+
+    // 未知 tag：静默跳过（节点刚被摘除等）
+    let before = nodes[1].hp;
+    apply_runtime_outcome(&mut nodes, "gone", false);
+    assert_eq!(nodes[1].hp, before);
+
+    // 饱和下界 0
+    let mut one = vec![Node::new("x", "3.3.3.3", 1080)];
+    for _ in 0..5 {
+        apply_runtime_outcome(&mut one, "x", false);
+    }
+    assert_eq!(one[0].hp, 0);
+
+    // 冷却排序：fast 刚失败（上面的时刻），30s 窗内 → 后置
+    let order = vec!["fast".to_string(), "backup".to_string()];
+    let reordered = reorder_recent_failures(order.clone(), &nodes, RECENT_FAILURE_COOLDOWN);
+    assert_eq!(reordered, vec!["backup", "fast"]);
+    // 冷却窗为 0：没有任何节点在窗内 → 保持 EWMA 原序
+    let untouched = reorder_recent_failures(order.clone(), &nodes, Duration::ZERO);
+    assert_eq!(untouched, order);
+    // 未失败的节点不被动
+    let order2 = vec!["backup".to_string(), "fast".to_string()];
+    let mut nodes2 = vec![Node::new("fast", "1.1.1.1", 1080)];
+    apply_runtime_outcome(&mut nodes2, "fast", true); // 成功清时刻
+    assert_eq!(
+        reorder_recent_failures(order2.clone(), &nodes2, RECENT_FAILURE_COOLDOWN),
+        order2
     );
 }

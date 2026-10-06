@@ -254,6 +254,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
                     pinned.clone(),
                     inb_china,
                     inb_routes,
+                    pool.clone(),
                 )
                 .await
                 {

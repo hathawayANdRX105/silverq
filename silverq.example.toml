@@ -19,7 +19,9 @@ timeout_ms = 2500
 # 批内最大并发。必须 ≥ batch_size，见上。
 # 测速全是等 IO，不烧 CPU，提高并发几乎无代价。
 concurrency = 20
-# 超时扣分幅度（毫秒）
+# 超时扣分幅度（毫秒）。同时是节点健康度（HP）下行罚分的全局封顶：
+# HP 在 50 以下时按跌幅加性罚分，最大只到 1 个本值（HP 内置记账，
+# 探活 ±1/−5、实际流量 ±2/−15，无需配置；50 以上无奖励语义）。
 timeout_penalty = 3000.0
 # 探测 URL（generate_204 风格）
 probe_url = "https://www.gstatic.com/generate_204"
