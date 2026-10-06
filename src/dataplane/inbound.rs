@@ -639,8 +639,8 @@ pub struct RouteRecorder<'a> {
     routes: &'a RouteCache,
     host: &'a str,
     route: Route,
-    first_byte: std::cell::Cell<bool>,
-    terminal: std::cell::Cell<bool>,
+    first_byte: AtomicBool,
+    terminal: AtomicBool,
 }
 
 impl<'a> RouteRecorder<'a> {
@@ -650,15 +650,14 @@ impl<'a> RouteRecorder<'a> {
             routes,
             host,
             route,
-            first_byte: std::cell::Cell::new(false),
-            terminal: std::cell::Cell::new(false),
+            first_byte: AtomicBool::new(false),
+            terminal: AtomicBool::new(false),
         }
     }
 
     /// 首字节落地记账（幂等：二次调用不重复记账）。
     fn first_byte(&self, fr: Duration) {
-        if !self.first_byte.get() {
-            self.first_byte.set(true);
+        if !self.first_byte.swap(true, Ordering::Relaxed) {
             self.routes
                 .record(self.host, self.route, RouteOutcome::Responded(fr));
         }
@@ -667,11 +666,10 @@ impl<'a> RouteRecorder<'a> {
     /// 终局记账：至多一次。`no_first_byte_failed` = 首字节前的失败
     /// （黑洞/读错）；首字节已落地后的晚死同样记 Failed。
     fn terminal(&self, no_first_byte_failed: bool) {
-        if self.terminal.get() {
+        if self.terminal.swap(true, Ordering::Relaxed) {
             return;
         }
-        self.terminal.set(true);
-        if self.first_byte.get() || no_first_byte_failed {
+        if self.first_byte.load(Ordering::Relaxed) || no_first_byte_failed {
             self.routes
                 .record(self.host, self.route, RouteOutcome::Failed);
         } else {
