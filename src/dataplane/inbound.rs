@@ -423,6 +423,7 @@ async fn handle_one(
                 let wave2: Vec<SideSpec<'_>> = candidates[1..]
                     .iter()
                     .map(|(tag, adapter)| {
+                        let t = tag.clone();
                         let log_tag = t.clone();
                         let side: SideFut<'_> = Box::pin(async move {
                             match tokio::time::timeout(dial_timeout, adapter.dial_tcp(md)).await {
