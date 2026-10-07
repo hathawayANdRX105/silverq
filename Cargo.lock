@@ -2836,7 +2836,7 @@ dependencies = [
 
 [[package]]
 name = "silverq"
-version = "0.12.25"
+version = "0.28.34"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
