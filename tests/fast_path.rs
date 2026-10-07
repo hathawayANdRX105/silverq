@@ -56,8 +56,8 @@ fn previously_healthy_node_is_penalized_after_failing() {
 /// 失败的测速也必须记录"测过了"。
 ///
 /// `samples` 只在成功时累加，所以 `samples == 0` 无法区分「还没轮到」和
-/// 「测了但一次没通」。死节点占多数的池子里后者是绝大多数，面板若不分开
-/// 就会显示成 207 个"待测"，让人误判成调度漏测了节点（真实发生过）。
+/// 「测了但一次没通」。死节点占多数的池子里后者是绝大多数，ctl status 若不
+/// 分开就会显示成 207 个"待测"，让人误判成调度漏测了节点（真实发生过）。
 #[test]
 fn failed_probe_still_marks_node_as_measured() {
     let mut nodes = vec![node("dead"), node("untouched")];
@@ -68,7 +68,7 @@ fn failed_probe_still_marks_node_as_measured() {
 
     assert!(
         nodes[0].last_measured.is_some(),
-        "失败的测速必须记录 last_measured，否则前端分不出「不可用」和「待测」"
+        "失败的测速必须记录 last_measured，否则 ctl status 分不出「不可用」和「待测」"
     );
     assert_eq!(nodes[0].samples, 0, "失败不该增加成功样本数");
     assert!(!nodes[0].ewma.is_finite(), "从未成功过应保持 INFINITY");
@@ -82,7 +82,7 @@ fn failed_probe_still_marks_node_as_measured() {
 /// 失败不能污染实测延迟；一次成功清连续失败，但稳定性和 HP 仍会保留近期风险。
 ///
 /// 回归一个真 bug：早先失败时 `ewma += 3000` 并封顶 9999，导致
-/// 1) 面板显示 7512ms 像是 2500ms 超时失效（实为 1512ms 真延迟 + 两次罚分）；
+/// 1) ctl status 显示 7512ms 像是 2500ms 超时失效（实为 1512ms 真延迟 + 两次罚分）；
 /// 2) 罚分是加法、恢复靠 alpha 混合（≤0.65），涨得比恢复快 ——
 ///    偶尔失败的活节点被永久压住，撞 9999 封顶后与真死节点无法区分
 ///    （线上实测 samples=77 的活节点显示 9999）。
@@ -98,7 +98,7 @@ fn penalty_never_pollutes_measured_latency_and_recovers_with_successes() {
     }
     assert_eq!(
         pool[0].ewma, 100.0,
-        "实测延迟字段绝不能被罚分污染（面板就是读它）"
+        "实测延迟字段绝不能被罚分污染（ctl status 读的就是它）"
     );
     assert_eq!(
         silverq::scheduler::decision::select_top(&pool, 1, 3000.0, 1500.0),
@@ -178,7 +178,7 @@ fn retire_tried_node_kept_within_keep_alive() {
     assert_eq!(pool.len(), 1);
 }
 
-/// max_failures == 0 = 禁用（面板热调开关）。
+/// max_failures == 0 = 禁用（ctl config-reload 热调开关）。
 #[test]
 fn retire_disabled_at_zero() {
     let mut pool = vec![node("zombie")];
