@@ -140,6 +140,10 @@ struct NodeJson<'a> {
     active: bool,
     /// 是否是当前首选
     primary: bool,
+    /// 探测成功 +1 / 失败 -5，实际流量代理 dial 成功且首字节到手 +2，
+    /// 代理 dial 失败 -15；目标首字节缺失只记 per-host 路线，不扣全局 HP。
+    /// 50 以下在评分里加下行罚分（最大一个 timeout_penalty），50 以上不奖励。
+    hp: u8,
 }
 
 #[derive(Debug, Serialize)]
@@ -233,6 +237,7 @@ async fn status_json(state: &CtlState) -> String {
             stability: n.stability(),
             active: selection.contains(&n.tag),
             primary: selection.first().map(|s| s == &n.tag).unwrap_or(false),
+            hp: n.hp,
         })
         .collect();
 

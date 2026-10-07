@@ -12,10 +12,16 @@
 //!
 //! # 存什么
 //!
-//! 只存 `tag -> (ewma, samples)`。不存 `recent` 窗口：它只用于计算自适应
-//! alpha，丢了最多是重启后头几次 alpha 偏保守，不影响排序正确性；而存它会
-//! 让文件大小和格式复杂度都上一个量级。
-use crate::scheduler::node::Node;
+//! 存 `tag -> (ewma, samples, 带宽分数, 健康度 hp)`。没探测样本
+//! （`samples==0`）的节点没有 EWMA 可存，但若它被实际流量命中过
+//! （HP 偏离初值或 `ever_responded`），在 `hp_extra` 表里补记健康度
+//! 与先验存活证据——不记的话重启后 HP 回落 50、证据丢失，5 次探测
+//! 失败即被 `retire_stale` 立即摘除，尽管它真实在响应。不存
+//! `recent` 窗口：它只用于计算自适应 alpha，丢了最多是重启后头几次
+//! alpha 偏保守，不影响排序正确性；而存它会让文件大小和格式复杂度
+//! 都上一个量级。hp 与 EWMA 同寿命（6h 新鲜度）：长期停机重启后
+//! 健康度回落保守初值 50，证据回到「无」。
+use crate::scheduler::node::{Node, HP_INITIAL};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,8 +33,10 @@ const MAX_AGE_SECS: u64 = 6 * 3600;
 
 /// 存档格式版本。
 ///
-/// v1 的 `ewma` 掺了失败罚分（`ewma += 3000`），不是纯实测延迟；
-/// v2 的 `ewma` 干净了，但没有带宽分数；v3 加上 `bw_log`/`bw_samples`。
+/// v2 的 `ewma` 干净了，但没有带宽分数；v3 加上 `bw_log`/`bw_samples`
+/// 与健康度 `hp`（serde 默认 50，旧 v3 快照缺字段时读回保守初值）。
+/// `hp_extra`（无探测样本节点的健康度/证据）是 v3 内的加性字段：
+/// serde 默认空 map，旧 v3 快照没有该字段照样可读，主 `scores` 不受影响。
 /// 读取非当前版本一律丢弃重测 —— 把 v1 的 7512ms 当真实延迟恢复，
 /// 会让一个 1.5s 的活节点长期排在后面。
 pub const FORMAT_VERSION: u32 = 3;
@@ -40,6 +48,13 @@ pub struct Snapshot {
     pub version: u32,
     /// Unix 秒。用于判断存档是否过期。
     pub saved_at: u64,
+    /// 没探测样本（`samples==0`）节点的补记表：`tag -> (hp, ever_responded)`。
+    /// 主 `scores` 不存这类节点（没有 EWMA 可存），但「被实际流量命中过」
+    /// 的节点 HP 可能偏离初值、且带 `retire_stale` 保活决策依据
+    /// `ever_responded`——不存则重启后证据丢失，5 次探测失败即被摘除。
+    /// 旧快照没有该字段 → serde 默认空 map，不影响主 `scores` 恢复。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hp_extra: HashMap<String, HpExtra>,
     /// tag -> 分数
     pub scores: HashMap<String, Score>,
 }
@@ -53,6 +68,23 @@ pub struct Score {
     /// Option 让「未测过」有明确表示，不靠特殊浮点值约定。
     pub bw_log: Option<f64>,
     pub bw_samples: u32,
+    /// 节点健康度（0..=100，初始 50）。与 EWMA 同寿命：随分数存档持久化，
+    /// 老版本 v3 快照没有该字段 → 读时回落到 50（保守初值，不奖不罚）。
+    #[serde(default = "default_hp")]
+    pub hp: u8,
+}
+
+fn default_hp() -> u8 {
+    HP_INITIAL
+}
+
+/// `Snapshot.hp_extra` 里无探测样本节点的补记。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct HpExtra {
+    /// 节点健康度（0..=100，初始 50），与 EWMA 同寿命（同 6h 新鲜度窗口）。
+    pub hp: u8,
+    /// 该节点拿过实际流量响应（代理首字节）——先验存活证据。
+    pub ever_responded: bool,
 }
 
 /// 存档路径（`SILVERQ_STATE` 可覆盖）。
@@ -83,29 +115,47 @@ pub fn save(nodes: &[Node]) {
 /// 路径显式传入而非从环境变量读：测试并行跑时共享进程 env 会互相覆盖
 /// （曾因此必现失败），所以隔离靠参数，不靠 env。
 pub fn save_to(path: &std::path::Path, nodes: &[Node]) {
+    let scores: HashMap<String, Score> = nodes
+        .iter()
+        // 没测过的节点没意义，不存
+        .filter(|n| n.samples > 0 && n.ewma.is_finite())
+        .map(|n| {
+            (
+                n.tag.clone(),
+                Score {
+                    ewma: n.ewma,
+                    samples: n.samples,
+                    bw_log: if n.bw_samples > 0 && n.bw_log.is_finite() {
+                        Some(n.bw_log)
+                    } else {
+                        None
+                    },
+                    bw_samples: n.bw_samples,
+                    hp: n.hp,
+                },
+            )
+        })
+        .collect();
+    // 无探测样本节点的补记：仅当 HP 偏离初值或拿过实际流量响应证据时
+    // 才存——全基线节点（HP=50 且无证据）千篇一律，存了只增大文件。
+    let hp_extra: HashMap<String, HpExtra> = nodes
+        .iter()
+        .filter(|n| n.samples == 0 && (n.hp != HP_INITIAL || n.ever_responded))
+        .map(|n| {
+            (
+                n.tag.clone(),
+                HpExtra {
+                    hp: n.hp,
+                    ever_responded: n.ever_responded,
+                },
+            )
+        })
+        .collect();
     let snapshot = Snapshot {
         version: FORMAT_VERSION,
         saved_at: now_secs(),
-        scores: nodes
-            .iter()
-            // 没测过的节点没意义，不存
-            .filter(|n| n.samples > 0 && n.ewma.is_finite())
-            .map(|n| {
-                (
-                    n.tag.clone(),
-                    Score {
-                        ewma: n.ewma,
-                        samples: n.samples,
-                        bw_log: if n.bw_samples > 0 && n.bw_log.is_finite() {
-                            Some(n.bw_log)
-                        } else {
-                            None
-                        },
-                        bw_samples: n.bw_samples,
-                    },
-                )
-            })
-            .collect(),
+        scores,
+        hp_extra,
     };
 
     if let Some(parent) = path.parent() {
@@ -172,11 +222,22 @@ pub fn load_from(path: &std::path::Path, nodes: &mut [Node]) -> usize {
         if let Some(s) = snapshot.scores.get(&n.tag) {
             if s.ewma.is_finite() && s.samples > 0 {
                 n.restore_score(s.ewma, s.samples);
+                n.restore_hp(s.hp);
                 if let Some(bw_log) = s.bw_log {
                     n.restore_bw(bw_log, s.bw_samples);
                 }
                 restored += 1;
             }
+        }
+    }
+    // `hp_extra` 独立于主表恢复：只给池里 tag 匹配的节点应用（没测过
+    // 样本的节点不在 `scores` 里，靠这张表拿回 HP 与先验存活证据；
+    // 旧快照没有该表 → 自然跳过）。与主表同受上方 6h 年龄上限约束，
+    // 不写任何假的探测样本/EWMA。
+    for (tag, extra) in snapshot.hp_extra.iter() {
+        if let Some(n) = nodes.iter_mut().find(|n| &n.tag == tag) {
+            n.restore_hp_extra(extra.hp, extra.ever_responded);
+            restored += 1;
         }
     }
     restored

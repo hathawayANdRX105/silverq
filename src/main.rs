@@ -246,17 +246,15 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             let inb_routes = routes.clone();
             let inb_tuning = tuning.clone();
             let inb2 = tokio::spawn(async move {
-                if let Err(e) = inbound::run(
-                    &listen,
-                    inbound_reg,
-                    inbound_sel,
-                    inb_tuning,
-                    pinned.clone(),
-                    inb_china,
-                    inb_routes,
-                )
-                .await
-                {
+                let runtime = inbound::InboundRuntime {
+                    selection: inbound_sel,
+                    tuning: inb_tuning,
+                    pinned: pinned.clone(),
+                    china: inb_china,
+                    routes: inb_routes,
+                    pool: pool.clone(),
+                };
+                if let Err(e) = inbound::run(&listen, inbound_reg, runtime).await {
                     tracing::error!("inbound exited: {e}");
                 }
             });

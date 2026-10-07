@@ -19,6 +19,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # .cargo/config.toml 的 sccache 只装在开发机；runner 没装时必须禁用 wrapper。
+  RUSTC_WRAPPER: ""
   # 失败时打印完整 backtrace，e2e 排障要靠它
   RUST_BACKTRACE: 1
 
