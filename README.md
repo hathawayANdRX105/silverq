@@ -32,11 +32,11 @@ select_top(N)  纯 EWMA 取前 N（无迟滞轮次）
 - **分批并发**：节点池按当前排名分批测速，`buffer_unordered(concurrency)`，不阻塞在最慢节点。
 - **快慢分离**：测速（周期全池离线）与切换（只读已算好的 EWMA）完全解耦，卡顿隔离。
 - **超时扣分后移**：死/慢节点拿不到前排。
-- **节点淘汰（pipeline 双指标 + 地板）**：连续失败 ≥ `retire_max_failures`（默认 5）触发检查——**无任何存活证据**的节点（从未测通、也从未拿到实际流量首字节）立即摘除（从未通过真实握手不会自愈）；曾测通过的、或实际拿过流量首字节的（证据为 `ever_responded`，首字节到手时置位，不靠假探测样本）进入延长保活，连续失败持续满 `retire_keep_alive_secs`（默认 3600s）才摘。期间成功一次即复活。`retire_min_pool`（默认 10，0=禁用）兜底防摘到 0 全黑。可面板热改 + `silverq config-reload` 重读配置。
+- **节点淘汰（pipeline 双指标 + 地板）**：连续失败 ≥ `retire_max_failures`（默认 5）触发检查——**无任何存活证据**的节点（从未测通、也从未拿到实际流量首字节）立即摘除（从未通过真实握手不会自愈）；曾测通过的、或实际拿过流量首字节的（证据为 `ever_responded`，首字节到手时置位，不靠假探测样本）进入延长保活，连续失败持续满 `retire_keep_alive_secs`（默认 3600s）才摘。期间成功一次即复活。`retire_min_pool`（默认 10，0=禁用）兜底防摘到 0 全黑。可用 `silverq config-reload` 热改重读配置。
 - **回环/私网/国内直连判定**（SOCKS 入站）：pin 优先，之后回环/私网目标原样直连、国内域名（`china-domains.txt`，11 万条后缀表）经真实 DNS 解析成 IP 后直连，其余交给域名级路线缓存（下一条）。避免每个死候选烧 4s、国内绕远、私网目标被拨到节点侧 loopback。
 - **事实驱动的路线选择（缓存复用 + 首字节竞速，#23）**：缓存未命中/过期 → 并行竞速：直连 ‖ 代理首选同时发，**上游首字节先到者胜**（TCP 秒连但 TLS 无响应的一侧赢不了），赢家路线**首字节落地当下**写回缓存（长会话期间即可复用，不等收尾）；双败后并行拨第 2、3 名候选（`fallback_attempts` 圈定的后两位），全败才诚实失败——用户路径上不存在失败等待。命中 → 照缓存里上次成功的路线复用终点，可能是代理。首响应/失败写回缓存：当前路线首响应 > 2s 标记 slow → 最多每 30s 重新竞速一次（失败不限频、立即换路线；慢路线期间其他连接沿用最后能工作的路线）；当前路线失败会废掉旧的首字节耗时基线，成功的兜底路线无需再过滞回即可接管。换路线走滞回（新路线快过旧路线一半才接管，旧路线没有耗时基线时成功的直接接管），TTL 3 分钟（命中即续期，只管闲置域名何时重新竞速观察）。非幂等纯 HTTP（POST/PUT 等）不参与首字节双发，降级串行候选链。残余盲区：首字节赢了但中途被掐的直连（GFW 放行 ServerHello 后 RST）——靠 `direct_fails` 记账，连续 2 次把条目切到代理路线（#21）。TUN 路径未接入（首响应信号在 meow 引擎内部）。
 - **节点 dial 真实 DNS 预解析**：节点服务器域名经固定上游（223.5.5.5 / 119.29.29.29，`SILVERQ_RESOLVE_UPSTREAMS` 可覆盖）预解析写 `NodeSpec.dial_addr`，adapter 拨号用真实 IP。修复 TUN + fake-IP 环境下「拨节点变成经候选链拨节点」的自指递归（2026-09-19 事故：健康检查幸存 14-30 → 0-1）。解析失败回退系统解析，只降级不丢节点。
-- **jev 判断接入（可选，默认关）**：`[jev].enabled = true` 时，每轮测速结束后把分数前 6 候选（只 tag + 指标，不发 server/端口/凭证）POST 给 Jev 的 `{model, state, questions}` 协议做一次 bounded decision，胜出节点顶到 selection 队首——其余候选仍按分数排，数据面 best→次优 候选链原样保留。**失败即回退纯分数选择**：传输失败（超时/非 2xx）、非法响应（fail-closed 校验）、逃生舱（ask_user 等）、胜出概率 < 阈值都算；连续失败进冷却，冷却期不发请求。pinned 时不发起也不应用（手动钉住优先级最高）。HTTP 走 reqwest + rustls，`.no_proxy()`（基础设施流量不吃环境代理，避免自指递归）。决策状态在 `silverq status` 的 `jev=` 段与 `/api/status` 的 `jev` 字段。
+- **jev 判断接入（可选，默认关）**：`[jev].enabled = true` 时，每轮测速结束后把分数前 6 候选（只 tag + 指标，不发 server/端口/凭证）POST 给 Jev 的 `{model, state, questions}` 协议做一次 bounded decision，胜出节点顶到 selection 队首——其余候选仍按分数排，数据面 best→次优 候选链原样保留。**失败即回退纯分数选择**：传输失败（超时/非 2xx）、非法响应（fail-closed 校验）、逃生舱（ask_user 等）、胜出概率 < 阈值都算；连续失败进冷却，冷却期不发请求。pinned 时不发起也不应用（手动钉住优先级最高）。HTTP 走 reqwest + rustls，`.no_proxy()`（基础设施流量不吃环境代理，避免自指递归）。决策状态在 `silverq status` 的 `jev=` 段。
 - **节点健康度（HP，0–100，初始 50，只有下行语义）**：调度侧探活成功 +1 / 失败 −5；
   数据面实际流量 dial 成功且首字节到手 +2；唯一扣 −15 的是**代理侧 dial 本身失败
   （Err/超时）**（客户端早退与被竞速取消的负方中性，不误伤）。首字节超时/缺失
@@ -90,22 +90,21 @@ src/
 ├── config/            # settings.rs（silverq.toml）+ 默认参数/env 覆盖
 ├── scheduler/         # node.rs（Node+EWMA）、batch.rs（分批测速）、
 │                      # decision.rs（select_top）、fast_path.rs（即时发布）、
-│                      # persist.rs（EWMA 存档）；mod.rs（调度进度计数）
+│                      # persist.rs（EWMA 存档）
 ├── proxy/             # nodespec.rs（节点 YAML 模型）、factory.rs（NodeSpec→meow
 │                      # adapter）、meow.rs（MeowMeasurer）、dns.rs（零依赖 UDP DNS
 │                      # 客户端 + 国内域名表 ChinaSet）、route.rs（域名级路线缓存 + 首字节竞速决策）
 │                      # ——meow feature
 ├── dataplane/         # inbound.rs（SOCKS5/HTTP-CONNECT TCP）、udp.rs（UDP 中继）、
 │                      # tun.rs（TUN 透明代理，meow-tun feature）——meow feature
-├── web/               # mod.rs（内嵌面板 + JSON API）——meow feature
 └── ctl/               # cli.rs（子命令解析）、protocol.rs（unix socket 控制通道）
 ```
 
 ## 已验证 / 已知范围
 
-### 自动化测试（106 项，`cargo test --features meow`）
+### 自动化测试（104 项，`cargo test --features meow`）
 
-41 lib 单测 + 65 集成测试。测试按源文件划分放在 `tests/`（`decision.rs`/`inbound.rs`/… 与 `src/`
+41 lib 单测 + 63 集成测试。测试按源文件划分放在 `tests/`（`decision.rs`/`inbound.rs`/… 与 `src/`
 模块一一对应）。依赖 meow 的测试文件带 `#![cfg(feature = "meow")]`，纯 `cargo test`
 也能跑非协议部分。e2e 真起 `silverq serve` 进程、用真 SOCKS5 / HTTP-CONNECT 客户端打流量，
 目标是本地 echo 服务、探测端点也在本地 —— **全程回环，不依赖外网**，CI 可稳定跑。
@@ -131,41 +130,6 @@ src/
 
 对照旧栈同节点测速可知：池中大量节点（含 46 个 Vision+Reality）**本身已死** ——
 旧栈测同样超时。这不是 silverq 的问题，排查时容易误判成协议 bug。
-
-### Web 面板
-
-双面板,同一端口:
-
-**`/ui/` — zashboard**(外部 dashboard,MIT,`scripts/fetch-zashboard.sh` 下载)
-通过 clash 兼容 API 对接:节点列表+延迟历史图、组内切换(= 钉住)、
-配置面板(PATCH /configs 热生效,不写回 TOML)、连接/日志页。
-zashboard 首次打开在 setup 页填 `127.0.0.1` + `9095`,或直接访问
-`/ui/?hostname=127.0.0.1&port=9095` 自动配置。
-
-**`/` — 内嵌轻量面板**:silverq 特有数据(纯实测延迟 + EWMA 历史曲线、
-连续失败次数、可用/不可用/待测三态、健康度汇总、调度轮/批进度),
-3 秒轮询,无前端依赖。样式与图表原语来自 [uikit](../uikit) 模板
-(vendored 于 `src/web/uikit/`,头部注释标了来源 commit)。
-
-| 端点 | 说明 |
-| --- | --- |
-| `GET /` | 内嵌轻量面板 |
-| `GET /ui/` | zashboard(需先 fetch-zashboard.sh) |
-| `GET /api/status` | JSON:节点表（EWMA、样本、健康度 `hp` 0–100 初始 50）、selection、pinned |
-| `GET /version` `/proxies` `/configs` `/providers/*` `/connections` `/rules` | clash 兼容 API |
-| `GET /traffic` `/memory` `/logs` `/connections`(WebSocket) | clash 兼容 WS(数据恒 0) |
-| `PUT /proxies/{group}` | 切换/钉住(name=auto 解钉) |
-| `PATCH /configs` | 热更调度参数(capacity/batch_size/interval_secs/timeout_ms/concurrency/timeout_penalty/fallback_attempts) |
-| `GET /api/health` | 存活探针 |
-
-**无认证**,只绑回环;不要改成 `0.0.0.0`。改端口:
-
-```toml
-[data_plane]
-listen = "127.0.0.1:17321"
-web_listen = "127.0.0.1:9095"
-ui_dir = "~/.local/share/silverq/ui"   # zashboard 静态目录
-```
 
 ## 已知范围
 

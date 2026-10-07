@@ -44,7 +44,7 @@ pub struct Node {
     /// 实测延迟的 EWMA（越小越好）。**只由成功测速写入**，绝不掺罚分。
     ///
     /// 早先失败时直接 `ewma += 3000`，把罚分和延迟混在一个字段里，后果：
-    /// 1. 面板显示 7512ms，看着像 2500ms 超时失效（实际是 1512ms 真延迟 + 两次罚分）
+    /// 1. 显示出来是 7512ms，看着像 2500ms 超时失效（实际是 1512ms 真延迟 + 两次罚分）
     /// 2. 罚分是加法、恢复是 alpha 混合（≤0.65），涨得比恢复快 ——
     ///    偶尔失败的活节点被永久压在膨胀分数上，撞到 9999 封顶后
     ///    和真死节点无法区分（实测 samples=77 的活节点显示 9999）
@@ -60,9 +60,6 @@ pub struct Node {
     pub last_measured: Option<Instant>,
     /// 延迟采样滚动窗口（用于自适应 alpha）
     recent: VecDeque<f64>,
-    /// 延迟历史（面板画图用）：`(unix 秒, 实测延迟 ms)`，只记成功。
-    /// 环形缓冲，超长丢最旧。不持久化 —— 重启后图表从零开始攒，可接受。
-    pub history: VecDeque<(u64, f64)>,
     /// 带宽 EWMA，**对数域**（ln(bytes/s)）。吞吐是重尾分布，
     /// 线性 EWMA 对 [1MB/s, 10KB/s] 给出 505KB/s（两个都不是），
     /// 对数域给 ~100KB/s，贴合实际体验。
@@ -94,20 +91,11 @@ pub struct Node {
     pub ever_responded: bool,
 }
 
-/// 每节点保留的延迟历史点数。
-pub const HISTORY_CAP: usize = 48;
 /// 节点健康度初始值：保守中点——新节点/重启节点不奖不罚，
 /// 评分只看 50 以下的下行惩罚。
 pub const HP_INITIAL: u8 = 50;
 /// 节点健康度上限（0..=100 饱和）。
 pub const HP_MAX: u8 = 100;
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
 impl Node {
     pub fn new(tag: impl Into<String>, server: impl Into<String>, port: u16) -> Self {
@@ -125,7 +113,6 @@ impl Node {
             samples: 0,
             last_measured: None,
             recent: VecDeque::with_capacity(EWMA_WINDOW),
-            history: VecDeque::with_capacity(HISTORY_CAP),
             hp: HP_INITIAL,
             last_runtime_failure: None,
             ever_responded: false,
@@ -138,7 +125,6 @@ impl Node {
     pub fn update(&mut self, delay_ms: f64) {
         self.consecutive_failures = 0;
         self.failing_since = None;
-        self.push_history(delay_ms);
         if self.samples == 0 {
             self.ewma = delay_ms;
             self.recent.push_back(delay_ms);
@@ -179,13 +165,6 @@ impl Node {
 
         self.samples += 1;
         self.last_measured = Some(Instant::now());
-    }
-
-    fn push_history(&mut self, delay_ms: f64) {
-        if self.history.len() >= HISTORY_CAP {
-            self.history.pop_front();
-        }
-        self.history.push_back((unix_now(), delay_ms));
     }
 
     /// Compute mean and standard deviation of the recent window.
@@ -340,7 +319,7 @@ impl Node {
         (mean, variance.sqrt())
     }
 
-    /// 便捷入口：用内置默认罚分。面板排序与 ctl 路径用这个。
+    /// 便捷入口：用内置默认罚分（测试与无调参上下文调用方用这个）。
     #[cfg_attr(not(feature = "meow"), allow(dead_code))] // 排序入口在 meow 侧
     pub fn score(&self) -> f64 {
         self.score_with(DEFAULT_FAILURE_PENALTY_MS, DEFAULT_BW_PENALTY_PER_EFOLD_MS)

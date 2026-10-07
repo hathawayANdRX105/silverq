@@ -96,27 +96,19 @@ impl Default for SchedulerSection {
 pub struct DataPlaneSection {
     /// 监听地址（SOCKS5 / HTTP-CONNECT 混合）
     pub listen: String,
-    /// Web 面板监听地址。None = 默认 127.0.0.1:9090。
-    /// 注意：面板的 select 端点无认证，只应绑回环。
-    pub web_listen: Option<String>,
     /// **fallback 尝试上限**：按 EWMA 顺序最多试几个候选。
     ///
     /// 3 = 队首 + 两个次优。设 1 表示只用队首、不 fallback；
     /// 设大值在"池子普遍半死"时能救回更多请求，但单请求最坏延迟随之上升
     /// （每个死候选都要烧一个 dial 超时）。
     pub fallback_attempts: usize,
-    /// metacubexd 等 clash 风格 dashboard 的静态文件目录（serve 在 /ui/ 下）。
-    #[serde(default)]
-    pub ui_dir: Option<String>,
 }
 
 impl Default for DataPlaneSection {
     fn default() -> Self {
         Self {
             listen: crate::config::DEFAULT_LISTEN.to_string(),
-            web_listen: None,
             fallback_attempts: 3,
-            ui_dir: None,
         }
     }
 }
@@ -302,13 +294,10 @@ pub struct Effective {
     pub bw_max_bytes: u64,
     pub bw_penalty_per_efold_ms: f64,
     pub listen: String,
-    /// Web 面板监听（无认证，只绑回环）
-    pub web_listen: String,
     pub fallback_attempts: usize,
     pub retire_max_failures: u32,
     pub retire_keep_alive_secs: u64,
     pub retire_min_pool: usize,
-    pub ui_dir: String,
     pub state: String,
     pub ctl_sock: String,
     pub selector_store: String,
@@ -356,9 +345,9 @@ fn env_parsed_or<T: std::str::FromStr>(key: &str, v: T) -> T {
         .unwrap_or(v)
 }
 
-/// 运行时可热更的调度/数据面调参（Web 配置面板与 clash_api PATCH 的落点）。
+/// 运行时可热更的调度/数据面调参（ctl config-reload 热改的落点）。
 ///
-/// 从 `Effective` 播种，运行期经 `PATCH /configs` 热改；**不写回 silverq.toml**
+/// 从 `Effective` 播种，运行期经 `silverq config-reload` 重读调参热改；**不写回 silverq.toml**
 /// —— 程序改写用户带注释的 TOML 是破坏性的，持久化仍以手改文件为准，
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RuntimeTuning {
@@ -446,12 +435,6 @@ impl Effective {
                 fc.scheduler.bw_penalty_per_efold_ms,
             ),
             listen: env_or("SILVERQ_LISTEN", fc.data_plane.listen.clone()),
-            web_listen: std::env::var("SILVERQ_WEB_LISTEN").unwrap_or_else(|_| {
-                fc.data_plane
-                    .web_listen
-                    .clone()
-                    .unwrap_or_else(|| "127.0.0.1:9095".into())
-            }),
             fallback_attempts: env_parsed_or(
                 "SILVERQ_FALLBACK_ATTEMPTS",
                 fc.data_plane.fallback_attempts,
@@ -465,14 +448,6 @@ impl Effective {
                 fc.scheduler.retire_keep_alive_secs,
             ),
             retire_min_pool: env_parsed_or("SILVERQ_RETIRE_MIN_POOL", fc.scheduler.retire_min_pool),
-            // TOML 里的 ~ 不经 shell，程序自己展开（paths 同款，别再忘）
-            ui_dir: expand_home(env_or(
-                "SILVERQ_UI_DIR",
-                fc.data_plane
-                    .ui_dir
-                    .clone()
-                    .unwrap_or_else(|| "~/.local/share/silverq/ui".into()),
-            )),
 
             state: env_or("SILVERQ_STATE", fc.paths.state.clone()),
             ctl_sock: env_or("SILVERQ_CTL_SOCK", fc.paths.ctl_sock.clone()),
