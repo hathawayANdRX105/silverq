@@ -796,10 +796,7 @@ async fn test_direct_proxy_registered_in_tunnel() {
 // ---- B: root-gated 手动 smoke 测试（需要 root / CAP_NET_ADMIN） ----
 //
 // 本地跑（CI 不跑 —— `#[ignore]`，且 runner 无 root）：
-//   sudo cargo test --features meow-tun --bin silverq -- --ignored --test-threads=1
-//
-// 测试在 lib 里，但这些 smoke 需要直接调 `tun::run`（私有函数 + root 权限），
-// 放在本模块内最直接（同模块可直接调 `run`）。详见 README「TUN 手动测试」。
+//   sudo cargo test --features meow-tun --test tun -- --ignored --test-threads=1
 
 #[tokio::test]
 #[ignore]
@@ -831,7 +828,7 @@ async fn test_tun_device_created() {
     handle.abort();
     if let Ok(Err(join_err)) = probe {
         if join_err.is_panic() {
-            panic!("tun::run 在 1s 窗口内 panic: {join_err}");
+            panic!("TUN 入口 run 在 1s 窗口内 panic: {join_err}");
         }
     }
 }
