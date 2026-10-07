@@ -145,6 +145,20 @@ async fn adopts_winner_from_valid_response() {
     assert_eq!(v["state"]["candidates"][0]["id"], "node0");
     assert_eq!(v["state"]["candidates"][1]["id"], "node1");
     assert!(v["state"]["evidence"].as_str().unwrap().contains("ewma_ms"));
+    // hp 是稳定性的直接证据（Node::new 初值 50）：丢失该字段说明
+    // 描述串或口径说明被改坏，模型会退回只看 ewma/失败计数
+    let evidence = v["state"]["evidence"].as_str().unwrap();
+    assert!(
+        evidence.contains("hp=50"),
+        "evidence 缺 hp 字段: {evidence}"
+    );
+    assert!(
+        v["state"]["priorities"]
+            .as_str()
+            .unwrap()
+            .contains("health credit (hp)"),
+        "priorities 未提及 hp"
+    );
     let criteria = v["questions"]["recommendation"]["criteria"]
         .as_object()
         .unwrap();

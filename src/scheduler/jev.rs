@@ -72,7 +72,7 @@ const RECOMMENDATION_INSTRUCTIONS: &str = "Which candidate best fits the decisio
 const DECISION_TEXT: &str = "Choose which proxy node should lead silverq's selection — be tried first for all new connections — for the next measurement round.";
 
 /// 显式优先级（≤2000 字符）。先讲口径，免得模型只盯 rank 或只盯延迟。
-const PRIORITIES_TEXT: &str = "1) Probe stability first: fewer consecutive failures and a higher recent success rate beat raw latency. 2) Then lower recent latency (ewma_ms). 3) Prefer freshly probed nodes over stale ones. 4) Adequate throughput when measured; unmeasured bandwidth is not a downside. All candidates already passed score-based filtering — pick the one you trust most to carry traffic first; rank alone is not decisive.";
+const PRIORITIES_TEXT: &str = "1) Probe stability first: fewer consecutive failures, a higher recent success rate and a higher health credit (hp) beat raw latency. 2) Then lower recent latency (ewma_ms). 3) Prefer freshly probed nodes over stale ones. 4) Adequate throughput when measured; unmeasured bandwidth is not a downside. All candidates already passed score-based filtering — pick the one you trust most to carry traffic first; rank alone is not decisive.";
 
 /// 一个候选节点的证据快照（只含 tag 与纯指标，不含 server/端口/凭证）。
 #[derive(Debug, Clone)]
@@ -111,13 +111,15 @@ impl Candidate {
             tag: n.tag.clone(),
             description: format!(
                 "tag={} | rank={}/{} | ewma_ms={} | consecutive_failures={} | \
-                 stability={:.2} | samples={} | bw_bps={} | probe_age_s={} | score={:.1}",
+                 stability={:.2} | hp={} | samples={} | bw_bps={} | probe_age_s={} | \
+                 score={:.1}",
                 n.tag,
                 rank,
                 total,
                 ewma,
                 n.consecutive_failures,
                 n.stability(),
+                n.hp,
                 n.samples,
                 bw,
                 probe_age,
@@ -343,7 +345,9 @@ fn build_evidence(candidates: &[Candidate]) -> String {
         "Scoring context: score = (ewma_latency_ms + consecutive_failures * timeout_penalty_ms) \
          / stability + bandwidth_penalty_ms, lower is better. ewma is written only by successful \
          probes; stability is the success ratio over the last 16 probes; unmeasured bandwidth is \
-         not a penalty.",
+         not a penalty. hp is a 0..=100 health credit (starts 50): +1/+2 per successful probe / \
+         live-traffic first byte, -5/-15 per failed probe / live-traffic dial; only the fall \
+         below 50 penalizes score, so hp>=50 means healthy, hp<50 quantifies how degraded.",
     );
     s
 }
