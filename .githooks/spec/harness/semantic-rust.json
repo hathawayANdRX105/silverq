@@ -1,5 +1,6 @@
 {
-  "ocr_rust_review": {
+  "semantic_rust_review": {
+    "message": "语义审查（Rust）判定本次改动有缺陷；overall_severity 分数越高问题越重（warn>=1 / fail>=2），具体类目判定见 finding 的 extra 字段。按 10 类目核对 diff：typos / ownership_lifetime / error_panic / unsafe_boundaries / concurrency / async_cancellation / collections_perf / type_api_design / macros / security；确认无问题后书面驳回。",
     "intent": "Rust code review against the OpenCodeReview semantic rubric (internal/config/rules/rule_docs/rust.md). Judge the CHANGED Rust code (not the whole file) against each category; a finding is one of the listed conditions actually present in the diff, not a style preference. Favor precision over recall: report only defects likely real; correctness/security findings are blocking, style-only are advisory. Use file_read/code_search context to establish call sites, ownership, and boundaries before claiming a non-local defect; do not infer defects from a function name alone. Before reporting any non-local claim, establish the call site, ownership, synchronization, and trust boundary from the diff and provided context; report a finding only on concrete evidence actually present in the change; prefer a false negative over a false positive; do not turn formatter/linter-enforced style into blocking findings. The overall_severity score counts only defects that survive this guard.",
     "paths_include": [
       "**/*.rs"

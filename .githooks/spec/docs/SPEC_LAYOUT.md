@@ -15,7 +15,7 @@
     ├── cleanup/              # cleanup_*.yaml —— 分支/测试/文档清理（topic: cleanup）
     ├── github/               # github_*.yaml —— issue/PR/review 策略（topic: github/<名>）
     ├── workspace/            # workspace_*.yaml —— 工作区卫生（topic: workspace）
-    ├── harness/              # harness 脚本、jev/ocr/ccn 载荷
+    ├── harness/              # harness 脚本、jev/semantic/ccn 载荷
     ├── docs/                 # SPEC_OVERVIEW / CHECKLIST_SPEC / WEB_SPEC 等人查文档
     └── custom/               # 项目专有：canon-sync push 永不触碰
 ```

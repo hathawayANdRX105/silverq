@@ -6,9 +6,8 @@
 # 模板不要求 ## Issue 段，纯 PR 开发（无 issue）是合法默认形态。
 required_body_headings: ["What", "Why", "Construction plan", "Delivery record", "How to test", "Checklist"]
 
-# 必填的标题 (可自定义)
-required_title_headings: ["Goal", "Background", "Done when", "Suspected areas", "Out of scope"]
-# 标题必须是中文
+# PR-01 开关: true = 启用标题语言检查。注意方向与 issues 相反——
+# PR 标题必须是英文，含 CJK 即 FAIL（键名为共享历史遗留，勿按字面理解）。
 title_must_be_chinese: true
 # 标题禁止出现的中文全角标点
 forbidden_brackets_in_title:

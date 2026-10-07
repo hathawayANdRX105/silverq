@@ -3,9 +3,9 @@
 # 使用方式: canon Rust review validator 读取本文件。
 # 规则对应 canon merge 中的 RV-01/RV-02/RV-03/RV-04/RV-06。
 #
-# CRG（code-review-graph）与 ocr 两个外部二进制已退役，`canon review`
-# 命令与 RV-05（要求 PR 会话里有 CRG Review 评论）、RV-07（merge 前跑
-# CRG + ocr）随之移除。语义层由 jev 驱动的 ocr_* checklist 承接，
+# CRG（code-review-graph）与 open-code-review 两个外部二进制已退役，`canon review`
+# 命令与 RV-05（要求 PR 会话里有 CRG Review 评论）、RV-07（merge 前强制跑外部审查）
+# 随之移除。语义层由 jev 驱动的 semantic_* checklist 承接，
 # 与这里的评论格式契约无关。
 #
 # 格式契约 (全部中文正文, 英文标题):

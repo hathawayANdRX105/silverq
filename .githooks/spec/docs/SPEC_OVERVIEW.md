@@ -32,9 +32,9 @@
 
 - `gh`（GitHub CLI）：所有 GitHub API 操作入口
 
-已退役：`code-review-graph`（CRG）与 `ocr`（OpenCodeReview CLI）不再安装也不再调用。
-原由二者承担的语义层由 jev 驱动的 `ocr_rust` / `ocr_go` / `ocr_javascript` /
-`ocr_default` checklist 承接（yv8 与 open-code-review 的规则文档移植，非 ocr 二进制）。
+已退役：`code-review-graph`（CRG）与 `open-code-review` 两个外部二进制不再安装也不再调用。
+原由二者承担的语义层由 jev 驱动的 `semantic_rust` / `semantic_go` /
+`semantic_javascript` / `semantic_default` checklist 承接（yv8 与 open-code-review 的规则文档移植，非外部二进制）。
 - 任意 LLM CLI（`claude` / `codex` / `ollama` 等，被 checklist harness 调用；非必须，缺失按 `optional` 处理）
 - `cargo-machete`：未使用依赖检测（`dep_hygiene` 的执行器）
 - `upx`：二进制压缩（canon 部署产物，构建期使用）
@@ -150,10 +150,10 @@
 
 ## 主题七：语义审查（jev checklist）
 
-`canon review` 命令与 CRG/ocr 两个外部二进制已退役。语义层改由 L2 checklist 承接，
+`canon review` 命令与 CRG、open-code-review 两个外部二进制已退役。语义层改由 L2 checklist 承接，
 在 merge 钩子里自动跑：
 
-1. `ocr_rust` / `ocr_go` / `ocr_javascript` / `ocr_default`：移植 open-code-review 的规则文档，
+1. `semantic_rust` / `semantic_go` / `semantic_javascript` / `semantic_default`：移植 open-code-review 的规则文档，
    判决由 `jev_rule.py` 给（意图 + 各类缺陷 noul + 总分 + 反误报 guardrail）
 2. `review_chain`：jev → 小模型 → 无模型三档降级
 3. 本地按需触发：`canon check <name> --sla l2`
@@ -164,7 +164,7 @@
   `quality|code|cleanup|workspace|github` 五个子目录（spec 根层与 `custom/` 不加载），
   目录内按字典序跑
 - `mode: diff`（默认）传 `git diff <scope>` 给 harness；`mode: file` 每个变更文件单独传全文
-- harness = 任意可执行文件，stdout 必须是 finding JSON 数组（与 code/ocr/CRG 同协议）
+- harness = 任意可执行文件，stdout 必须是 finding JSON 数组（与 code/CRG harness 同协议）
 - 严重度合并：harness 报的与 yaml `fail_severity` **就高取大**（harness FAIL 永远阻断）
 - `optional: true`（默认）harness 缺失 → WARN 跳过；`false` → FAIL
 - 实现：`src/engine.rs`（CK-01 dispatcher） + `canon pre-commit/pre-push/merge` 调度
@@ -265,7 +265,7 @@ close 路径另有 `done_when_judge`（`github_issues.yaml`）：GT-04 机械门
 | `tests_check` | l1 | pre-commit, pre-push, merge | WARN | 测试代码划分与命名 — ferrite/gugu/silverq/mono |
 | `copy_constants_check` | l1 | pre-push, merge | WARN | 文案常量：同一中文字面量复用 2+ 次要抽 const；慢检查不进 pre-commit（旧文档写三个钩子，以 yaml 为准）— ferrite/gugu/silverq/mono/algorchemy |
 | `pr_labels` | l1 | merge | FAIL | PR 至少挂 1 个 type label（bug/feature/chore/refactor/tests/documentation/epic）；标题命中域关键词但缺域 label 时给建议（gh api 取数，取数失败输出「跳过、请人工核对」）— ferrite/gugu/silverq/mono |
-| `pr_crg_review` | l1 | merge | FAIL | PR 讨论区需留结构层审查结论；记录提到问题/风险时须附修复/回应记录（Fix/采纳/驳回 + commit 或验证结论），只统计 PR 创建后的评论（CRG 二进制已退役，yaml 的标记词仍接受 `结构层`/`ocr` 等文案）— ferrite/gugu/silverq/mono |
+| `pr_crg_review` | l1 | merge | FAIL | PR 讨论区需留结构层审查结论；记录提到问题/风险时须附修复/回应记录（Fix/采纳/驳回 + commit 或验证结论），只统计 PR 创建后的评论（CRG 二进制已退役；yaml 的标记词列表仍兼容历史文案）— ferrite/gugu/silverq/mono |
 | `code_doc` | l1 | merge | WARN | 公共 API 缺 `///` rust doc、模块头缺 `//!`（只查本次 PR diff 触碰的 `.rs`，不追责存量；旧文档写三个钩子，以 yaml 为准）— ferrite/gugu/silverq/mono/algorchemy |
 | `notes_open_markers` | l1 | pre-commit, pre-push, merge | FAIL | 未完成批注不得进提交：diff 新增 `TODO(...)` / `ASK(...)` 即 FAIL（`TODO(#123)` 豁免，由 `rust_todo_needs_issue` 管）— ferrite/mono |
 | `diff_scope` | l1 | pre-commit, pre-push, merge | WARN | 本 diff 文件按 scope（src/proxy、src/dataplane…）归类，跨 ≥2 个 scope 的单改动给 WARN，确认拆分或在 PR 里写清耦合 — silverq |
