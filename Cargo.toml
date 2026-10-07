@@ -1,6 +1,6 @@
 [package]
 name = "silverq"
-version = "0.12.25"
+version = "0.28.34"
 edition = "2021"
 description = "silverq — stability-first proxy node scheduler (EWMA + batch concurrent testing + fast/slow path separation)"
 license = "MIT"
@@ -27,15 +27,15 @@ parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [dependencies.meow-proxy]
-version = "0.21"
+version = "0.28.34"
 optional = true
 
 [dependencies.meow-common]
-version = "0.21"
+version = "0.28.34"
 optional = true
 
 [dependencies.meow-transport]
-version = "0.21"
+version = "0.28.34"
 optional = true
 # reality：你的节点池主力是 VLESS+Reality，不开这个 feature 时
 # TlsLayer::new 会直接拒绝 reality-opts，节点全建不出来
@@ -44,32 +44,32 @@ optional = true
 features = ["reality", "grpc"]
 
 [dependencies.meow-listener]
-version = "0.21"
+version = "0.28.34"
 optional = true
 features = ["listener-tun"]
 
 [dependencies.meow-tunnel]
-version = "0.21"
+version = "0.28.34"
 optional = true
 
 [dependencies.meow-dns]
-version = "0.21"
+version = "0.28.34"
 optional = true
 
 [dependencies.meow-trie]
-version = "0.21"
+version = "0.28.34"
 optional = true
 
 [dependencies.meow-rules]
-version = "0.21"
+version = "0.28.34"
 optional = true
 
 [dependencies.ipnet]
-version = "2"
+version = "0.28.34"
 optional = true
 
 [dependencies.smol_str]
-version = "0.3"
+version = "0.28.34"
 optional = true
 
 [features]
@@ -78,20 +78,20 @@ meow = ["meow-proxy", "meow-common", "meow-transport", "tokio-rustls", "rustls",
 meow-tun = ["meow", "meow-listener", "meow-tunnel", "meow-dns", "meow-trie", "meow-rules", "ipnet", "smol_str"]
 
 [dependencies.tokio-rustls]
-version = "0.26"
+version = "0.28.34"
 optional = true
 default-features = false
 features = ["ring", "tls12"]
 
 # tokio-rustls 0.26 的 ring feature 不再传递 rustls 自身的 ring，需显式开。
 [dependencies.rustls]
-version = "0.23"
+version = "0.28.34"
 optional = true
 default-features = false
 features = ["ring", "tls12", "std"]
 
 [dependencies.webpki-roots]
-version = "0.26"
+version = "0.28.34"
 optional = true
 
 [dev-dependencies]
