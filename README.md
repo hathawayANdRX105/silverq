@@ -90,7 +90,7 @@ src/
 ├── config/            # settings.rs（silverq.toml）+ 默认参数/env 覆盖
 ├── scheduler/         # node.rs（Node+EWMA）、batch.rs（分批测速）、
 │                      # decision.rs（select_top）、fast_path.rs（即时发布）、
-│                      # persist.rs（EWMA 存档）；mod.rs（调度进度计数）
+│                      # persist.rs（EWMA 存档）
 ├── proxy/             # nodespec.rs（节点 YAML 模型）、factory.rs（NodeSpec→meow
 │                      # adapter）、meow.rs（MeowMeasurer）、dns.rs（零依赖 UDP DNS
 │                      # 客户端 + 国内域名表 ChinaSet）、route.rs（域名级路线缓存 + 首字节竞速决策）
@@ -102,9 +102,9 @@ src/
 
 ## 已验证 / 已知范围
 
-### 自动化测试（103 项，`cargo test --features meow`）
+### 自动化测试（104 项，`cargo test --features meow`）
 
-41 lib 单测 + 62 集成测试。测试按源文件划分放在 `tests/`（`decision.rs`/`inbound.rs`/… 与 `src/`
+41 lib 单测 + 63 集成测试。测试按源文件划分放在 `tests/`（`decision.rs`/`inbound.rs`/… 与 `src/`
 模块一一对应）。依赖 meow 的测试文件带 `#![cfg(feature = "meow")]`，纯 `cargo test`
 也能跑非协议部分。e2e 真起 `silverq serve` 进程、用真 SOCKS5 / HTTP-CONNECT 客户端打流量，
 目标是本地 echo 服务、探测端点也在本地 —— **全程回环，不依赖外网**，CI 可稳定跑。
