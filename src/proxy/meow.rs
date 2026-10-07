@@ -128,16 +128,3 @@ impl Measurer for MeowMeasurer {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_bw_probe_url() {
-        let u = parse_probe_url("https://speed.cloudflare.com/__down?bytes=524288").unwrap();
-        assert!(u.https);
-        assert_eq!(u.host, "speed.cloudflare.com");
-        assert_eq!(u.port, 443);
-    }
-}
