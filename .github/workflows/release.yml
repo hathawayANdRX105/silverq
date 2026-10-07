@@ -11,6 +11,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # .cargo/config.toml 的 sccache 只装在开发机；runner 没装时必须禁用 wrapper（与 ci.yml 同）。
+  RUSTC_WRAPPER: ""
 
 jobs:
   release:
