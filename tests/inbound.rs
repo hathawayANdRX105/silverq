@@ -362,7 +362,7 @@ async fn relay_records_route_and_hp_on_first_byte_while_connection_open() {
     })
     .await
     .expect("代理响应时应给节点加 HP，不等长连接关闭");
-    assert!(!handle.is_done(), "连接仍开启时路线与 HP 应已入账");
+    assert!(!handle.is_finished(), "连接仍开启时路线与 HP 应已入账");
 
     // 收尾：停掉上游、关掉客户端对端，relay 任务收敛（结果形态不限：
     // 客户端早退的拆隧语义下 Neutral/晚死 Stream 都合法，本测试只关心
@@ -416,7 +416,7 @@ async fn race_records_route_and_hp_on_first_byte_while_connection_open() {
     ]];
 
     // race 的 socket 侧（客户端视角）
-    let (client, sock) = pair().await;
+    let (mut client, sock) = pair().await;
     let routes = Arc::new(RouteCache::new());
     let pool: SharedPool = Arc::new(tokio::sync::RwLock::new(vec![Node::new(
         "fast", "10.9.8.7", 1080,
@@ -432,9 +432,11 @@ async fn race_records_route_and_hp_on_first_byte_while_connection_open() {
             waves,
             false,
             Instant::now(),
-            &race_routes,
-            host,
-            &race_pool,
+            RaceCtx {
+                routes: &race_routes,
+                host,
+                pool: &race_pool,
+            },
         )
         .await
     });
@@ -460,7 +462,10 @@ async fn race_records_route_and_hp_on_first_byte_while_connection_open() {
             "代理侧胜出应在首字节落地时即 +HP"
         );
     }
-    assert!(!handle.is_done(), "记账发生时竞速必须未收尾（连接还开着）");
+    assert!(
+        !handle.is_finished(),
+        "记账发生时竞速必须未收尾（连接还开着）"
+    );
 
     // 收尾：关掉客户端 → 竞速收敛（客户端早退下 Won 或晚死 Stream 都合法）
     drop(client);

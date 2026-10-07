@@ -323,12 +323,12 @@ fn restore_hp_clamps_out_of_range() {
 fn adopt_score_carries_hp() {
     let mut old = Node::new("x", "1.1.1.1", 443);
     old.update(100.0);
-    for _ in 0..5 {
-        old.note_proxy_failure(); // 50 → 25
+    for _ in 0..2 {
+        old.note_proxy_failure(); // 50 → 20
     }
     let mut fresh = Node::new("x", "1.1.1.1", 443);
     fresh.adopt_score(&old);
-    assert_eq!(fresh.hp, 25, "adopt 必须带走健康度");
+    assert_eq!(fresh.hp, 20, "adopt 必须带走健康度");
 }
 
 // ── 先验存活证据（ever_responded）────────────────────────────────────────

@@ -67,16 +67,21 @@ impl DialTuning {
     }
 }
 
+/// inbound 常驻依赖：参数打包，避免 `run` 超过 clippy 参数上限。
+#[derive(Clone)]
+pub struct InboundRuntime {
+    pub selection: SharedSelection,
+    pub tuning: SharedTuning,
+    pub pinned: Arc<AtomicBool>,
+    pub china: Arc<crate::proxy::dns::ChinaSet>,
+    pub routes: Arc<RouteCache>,
+    pub pool: SharedPool,
+}
+
 pub async fn run(
     listener_addr: &str,
     registry: Registry,
-    selection: SharedSelection,
-    tuning: SharedTuning,
-    pinned: Arc<AtomicBool>,
-    china: Arc<crate::proxy::dns::ChinaSet>,
-    routes: Arc<crate::proxy::route::RouteCache>,
-    // 调度节点池：数据面把实际流量成败归因回各 tag 的健康度（HP）。
-    pool: SharedPool,
+    runtime: InboundRuntime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(listener_addr).await?;
     tracing::info!(
@@ -87,21 +92,11 @@ pub async fn run(
     loop {
         let (socket, peer) = listener.accept().await?;
         let registry = registry.clone();
-        let selection = selection.clone();
-        let tuning = tuning.clone();
-        let pinned = pinned.clone();
-        let china = china.clone();
-        let routes = routes.clone();
-        let pool = pool.clone();
+        let runtime = runtime.clone();
         tokio::spawn(async move {
             let ctx = ConnCtx {
                 registry: &registry,
-                selection: &selection,
-                tuning,
-                pinned,
-                china: &china,
-                routes: &routes,
-                pool: &pool,
+                runtime: &runtime,
             };
             if let Err(e) = handle_one(socket, peer, &ctx).await {
                 tracing::debug!(peer = %peer, "{e}");
@@ -139,12 +134,7 @@ pub struct Target {
 /// handle_one 的共享上下文（参数打包：7 个以上就被 clippy 拦了）。
 struct ConnCtx<'a> {
     registry: &'a Registry,
-    selection: &'a SharedSelection,
-    tuning: SharedTuning,
-    pinned: Arc<AtomicBool>,
-    china: &'a crate::proxy::dns::ChinaSet,
-    routes: &'a crate::proxy::route::RouteCache,
-    pool: &'a SharedPool,
+    runtime: &'a InboundRuntime,
 }
 
 async fn handle_one(
@@ -177,12 +167,12 @@ async fn handle_one(
     let req_start = std::time::Instant::now();
 
     // 调参快照：TCP dial 与 UDP associate 都从这里取，热改对新建连接即时生效
-    let dt = DialTuning::snapshot(&ctx.tuning.read());
+    let dt = DialTuning::snapshot(&ctx.runtime.tuning.read());
 
     // UDP ASSOCIATE：分配中继 socket，回其地址，然后在 TCP 存活期间跑中继循环。
     // 注意：客户端常填 0.0.0.0:0（自己也不知道源地址），所以不能用 host 空判断拦。
     if target.cmd == Cmd::UdpAssociate {
-        return handle_udp_associate(socket, ctx.registry, ctx.selection, dt).await;
+        return handle_udp_associate(socket, ctx.registry, &ctx.runtime.selection, dt).await;
     }
 
     if target.host.is_empty() {
@@ -218,13 +208,13 @@ async fn handle_one(
         Host,
         Ip(std::net::IpAddr),
     }
-    let direct: DirectDial = if ctx.pinned.load(Ordering::Relaxed) {
+    let direct: DirectDial = if ctx.runtime.pinned.load(Ordering::Relaxed) {
         // 钉住语义优先于直连判定：钉住 = 所有流量只走该节点、fail 就 fail，
         // 直连旁路会破坏该语义（e2e pinned_* 回归锁定）。
         DirectDial::None
     } else if is_local_target(&target.host) {
         DirectDial::Host
-    } else if ctx.china.matches(&target.host) {
+    } else if ctx.runtime.china.matches(&target.host) {
         match crate::proxy::dns::resolve_host(&target.host).await {
             Some(ip) => DirectDial::Ip(ip),
             None => {
@@ -240,9 +230,12 @@ async fn handle_one(
     // 未命中/过期 → 并行竞速（直连 ‖ 首选，上游首字节判胜，#23）；命中 → 按
     // 缓存里曾成功的路线走；条目路线慢 → 同样进竞速。缓存直连命中失败后要
     // 回退代理候选链（proxy_fallback）。
-    let china_hit = ctx.china.matches(&target.host);
-    let cache_eligible =
-        route_cache_eligible(&target.host, ctx.pinned.load(Ordering::Relaxed), china_hit);
+    let china_hit = ctx.runtime.china.matches(&target.host);
+    let cache_eligible = route_cache_eligible(
+        &target.host,
+        ctx.runtime.pinned.load(Ordering::Relaxed),
+        china_hit,
+    );
     let mut race = false;
     // 缓存驱动的直连（区别于回环/国内的策略直连）：失败后要回退候选链，
     // 且失败要记账，否则一个被墙域名会每次白烧一轮直连超时。
@@ -252,7 +245,7 @@ async fn handle_one(
     // 产生当前 conn 的代理候选 tag（直连为 None）：实际流量成败的 HP 归因落点
     let mut used_proxy_tag: Option<String> = None;
     if cache_eligible && matches!(direct, DirectDial::None) {
-        match ctx.routes.decide(&target.host) {
+        match ctx.runtime.routes.decide(&target.host) {
             crate::proxy::route::Decision::Direct => {
                 // 单一拨号预算同时盖住 DNS + TCP（早先两段各带预算，
                 // 被墙域名直连侧最坏要烧 4× 预算才轮到代理兜底）。
@@ -265,14 +258,20 @@ async fn handle_one(
                     }
                     DirectAttempt::DnsFail => {
                         // DNS 解析失败（预算内）：记账后串行候选链兜底。
-                        ctx.routes
-                            .record(&target.host, Route::Direct, RouteOutcome::Failed);
+                        ctx.runtime.routes.record(
+                            &target.host,
+                            Route::Direct,
+                            RouteOutcome::Failed,
+                        );
                     }
                     DirectAttempt::BudgetExhausted => {
                         // 预算耗尽（DNS 或 dial 段）：记账并按拨号失败语义
                         // 压缩后续候选链的首响预算。
-                        ctx.routes
-                            .record(&target.host, Route::Direct, RouteOutcome::Failed);
+                        ctx.runtime.routes.record(
+                            &target.host,
+                            Route::Direct,
+                            RouteOutcome::Failed,
+                        );
                         proxy_fallback = true;
                     }
                 }
@@ -293,8 +292,8 @@ async fn handle_one(
     // `last_runtime_failure` 在冷却窗内）的节点临时后置：下一个连接就换活路，
     // 不等 30–90s 测速轮次。钉住时选择只有一个元素，重排不改变语义。
     let order = {
-        let sel = ctx.selection.read().await.clone();
-        let pool = ctx.pool.read().await;
+        let sel = ctx.runtime.selection.read().await.clone();
+        let pool = ctx.runtime.pool.read().await;
         reorder_recent_failures(sel, &pool, RECENT_FAILURE_COOLDOWN)
     };
     let metadata = Metadata {
@@ -321,7 +320,7 @@ async fn handle_one(
     // PATCH /configs 可热改）。按 EWMA 顺序最多试 N 个候选：
     // 池子普遍半死时，大值能救回更多请求；但每个死候选都要烧一个 dial 超时，
     // 单请求最坏延迟随之上升。
-    let dt = DialTuning::snapshot(&ctx.tuning.read());
+    let dt = DialTuning::snapshot(&ctx.runtime.tuning.read());
     let dial_timeout = dt.dial();
     // 策略直连：回环/私网按原样拨（localhost 解析交给系统，回环段不受
     // fake-IP 影响）；国内域名拨已解析的真实 IP。
@@ -459,9 +458,11 @@ async fn handle_one(
                 waves,
                 target.proto == Proto::Http,
                 req_start,
-                &ctx.routes,
-                &target.host,
-                ctx.pool,
+                RaceCtx {
+                    routes: ctx.runtime.routes.as_ref(),
+                    host: &target.host,
+                    pool: &ctx.runtime.pool,
+                },
             )
             .await
             {
@@ -496,14 +497,14 @@ async fn handle_one(
                         // info 级：死候选是运维必须能看到的信号（fallback 计数也靠它）
                         tracing::info!(tag = tag.as_str(), "dial failed: {e}");
                         // 实际流量 dial 失败：扣该节点健康度，冷却排序立即生效
-                        attribute_runtime(ctx.pool, tag, false).await;
+                        attribute_runtime(&ctx.runtime.pool, tag, false).await;
                     }
                     Err(_) => {
                         tracing::info!(
                             tag = tag.as_str(),
                             "dial 超时 {dial_timeout:?}，换下一个候选"
                         );
-                        attribute_runtime(ctx.pool, tag, false).await;
+                        attribute_runtime(&ctx.runtime.pool, tag, false).await;
                     }
                 }
             }
@@ -522,7 +523,7 @@ async fn handle_one(
                 .await;
         }
         return Ok(());
-    } else if ctx.pinned.load(Ordering::Relaxed) {
+    } else if ctx.runtime.pinned.load(Ordering::Relaxed) {
         // 钉住语义是"只用这个节点"：所有代理候选失败时直连兜底会绕过钉住，
         // 让钉死节点的请求悄悄走直连成功。钉住必须fail 就 fail。
         tracing::info!("已钉住且候选全失败，不做直连兜底（遵守 pin 语义）");
@@ -536,7 +537,8 @@ async fn handle_one(
         if cache_eligible {
             // 代理候选全败：旧代理首响不再是可信的滞回基线，
             // 后续直连兜底若收到数据，应成为该域名缓存路线。
-            ctx.routes
+            ctx.runtime
+                .routes
                 .record(&target.host, Route::Proxy, RouteOutcome::Failed);
         }
         // 所有代理候选都失败：尝试直连兜底（TCP 直连目标端口）。
@@ -578,7 +580,11 @@ async fn handle_one(
     // 首字节账簿（缓存门禁内）：relay 在首字节落地的当下记账，不等收尾；
     // 非缓存目标（策略直连）不记账，行为与旧实现一致。
     let recorder = if cache_eligible {
-        Some(RouteRecorder::new(&ctx.routes, &target.host, used_route))
+        Some(RouteRecorder::new(
+            ctx.runtime.routes.as_ref(),
+            &target.host,
+            used_route,
+        ))
     } else {
         None
     };
@@ -589,7 +595,9 @@ async fn handle_one(
         target.replay,
         req_start,
         recorder,
-        used_proxy_tag.as_deref().map(|tag| (ctx.pool, tag)),
+        used_proxy_tag
+            .as_deref()
+            .map(|tag| (&ctx.runtime.pool, tag)),
     )
     .await
     {
@@ -794,6 +802,14 @@ fn replay_race_safe(replay: &[u8]) -> bool {
         || replay.starts_with(b"TRACE ")
 }
 
+/// 一次竞速的记账目标：路线缓存 + 域名 + 节点池（参数打包：race_relay
+/// 拆出它才回到 clippy 参数上限内）。pub：tests/inbound.rs 组装真实
+/// loopback 竞速。
+pub struct RaceCtx<'a> {
+    pub routes: &'a RouteCache,
+    pub host: &'a str,
+    pub pool: &'a SharedPool,
+}
 /// 竞速侧拨号 future：None = 拨号失败或超时（各侧日志已在闭包内打）。
 pub type SideFut<'a> = std::pin::Pin<
     Box<dyn Future<Output = Option<Box<dyn meow_common::conn::ProxyConn>>> + Send + 'a>,
@@ -836,6 +852,8 @@ pub enum RaceOutcome {
 /// - HP 归因：代理拨号失败 `note_proxy_failure`；首字节胜者
 ///   `note_proxy_success`；目标无首字节和被取消的败方不影响全局 HP。
 /// - `write_503` = 目标为 HTTP 语义（与串行全败路径一致补 503；SOCKS 不补）。
+/// - `ctx`：路线缓存、域名、节点池（记账目标）。
+///
 /// pub：tests/inbound.rs 用 loopback 竞速验证「首字节落地即记账、连接仍
 /// 开着」的早期路线/HP 归因，不等 copy 收尾。
 pub async fn race_relay<'a>(
@@ -845,9 +863,7 @@ pub async fn race_relay<'a>(
     mut waves: Vec<Vec<SideSpec<'a>>>,
     write_503: bool,
     req_start: std::time::Instant,
-    routes: &RouteCache,
-    host: &str,
-    pool: &SharedPool,
+    ctx: RaceCtx<'_>,
 ) -> RaceOutcome {
     let (mut cr, mut cw) = tokio::io::split(socket);
     // 客户端已读走的首字节：侧建立时全量投递，之后按增量投递（off 记账）
@@ -887,7 +903,8 @@ pub async fn race_relay<'a>(
                 continue;
             }
             // 全灭：代理侧各失败已逐侧归因（HP），路线级再记一条 Failed
-            routes.record(host, Route::Proxy, RouteOutcome::Failed);
+            ctx.routes
+                .record(ctx.host, Route::Proxy, RouteOutcome::Failed);
             if write_503 {
                 let _ = cw
                     .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
@@ -967,7 +984,7 @@ pub async fn race_relay<'a>(
                     live.push(side);
                 } else if let Some(t) = &tag {
                     // dial 失败/超时的代理侧 = 实际流量失败：扣健康度
-                    attribute_runtime(pool, t, false).await;
+                    attribute_runtime(ctx.pool, t, false).await;
                 }
             }
             Ev::Side(j, Some((n, b))) => {
@@ -983,16 +1000,17 @@ pub async fn race_relay<'a>(
                     return RaceOutcome::ClientLeft;
                 }
                 let wroute = win.route;
-                routes.record(host, wroute, RouteOutcome::Responded(fr));
+                ctx.routes
+                    .record(ctx.host, wroute, RouteOutcome::Responded(fr));
                 if let Some(t) = &win.tag {
-                    attribute_runtime(pool, t, true).await;
+                    attribute_runtime(ctx.pool, t, true).await;
                 }
                 // 败者侧（其他 live 槽与未完成拨号）随返回一并 drop 即拆除
                 return tokio::select! {
                     r = tokio::io::copy(&mut win.pr, &mut cw) => match r {
                         Ok(_) => RaceOutcome::Won,
                         Err(e) => {
-                            routes.record(host, wroute, RouteOutcome::Failed);
+                            ctx.routes.record(ctx.host, wroute, RouteOutcome::Failed);
                             RaceOutcome::DiedAfterWin(e.into())
                         }
                     },
@@ -1500,7 +1518,7 @@ async fn handle_udp_associate(
 mod tests {
     use super::{
         is_local_target, race_relay, read_socks5_target, replay_race_safe, route_cache_eligible,
-        RaceOutcome, SharedPool, SideSpec,
+        RaceCtx, RaceOutcome, SharedPool, SideSpec,
     };
     use crate::proxy::route::{Route, RouteCache};
     use std::sync::Arc;
@@ -1573,9 +1591,11 @@ mod tests {
                 waves,
                 false,
                 Instant::now(),
-                &race_routes,
-                "race-test.host",
-                &race_pool,
+                RaceCtx {
+                    routes: &race_routes,
+                    host: "race-test.host",
+                    pool: &race_pool,
+                },
             )
             .await
         });
@@ -1651,9 +1671,11 @@ mod tests {
                 waves,
                 false,
                 Instant::now(),
-                &race_routes,
-                "race-test2.host",
-                &race_pool,
+                RaceCtx {
+                    routes: &race_routes,
+                    host: "race-test2.host",
+                    pool: &race_pool,
+                },
             )
             .await
         });
