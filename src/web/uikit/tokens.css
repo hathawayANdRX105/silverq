@@ -1,0 +1,35 @@
+/* vendored from ~/projects/uikit@d8803de — 原件改了这里跟着拷；生成物请跑 uikit 的 gen/gen.py */
+/* generated from tokens.json by gen/gen.py — do not edit by hand */
+:root {
+    --bg: #0f1115;
+    --card: #171a21;
+    --line: #232833;
+    --fg: #d7dae0;
+    --dim: #8b93a1;
+    --ok: #4caf7d;
+    --warn: #e0a84c;
+    --bad: #e06c60;
+    --acc: #5b9bd5;
+    --acc-soft: #2a3b4d;
+    --ok-soft: #1f3328;
+    --bad-soft: #3a2528;
+    --warn-soft: #4a3b20;
+
+    --s: 4px;
+    --m: 8px;
+    --l: 10px;
+    --pill: 16px;
+
+    --xs: 4px;
+    --s: 8px;
+    --m: 12px;
+    --l: 16px;
+    --xl: 24px;
+
+    --tiny: 11px;
+    --small: 12px;
+    --body: 14px;
+    --metric: 20px;
+    --title: 18px;
+
+}

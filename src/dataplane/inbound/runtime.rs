@@ -29,7 +29,7 @@ pub struct DialTuning {
 }
 
 impl DialTuning {
-    /// 从共享调参取当前快照。每连接取一次：ctl config-reload 热改对新建连接即时生效。
+    /// 从共享调参取当前快照。每连接取一次：配置面板热改对新建连接即时生效。
     pub fn snapshot(tuning: &crate::config::settings::RuntimeTuning) -> Self {
         Self {
             timeout_ms: tuning.timeout_ms,
