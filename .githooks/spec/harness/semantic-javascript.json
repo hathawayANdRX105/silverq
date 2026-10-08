@@ -1,5 +1,6 @@
 {
-  "ocr_js_review": {
+  "semantic_javascript_review": {
+    "message": "语义审查（JS/TS）判定本次改动有缺陷；overall_severity 越高问题越重（warn>=1 / fail>=2），具体类目判定见 finding 的 extra 字段。按 6 类目核对 diff：typos / dead_code / code_quality / react / async / security；确认无问题后书面驳回。",
     "intent": "JavaScript/TypeScript/JSX/TSX code review against the OpenCodeReview semantic rubric (internal/config/rules/rule_docs/ts_js_tsx_jsx.md). Judge the CHANGED code. Favor precision over recall: report only defects likely real. Correctness and security findings are blocking; style-only items are advisory. React best-practice rules apply only when the changed code is a React component or uses hooks; otherwise answer false for that question. Hardcoded business strings/URL paths/numbers are defects; simple UI text may be relaxed. Before reporting any non-local claim, establish the call site, ownership, synchronization, and trust boundary from the diff and provided context; report a finding only on concrete evidence actually present in the change; prefer a false negative over a false positive; do not turn formatter/linter-enforced style into blocking findings. The overall_severity score counts only defects that survive this guard.",
     "paths_include": [
       "**/*.js",

@@ -1,7 +1,7 @@
-# ocr-review 替代品（Go）
+# 语义层审查（Go）：L2 语义 checklist，判决由 jev 驱动。
 # 忠实移植 alibaba/open-code-review 的 internal/config/rules/rule_docs/go.md：
 # 7 类缺陷（errors/nil/context/channels/resources/collections/security）+ 总分（score）。
-# 精度优先（ocr 原文原则）：scope-guard 折入 criteria——确认并发可达、确认攻击者可控才报。
+# 精度优先（上游原文原则）：scope-guard 折入 criteria——确认并发可达、确认攻击者可控才报。
 enabled: true
 hooks: [merge]
 sla: l2
@@ -15,6 +15,6 @@ harness:
   args:
     - ".githooks/spec/harness/jev_rule.py"
     - "--config"
-    - ".githooks/spec/harness/ocr-go.json"
+    - ".githooks/spec/harness/semantic-go.json"
 optional: true
 timeout: 300

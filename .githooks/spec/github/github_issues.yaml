@@ -81,25 +81,14 @@ type_labels:
 # 正文禁 Labels 段 (label 用 gh label 操作，不写正文)
 labels_section_forbidden: true
 
-# 父 issue 判定: 标题含这些前缀视为父 (只做进度跟踪, 不强制)
-# 默认父 issue 编号 (sub-issue 创建后自动挂载到这里; 用 0 表示不自动挂载)
-default_parent_issue: 0
-
 # 乱码检查: 正文含字面 \n (反斜杠+n) 或 U+FFFD 替换符 (�) → FAIL (创建时拦截)
 garbled_content_check: true
 
-# sub-issue 挂载: sub 创建后必须挂到 default_parent_issue (或 --parent 指定) 下
+# sub-issue 挂载: sub 创建后必须挂到 --parent 指定的父 issue 下
 sub_issue_must_link_parent: true
 
 # sub-issue 关联: CLOSED 时 Done when 必须全勾 (IS-15)
 sub_issue_closed_requires_done_when_checked: true
-
-# 创建补充行为 (第 7 点): 新建 issue 在宽限期内缺关键段时给出建议
-creation_grace_minutes: 5
-creation_suggestion:
-  enabled: true
-  severity: "WARN"
-  hint: "新 issue 建议补充: Goal / Done when / Suspected areas / Out of scope"
 
 # 规则严重级别覆盖 (可选)
 # 格式: "规则ID": "FAIL" | "WARN" | "INFO"

@@ -1,4 +1,4 @@
-# ocr-review 替代品（JS/TS）
+# 语义层审查（JS/TS）：L2 语义 checklist，判决由 jev 驱动。
 # 忠实移植 alibaba/open-code-review 的 internal/config/rules/rule_docs/ts_js_tsx_jsx.md：
 # 6 类缺陷（typos/dead/quality/react/async/security）+ 总分（score）。
 # React 规则仅在变更实际是 React 组件/用 hooks 时判定（criteria 已注明）。
@@ -15,6 +15,6 @@ harness:
   args:
     - ".githooks/spec/harness/jev_rule.py"
     - "--config"
-    - ".githooks/spec/harness/ocr-javascript.json"
+    - ".githooks/spec/harness/semantic-javascript.json"
 optional: true
 timeout: 300

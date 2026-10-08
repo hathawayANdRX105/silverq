@@ -1,4 +1,4 @@
-<!-- managed by canon agents.yaml @ 2026-10-02 -->
+<!-- managed by canon agents.yaml @ 2026-10-04 -->
 ## silverq 约定
 
 > 本文件写**每个会话都必须遵守的硬约束**，和**遇到什么情况该读哪份文档**。
@@ -238,7 +238,22 @@ CPU 密集型命令（编译/测试/装包）一律 `systemd-run --user --scope 
 - 一个 commit 一件事。不把无关改动、格式化噪声、生成物混进逻辑改动。
 - 提交前跑对应检查（`canon pre-commit` / `canon pre-push`），不靠推送失败才发现。
 
+### 提交身份
+
+- commit 作者固定是维护者本人账号 `hathawayANdRX105`（大小写逐字一致）。
+- **不得**用 `git -c user.name=... -c user.email=...` 覆盖身份提交。历史上
+  `agent@local` / `ci@local` 这类签名就是这么来的：GitHub 账号对不上，
+  贡献归属、追责、审计全丢。
+- 提交前若 `git config user.name` / `user.email` 不是上面这个账号，先改成本仓配置
+  （`git config user.name hathawayANdRX105`），别带着错的身份往下走。
+- 邮箱两套都算合法：`2635254302@qq.com`（本地提交）与 GitHub 的
+  `61958173+hathawayANdRX105@users.noreply.github.com`（服务端 squash 落库时写的）。
+- 禁止 `Co-authored-by:`  trailer 署其他人或机器人账号。
+
 ### Issue
+
+Issue 是**追踪单元**，不是 PR 的前置条件——默认开发流是纯 PR 开发，不要求先建 issue。
+只有这些情况才建 issue：记录遗留/暂缓事项、登记需要后续开发的工作、留下需要检索的决策记录。
 
 - 标题中文；正文 heading 英文、内容中文。
 - sub-issue 必须自包含：正文不写 `Parent:` / `Related:` / PR 占位符，直接写清它要什么。
@@ -249,11 +264,43 @@ CPU 密集型命令（编译/测试/装包）一律 `systemd-run --user --scope 
 - 标题纯英文（conventional commit 风格）；正文小节标题英文、内容中文。
 - 正文按仓库模板（`.github/PULL_REQUEST_TEMPLATE.md`）写：背景 / 改了什么 / 为什么 /
   实现步骤 / 交付记录 / 怎么验证 / 检查清单。
-- 关联 issue 用 `Fixes #<n>` 收尾行；draft 阶段用 `Related #<n>`，合并授权前改 `Fixes`。
+- 不强制关联 issue：确实在关闭某个 issue 时才写 `Fixes #<n>`（一个 PR 只关一个）；
+  纯 PR 开发什么都不用写。审查发现的问题在同一 PR 上继续提交修复，不另开 issue/PR。
 - 开启或更新 PR 后看 CI 结果到底（`gh pr checks`），红了就修，不等用户来问。
 - 被 canon 拦下就修代码，**不改规则**。规则确有缺陷 → 开 issue 交维护者裁决。
 
+### 合并
+
+- **只走 squash merge**：
+  `gh pr merge <N> --squash --delete-branch --body "Agent 🤖 - Merge: <原因>"`。
+- 禁用 `--merge` / `--rebase`（含 `-m` / `-r` 短形式）。merge commit 会让 PR
+  记录的分支历史消失，同一分支再合要重新三方合并、当初的冲突裁决全部丢失；
+  rebase-merge 还会逐个改写 commit 作者。两者都让 `main` 失去审计价值。
+- 不带任何合并方式的 `gh pr merge` 会弹交互菜单 —— agent 不该触发交互，一律显式
+  写 `--squash`。
+- 禁止本地 `git merge <分支>` 直接合进 `main` 再推 remote。要合就走 PR。
+- 各仓 GitHub 设置已关闭 merge commit 与 rebase merge，squash 是唯一可选项。
+
 ### 收尾
 
-- 收尾时清掉：已合并分支、临时 worktree、临时进程、跑完的 dev server。
-- 资源及时释放；只保留维护者需要的进程（如用户要看的 web 前端）。
+清的是**本会话自己造出来的东西**。别的会话正在用的 worktree、分支、进程一律不碰。
+
+#### 工作树与分支
+
+- `.wt/` 下的临时 worktree 目录与对应分支，合并完成后逐个清掉，不留 stale。
+- 动手前 `git worktree list` + `git branch` 对照，确认目标确实是本会话建的；
+  会话开始时就存在的不动。
+- 清之前确认三件事：PR 已合并、工作区无未提交改动、目录对应当前分支。任一不满足
+  就不清，先说清卡在哪。
+- 顺序：`git worktree remove <目录>` → `git branch -d <分支>` → 删远端分支。
+  worktree 还挂着时 `-d` 删不掉，先 remove。
+- **严禁** `rm -rf .wt/`、`rm -rf .wt/*`、`git clean` 这类批量删——会连别的会话的
+  工作树一起擦掉。删单个目录也走 `git worktree remove`。
+
+#### 进程与资源
+
+- 长驻进程（dev server、watcher、调试器、后台任务）用完停掉，确认端口已释放，
+  不留孤儿进程。
+- 后台 job 要等到结果再收尾，别挂着不管。
+- 只保留维护者明确要留的（如用户正在看的 web 前端）。资源及时释放，不抢占用户
+  正在用的 CPU 与内存。
