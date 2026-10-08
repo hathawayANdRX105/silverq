@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
 
-/// 运行时可热更调参的共享句柄。调度循环/inbound 共享（ctl config-reload 热更）。
+/// 运行时可热更调参的共享句柄。调度循环/inbound/web 三方共用。
 pub type SharedTuning = Arc<parking_lot::RwLock<RuntimeTuning>>;
 
 /// 共享控制状态：调度循环、inbound、ctl 三方共用。
@@ -38,14 +38,25 @@ pub struct CtlState {
     pub pinned: Arc<AtomicBool>,
     /// 钉住目标 tag。
     ///
-    /// **selection 的唯一写者是调度循环**：ctl 只在这里登记意图，
+    /// **selection 的唯一写者是调度循环**：ctl/web 只在这里登记意图，
     /// 由调度循环在自己的临界区里应用。早先 ctl 直接写 selection，
     /// 与批发布形成双写者竞争，实测 4/10 概率被旧 EWMA 结果覆盖 ——
     /// 加锁只能缩小窗口，改成单写者才根治。
     pub pin_target: Arc<Mutex<Option<String>>>,
-    /// 运行时调参（ctl config-reload 热改的落点）
+    /// 运行时调参（PATCH /configs 热改的落点）
     pub tuning: SharedTuning,
-    /// jev 决策器（未启用为 None）。ctl status 汇总，
+    /// 探测 URL（按需单节点测延迟 GET /proxies/{name}/delay 用）
+    #[cfg_attr(not(feature = "meow"), allow(dead_code))] // 仅 meow 的 web 模块读
+    pub probe_urls: Vec<String>,
+    /// metacubexd 静态目录；空 = 不服务 /ui/
+    #[cfg_attr(not(feature = "meow"), allow(dead_code))]
+    pub ui_dir: String,
+    /// tag -> 协议名（clash_api /proxies 的 type 字段；reload 时重建）
+    pub protocols: Mutex<std::collections::HashMap<String, String>>,
+    /// 调度进度（schedule_loop 写、web 面板读；与调度循环共享同一 Arc）
+    #[cfg_attr(not(feature = "meow"), allow(dead_code))] // 仅 meow 的 web 模块读
+    pub progress: Arc<crate::scheduler::SchedulerProgress>,
+    /// jev 决策器（未启用为 None）。ctl status 汇总、web 面板展示，
     /// 与调度循环共享同一实例（head/统计同一份）。
     pub jev: Option<Arc<crate::scheduler::jev::JevDecider>>,
 }
@@ -62,6 +73,10 @@ impl CtlState {
         pinned: Arc<AtomicBool>,
         pin_target: Arc<Mutex<Option<String>>>,
         tuning: SharedTuning,
+        probe_urls: Vec<String>,
+        ui_dir: String,
+        protocols: std::collections::HashMap<String, String>,
+        progress: Arc<crate::scheduler::SchedulerProgress>,
         jev: Option<Arc<crate::scheduler::jev::JevDecider>>,
     ) -> Self {
         Self {
@@ -73,6 +88,10 @@ impl CtlState {
             pinned,
             pin_target,
             tuning,
+            probe_urls,
+            ui_dir,
+            protocols: Mutex::new(protocols),
+            progress,
             jev,
         }
     }
@@ -87,6 +106,10 @@ impl CtlState {
         pinned: Arc<AtomicBool>,
         pin_target: Arc<Mutex<Option<String>>>,
         tuning: SharedTuning,
+        probe_urls: Vec<String>,
+        ui_dir: String,
+        protocols: std::collections::HashMap<String, String>,
+        progress: Arc<crate::scheduler::SchedulerProgress>,
         jev: Option<Arc<crate::scheduler::jev::JevDecider>>,
     ) -> Self {
         Self {
@@ -97,6 +120,10 @@ impl CtlState {
             pinned,
             pin_target,
             tuning,
+            probe_urls,
+            ui_dir,
+            protocols: Mutex::new(protocols),
+            progress,
             jev,
         }
     }
@@ -187,6 +214,20 @@ async fn do_reload(state: &CtlState, path_arg: Option<&str>) -> Result<String, S
         *reg = new_reg;
     }
 
+    *state.protocols.lock() = specs
+        .iter()
+        .map(|s| {
+            let name = match s.protocol {
+                crate::proxy::nodespec::Protocol::Vless => "Vless",
+                crate::proxy::nodespec::Protocol::Trojan => "Trojan",
+                crate::proxy::nodespec::Protocol::Shadowsocks => "Shadowsocks",
+                crate::proxy::nodespec::Protocol::Hysteria2 => "Hysteria2",
+                crate::proxy::nodespec::Protocol::Direct => "Direct",
+            };
+            (s.tag.clone(), name.to_string())
+        })
+        .collect();
+
     // 更新调度池：新增进池、删除出池、存活继承 EWMA
     let pool = {
         let mut guard = state.pool.write().await;
@@ -264,12 +305,21 @@ async fn do_select(state: &CtlState, arg: Option<&str>) -> Result<String, String
         return Err(format!("unknown node: {tag}"));
     }
     // 只登记意图：selection 由调度循环唯一写入（见 pin_target 文档）。
-    // 为了让 CLI 立刻看到结果，这里也同步写一次 selection ——
+    // 为了让 CLI/面板立刻看到结果，这里也同步写一次 selection ——
     // 调度循环发现 pin_target 与 selection 一致时不会再改动它。
     *state.pin_target.lock() = Some(tag.to_string());
     state.pinned.store(true, Ordering::Relaxed);
     *state.selection.write().await = vec![tag.to_string()];
     Ok(format!("pinned {tag}"))
+}
+
+/// web 面板的 select 入口：复用 ctl 的校验与 pinned 语义。
+#[cfg(feature = "meow")] // 仅 web 面板调用，web 模块挂 meow feature
+pub async fn do_select_public(state: &CtlState, tag: &str) -> String {
+    match do_select(state, Some(tag)).await {
+        Ok(m) => format!("{{\"ok\":true,\"msg\":\"{m}\"}}"),
+        Err(e) => format!("{{\"ok\":false,\"msg\":\"{e}\"}}"),
+    }
 }
 
 async fn do_status(state: &CtlState) -> String {

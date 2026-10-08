@@ -149,7 +149,7 @@ enum Fallback {
     LowProbability,
 }
 
-/// 决策运行统计：ctl status / 日志 / 测试共用一份口径。
+/// 决策运行统计：web 面板 / ctl status / 日志共用一份口径。
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct JevStats {
     /// 发起过的决策次数（不含冷却/在飞/候选不足的跳过）
@@ -182,7 +182,7 @@ impl JevStats {
         }
     }
 
-    /// 回退总数（ctl status summary 用）。
+    /// 回退总数（面板与 ctl status 用）。
     pub fn fallback_total(&self) -> u64 {
         self.fallback_transport
             + self.fallback_invalid
@@ -543,7 +543,7 @@ impl JevDecider {
         apply_head_to(desired, g.head.as_ref(), round_no, self.ttl_rounds)
     }
 
-    /// 当前有效决策的快照（ctl status / 测试用）。
+    /// 当前有效决策的快照（面板/status/测试用）。
     pub fn head(&self) -> Option<JevHead> {
         self.inner.lock().head.clone()
     }
@@ -557,7 +557,7 @@ impl JevDecider {
         self.candidate_count
     }
 
-    /// 完整状态快照（测试断言用；ctl status 走 `summary`）。
+    /// 面板用的完整状态快照。
     pub fn status(&self) -> JevStatus {
         let g = self.inner.lock();
         JevStatus {

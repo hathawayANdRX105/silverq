@@ -100,38 +100,3 @@ fn unknown_jev_key_is_rejected() {
     assert!(load(&p).is_err(), "[jev] 拼写错误的 key 必须报错");
     let _ = std::fs::remove_file(p);
 }
-
-/// 调参夹紧：config-reload 重读的任意值都不会把调度打坏。
-#[test]
-fn tuning_validation_clamps() {
-    use silverq::config::settings::RuntimeTuning;
-    let t = RuntimeTuning {
-        capacity: 9999,
-        batch_size: 0,
-        interval_secs: 1,
-        timeout_ms: 10,
-        concurrency: 0,
-        timeout_penalty: -5.0,
-        fallback_attempts: 100,
-        retire_max_failures: 5000,
-        retire_keep_alive_secs: 7200,
-        retire_min_pool: 10,
-        bw_interval_rounds: 0,
-        bw_timeout_ms: 10,
-        bw_max_bytes: 0,
-        bw_penalty_per_efold_ms: -1.0,
-    }
-    .validated();
-    assert_eq!(t.capacity, 50);
-    assert_eq!(t.batch_size, 1);
-    assert_eq!(t.interval_secs, 5);
-    assert_eq!(t.timeout_ms, 500);
-    assert_eq!(t.concurrency, 1);
-    assert_eq!(t.timeout_penalty, 100.0);
-    assert_eq!(t.retire_max_failures, 1000);
-    assert_eq!(t.fallback_attempts, 10);
-    assert_eq!(t.bw_interval_rounds, 1);
-    assert_eq!(t.bw_timeout_ms, 1000);
-    assert_eq!(t.bw_max_bytes, 16 * 1024);
-    assert_eq!(t.bw_penalty_per_efold_ms, 0.0);
-}

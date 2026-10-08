@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 下载 zashboard 官方构建产物（MIT 许可，见上游仓库），供外部 zashboard 静态服务取用。
+# 下载 zashboard 官方构建产物到 silverq 的 UI 目录（MIT 许可，见上游仓库）。
 # 用法: fetch-zashboard.sh [目标目录] [版本号]
 set -euo pipefail
 DEST="${1:-$HOME/.local/share/silverq/ui}"

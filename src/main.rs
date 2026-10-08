@@ -17,7 +17,9 @@ use silverq::dataplane::tun;
 use silverq::proxy::nodespec;
 #[cfg(feature = "meow")]
 use silverq::proxy::{factory, meow};
-use silverq::scheduler::{batch, decision, fast_path, jev, persist};
+use silverq::scheduler::{batch, decision, fast_path, jev, persist, SchedulerProgress};
+#[cfg(feature = "meow")]
+use silverq::web;
 
 #[cfg(not(feature = "meow"))]
 use silverq::scheduler::batch::NoopMeasurer;
@@ -125,11 +127,26 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
     let pinned = Arc::new(AtomicBool::new(false));
     let pin_target: Arc<parking_lot::Mutex<Option<String>>> =
         Arc::new(parking_lot::Mutex::new(None));
-    // 运行时可热更调参：调度循环 / inbound 共享（ctl config-reload 热更）
+    // 运行时可热更调参：调度循环 / inbound / web(PATCH /configs) 三方共享
     let tuning: ctl::SharedTuning = Arc::new(parking_lot::RwLock::new(
         settings::RuntimeTuning::from_eff(&eff),
     ));
+    let protocols: std::collections::HashMap<String, String> = specs
+        .iter()
+        .map(|sp| {
+            let name = match sp.protocol {
+                nodespec::Protocol::Vless => "Vless",
+                nodespec::Protocol::Trojan => "Trojan",
+                nodespec::Protocol::Shadowsocks => "Shadowsocks",
+                nodespec::Protocol::Hysteria2 => "Hysteria2",
+                nodespec::Protocol::Direct => "Direct",
+            };
+            (sp.tag.clone(), name.to_string())
+        })
+        .collect();
+
     // 4. 调度循环（测速 + EWMA + 切换），pinned 时暂停覆盖
+    let progress = Arc::new(SchedulerProgress::default());
     // jev 判断接入：只有 [jev].enabled 才构造；配置残缺只降级禁用（记错误日志），
     // 不因为一个可选增强杀启动。
     let jev = match jev::JevDecider::new(&file_cfg.jev.resolved()) {
@@ -154,6 +171,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
         pinned: pinned.clone(),
         pin_target: pin_target.clone(),
         selector_store: eff.selector_store.clone(),
+        progress: progress.clone(),
         jev: jev.clone(),
     };
     let sched = tokio::spawn(schedule_loop(handles, tuning.clone()));
@@ -171,6 +189,10 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             pinned.clone(),
             pin_target.clone(),
             tuning.clone(),
+            eff.probe_urls.clone(),
+            eff.ui_dir.clone(),
+            protocols.clone(),
+            progress.clone(),
             jev.clone(),
         ));
         #[cfg(not(feature = "meow"))]
@@ -182,14 +204,30 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             pinned.clone(),
             pin_target.clone(),
             tuning.clone(),
+            eff.probe_urls.clone(),
+            eff.ui_dir.clone(),
+            protocols.clone(),
+            progress.clone(),
             jev.clone(),
         ));
         let ctl_sock = std::path::PathBuf::from(eff.ctl_sock.clone());
+        #[cfg(feature = "meow")]
+        let web_state = ctl_state.clone();
         let inb = tokio::spawn(async move {
             if let Err(e) = ctl::serve_ctl(ctl_state, ctl_sock).await {
                 tracing::error!("ctl socket exited: {e}");
             }
         });
+        // Web 面板（默认 127.0.0.1:9095；SILVERQ_WEB_LISTEN / TOML [data_plane].web_listen 覆盖）
+        #[cfg(feature = "meow")]
+        {
+            let web_addr = eff.web_listen.clone();
+            tokio::spawn(async move {
+                if let Err(e) = web::run(&web_addr, web_state).await {
+                    tracing::error!("web dashboard exited: {e}");
+                }
+            });
+        }
         // 6. 数据面 inbound（feature meow）
         #[cfg(feature = "meow")]
         {
@@ -297,6 +335,8 @@ struct SchedulerHandles {
     pin_target: Arc<parking_lot::Mutex<Option<String>>>,
     /// SelectorStore 路径（publish_selector_store 用）
     selector_store: String,
+    /// 面板进度计数（schedule_loop 写，web 读）
+    progress: Arc<SchedulerProgress>,
     /// jev 决策器（[jev].enabled 时为 Some：轮末发起决策，reselect 叠加队首）
     jev: Option<Arc<jev::JevDecider>>,
 }
@@ -324,6 +364,7 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
         pinned,
         pin_target,
         selector_store,
+        progress,
         jev,
     } = h;
 
@@ -343,7 +384,7 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
         }
     }
 
-    // 早先用 interval ticker：周期建死就改不了，ctl config-reload 热调间隔无效。
+    // 早先用 interval ticker：周期建死就改不了，配置面板热调间隔无效。
     // 改成"跑一轮 → sleep(间隔)"：冷启动首轮立即（sleep 在轮末，语义同
     // interval 的首 tick 立即），间隔每轮从共享调参现读，热改即时生效。
     let mut last_selection: Vec<String> = Vec::new();
@@ -364,6 +405,8 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
                 t.bw_penalty_per_efold_ms,
             )
         };
+        let round_started = std::time::Instant::now();
+        progress.round_begin(batches.len());
 
         for chunk in batches {
             let results =
@@ -377,13 +420,13 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
             // 切换（pinned 时暂停）。
             //
             // 「算 selection」和「写 selection」必须在**同一个写锁临界区**内：
-            // ctl 的 select 是「置 pinned → 写 selection」两步，如果这里先在
+            // ctl/web 的 select 是「置 pinned → 写 selection」两步，如果这里先在
             // 读锁里算完、再去拿写锁，中间那个窗口足够让 select 插进来，
             // 随后本批的旧结果就把刚钉住的节点覆盖掉。
             // 实测：先缩小窗口（写锁内复查 pinned）仍有 2/5 概率被盖回 10 个候选；
             // 只有把计算也纳入临界区才彻底消除。
             // selection 的唯一写者（pinned 时强制 pin_target，否则按分数选前 N）
-            // 与 ctl 的双写竞争，详见 reselect 注释。
+            // —— 单写者消除与 ctl/web 的双写竞争，详见 reselect 注释。
             reselect(
                 &pool,
                 &selection,
@@ -398,6 +441,7 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
             .await;
 
             persist::save(&pool.read().await);
+            progress.batch_done(persist::now_secs() as i64);
         }
 
         // 吞吐批：只跑当前 selection，每 bw_interval_rounds 轮一次。
@@ -498,6 +542,7 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
             selection = ?last_selection,
             "测速轮完成"
         );
+        progress.round_end(round_started.elapsed().as_secs());
         // 先取值再 await：parking_lot 的 guard 不是 Send，不能跨 await 存活
         let iv = tuning.read().interval_secs;
         tokio::time::sleep(Duration::from_secs(iv)).await;
