@@ -42,7 +42,7 @@ impl MeowMeasurer {
     }
 
     /// 生产入口：探测 URL 来自 silverq.toml / env。
-    /// 超时不存副本 —— 每次测速由 batch 传参，ctl config-reload 热改即时生效
+    /// 超时不存副本 —— 每次测速由 batch 传参，配置面板热改即时生效
     /// （早先存副本再 min() 合并，热改调大超时会被旧副本盖住）。
     pub fn with_probe(registry: Registry, probe_urls: Vec<String>) -> Self {
         Self {

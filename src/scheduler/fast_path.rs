@@ -30,7 +30,7 @@ pub fn apply_batch(nodes: &mut [Node], measurements: &[Measurement]) {
             // 延迟成功更新 EWMA（顺带清失败计数，见 Node::update）；
             // 带宽成功更新对数域带宽 EWMA（顺带清失败计数，见 Node::update_bw）。
             //
-            // 早先是 `ewma += timeout_penalty`，把罚分混进延迟字段：显示出来
+            // 早先是 `ewma += timeout_penalty`，把罚分混进延迟字段：面板显示
             // 7512ms 像是 2500ms 超时失效（实为 1512ms + 两次罚分），且罚分是
             // 加法、恢复靠 alpha 混合（≤0.65），涨得比恢复快——偶尔失败的活节点
             // 被永久压住甚至撞 9999 封顶，与真死节点无法区分。
