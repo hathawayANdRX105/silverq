@@ -1,0 +1,34 @@
+# CK-RULE-SELECTOR: 弃权式规则选择 advisory —— 确定性 glob 保持权威, jev 只补漏网
+#
+# 背景: 规则选择写死在 paths_include glob 里, 新增文件类型(如 .env/.proto/
+#   Makefile)或语义跨界的改动(某文件里混入别的语言风格的病灶)glob 看不见。
+#   本规则对「没有任何域规则 glob 命中的变更文件」问 jev: 规则目录里哪些
+#   规则的 intent 语义上管辖这块改动, 命中则提示维护者把路径补进该规则
+#   match, 或对该规则写书面驳回。
+#
+# 弃权语义: glob 已命中的文件不问(glob 权威, 不质疑确定性结果); 纯
+#   catch-all(`**/*`)与 l3 判决层规则不计入覆盖判定也不进候选(它们对任何
+#   文件都「命中」, 计入会让工具全弃权)。
+#
+# 判决方向: 每条候选规则一个 choice 题, 标签穷尽 governs(该规则 intent
+#   覆盖此改动)/ not_relevant(兜底), fail_labels ["governs"],
+#   p(governs) ≥ 0.85 才出 WARN。严重度封顶 WARN —— advisory 提示, 不拦截。
+#
+# 降级契约: 无 jev 端点对 / 网络失败 / 规则目录不可读 → 单条 INFO, rc=0,
+#   永不阻断; 单文件调用失败不拖垮整批。
+# 手动跑法: canon check rule_selector
+# 凭据: 同 review_chain(JEV_API_* / TYPESAFE_API_*, 见 harness/jev_env.py)
+enabled: true
+hooks: [merge]
+sla: l3
+fail_severity: WARN
+mode: diff
+match:
+  paths_include: ["**/*"]
+  paths_exclude: ["target/", ".wt/", "node_modules/", ".githooks/"]
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/rule_selector.py"
+optional: true
+timeout: 180

@@ -1,0 +1,21 @@
+# CK-TS-SIGNALS: tree-sitter 确定性语法信号(pre-commit, merge)
+# TS-UNSAFE-NOINVARIANT → FAIL(unsafe 块必须写下安全不变量)
+# TS-IF-CHAIN / TS-INDEX-LOOP / TS-CLONE-OWNED → WARN,
+# 均带 category + suggestion,写代码的 agent 拿到即可改。
+# 语义判断(名字-行为一致、注释信息层、位置适配)归
+# semantic_rust 的事实卡类目——本规则只出确定性信号。
+# 软依赖 tree_sitter + tree_sitter_rust,缺失静默跳过。
+enabled: true
+hooks: [pre-commit, merge]
+sla: l1
+fail_severity: WARN
+mode: file
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/ts_extract.py"
+optional: true
+timeout: 60

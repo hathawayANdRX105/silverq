@@ -17,6 +17,7 @@ Config (JSON), keys are rule-ids:
     "state": {
       "file": true,                          # include changed file content
       "diff": false,                         # include hunks instead/alongside
+      "facts": false,                        # tree-sitter fact cards per item
       "context_files": ["docs/specs/web.md"] # repo files inlined as rule context
     },
     "questions": {
@@ -51,8 +52,11 @@ import urllib.request
 
 MAX_FILES = 20          # per run, most-changed first is not knowable; stdin order wins
 STATE_CAP = 16_000      # chars per jev state
+FACT_CAP = 12_000       # chars of fact cards per jev state
 POOL = 8                # concurrent jev calls
 TIMEOUT = 60            # per jev call, seconds
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import jev_env  # endpoint pair resolution (JEV_* wins over legacy TYPESAFE_*)
 
 
 def parse_files(payload: str):
@@ -116,6 +120,17 @@ def build_state(rule: dict, rel: str, content: str, diff_text: str, root: str) -
         if len(body) > STATE_CAP:
             body = body[:STATE_CAP] + "\n…[truncated]"
         parts.append(f"FILE CONTENT ({rel}):\n{body}")
+    if st.get("facts"):
+        try:
+            import ts_extract
+            cards = ts_extract.parse_items(content)
+            body = ts_extract.fact_cards_text(cards)
+            if len(body) > FACT_CAP:
+                body = body[:FACT_CAP] + "\n…[truncated]"
+            parts.append(f"FACT CARDS ({rel}):\n{body}")
+        except Exception as e:  # noqa: BLE001 - 提取失败按原文本判决
+            print(f"jev_rule: fact cards unavailable ({e})",
+                  file=sys.stderr)
     return "\n\n".join(parts), missing
 
 
@@ -211,9 +226,7 @@ def main():
     rev = rev or os.environ.get("GATE_BASE", "")
     if rev:
         files = [f for f in files if f[0] in changed_since(root, rev)]
-    key = os.environ.get("TYPESAFE_API_KEY")
-    base = os.environ.get("TYPESAFE_API_BASE", "https://api.typesafe.ai").rstrip("/")
-    model = os.environ.get("JEV_MODEL", "jev-latest")
+    base, key, model = jev_env.resolve()
 
     jobs = []   # (rule_id, rule, rel, content)
     for rel, content in files:
@@ -245,7 +258,7 @@ def main():
                     judged[i], notes[i] = None, f"{type(e).__name__}: {e}"[:120]
     else:
         for i in range(len(jobs)):
-            judged[i], notes[i] = None, "TYPESAFE_API_KEY not set"
+            judged[i], notes[i] = None, "no jev endpoint pair configured"
 
     findings = []
     for i, (rid, rule, rel, _c) in enumerate(jobs):

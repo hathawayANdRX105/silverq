@@ -39,10 +39,21 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(HERE, "jev_questions_verify.json")
-TIMEOUT_HTTP = 30
+sys.path.insert(0, HERE)
+import jev_env  # endpoint pair resolution (JEV_* wins over legacy TYPESAFE_*)
+
+# per-jev-call HTTP budget; must stay under the invoking checklist yaml `timeout:`
+# (45s) so pool=8 waves finish before the engine kills the harness (rc=2 = check skipped)
+TIMEOUT_HTTP = 20
 MAX_CANDIDATES = 30
 CAP_STATE = 6000
 POOL = 8
+
+# 域门问题键: 题集可选配置 `domain_gate` noul 题(陈述式, true=越域)。
+# p ≥ fail → 该候选判为越域假阳性直接丢弃; warn ≤ p < fail → 判决照常但
+# finding extra 记门概率; 其余照常。未配 domain_gate 的题集行为逐字不变。
+GATE_QID = "domain_gate"
+
 
 SECRET_PAT = re.compile(
     r"(password|passwd|secret|api_key|apikey|token|auth_token|access_token"
@@ -203,12 +214,48 @@ def post(url, headers, body, timeout):
         return json.loads(r.read().decode())
 
 
+def gate_verdict(rule_cfg, r):
+    """域门裁定: ("drop", p) / ("note", p) / (None, p)。未配域门或域门题
+    缺失 → (None, None) —— 调用方必须走与改造前完全一致的路径。"""
+    gate = rule_cfg["questions"].get(GATE_QID)
+    if gate is None or GATE_QID not in r:
+        return None, None
+    p = r[GATE_QID]
+    if p >= float(gate.get("fail", 1.1)):
+        return "drop", p
+    if p >= float(gate.get("warn", 1.1)):
+        return "note", p
+    return None, p
+
+
+def decide_candidate(rule, rule_cfg, c, r):
+    """单候选判决: 域门先判——越域(p ≥ 域门 fail)直接丢弃(返回 (None, True));
+    域门 warn~fail 之间判决照常但 extra 记门概率; 其余与无域门时完全一致。"""
+    verdict, p_g = gate_verdict(rule_cfg, r)
+    if verdict == "drop":
+        return None, True
+    worst, extra = "INFO", {"tier": "jev"}
+    if verdict == "note":
+        extra[GATE_QID] = f"{p_g:.2f}"
+    for qid, q in rule_cfg["questions"].items():
+        if qid == GATE_QID or qid not in r:
+            continue
+        p = r[qid]
+        fail, warn = float(q.get("fail", 1.1)), float(q.get("warn", 1.1))
+        if p >= fail:
+            worst = "FAIL"
+            extra[qid] = f"{p:.2f}"
+        elif p >= warn and worst != "FAIL":
+            worst = "WARN"
+            extra[qid] = f"{p:.2f}"
+    if worst == "INFO":
+        return None, False
+    return finding(rule, c, worst, extra), False
+
 def judge_one(rule_cfg, cand):
     state = {"rule_intent": rule_cfg.get("intent", ""), **cand}
     state = {k: (v[:CAP_STATE] if isinstance(v, str) else v) for k, v in state.items()}
-    key = os.environ.get("TYPESAFE_API_KEY")
-    base = os.environ.get("TYPESAFE_API_BASE", "https://api.typesafe.ai").rstrip("/")
-    model = os.environ.get("JEV_MODEL", "jev-latest")
+    base, key, model = jev_env.resolve()
     payload = post(f"{base}/v1/systemone",
                    {"Authorization": f"Bearer {key}", "x-api-key": key},
                    {"state": state, "model": model, "questions": rule_cfg["questions"]},
@@ -222,7 +269,13 @@ def judge_one(rule_cfg, cand):
             out[qid] = float(ans.get("score", 0.0))   # 0-indexed, continuous
         elif t == "choice":
             probs = ans.get("probabilities", {}) or {}
-            out[qid] = max(probs.values()) if probs else 0.0
+            # fail_labels = canonical "bad" answers (same contract as jev_rule.py);
+            # without a declaration, the old max-prob reading stands.
+            bad = set(rule_cfg["questions"].get(qid, {}).get("fail_labels", []))
+            if bad:
+                out[qid] = min(sum(v for k, v in probs.items() if k in bad), 1.0)
+            else:
+                out[qid] = max(probs.values()) if probs else 0.0
     return out
 
 
@@ -243,12 +296,13 @@ def main():
         print(json.dumps([])); return
     rule_cfg = cfg[rule]
     files = parse_files(sys.stdin.read())
-    cands = EXTRACTORS[rule](files)[:MAX_CANDIDATES]
+    all_cands = EXTRACTORS[rule](files)
+    cands = all_cands[:MAX_CANDIDATES]
     if not cands:
         print(json.dumps([])); return
 
     judged, notes = {}, {}
-    key = os.environ.get("TYPESAFE_API_KEY")
+    _, key, _ = jev_env.resolve()
     if key:
         with concurrent.futures.ThreadPoolExecutor(max_workers=POOL) as ex:
             futs = {i: ex.submit(judge_one, rule_cfg, c) for i, c in enumerate(cands)}
@@ -259,8 +313,10 @@ def main():
                     judged[i], notes[i] = None, f"{type(e).__name__}: {e}"[:120]
     else:
         for i in range(len(cands)):
-            judged[i], notes[i] = None, "TYPESAFE_API_KEY not set"
+            judged[i], notes[i] = None, "no jev endpoint pair configured"
 
+    gated = GATE_QID in rule_cfg["questions"]
+    dropped = 0
     findings = []
     for i, c in enumerate(cands):
         r = judged.get(i)
@@ -269,21 +325,24 @@ def main():
                 "tier": "candidates-raw",
                 "note": f"unverified ({notes.get(i, '')}) - candidate from deterministic scan"}))
             continue
-        worst, extra = "INFO", {"tier": "jev"}
-        for qid, q in rule_cfg["questions"].items():
-            if qid not in r:
-                continue
-            p = r[qid]
-            fail, warn = float(q.get("fail", 1.1)), float(q.get("warn", 1.1))
-            if p >= fail:
-                worst = "FAIL"
-                extra[qid] = f"{p:.2f}"
-            elif p >= warn and worst != "FAIL":
-                worst = "WARN"
-                extra[qid] = f"{p:.2f}"
-        if worst == "INFO":
-            continue          # below warn threshold - the false-positive filter
-        findings.append(finding(rule, c, worst, extra))
+        f, drop = decide_candidate(rule, rule_cfg, c, r)
+        if drop:
+            dropped += 1
+            continue
+        if f:
+            findings.append(f)
+    judged_n = sum(1 for i in range(len(cands)) if judged.get(i) is not None)
+    if gated and judged_n and dropped:
+        findings.append({"id": "VERIFY-DOMAIN-GATE", "severity": "INFO",
+                         "path": files[0][0] if files else ".", "line": 0,
+                         "message": (f"domain_gate: dropped {dropped}/{judged_n} "
+                                     "out-of-domain candidates")})
+    if len(all_cands) > len(cands):
+        findings.append({"id": f"{rule.upper().replace('_','-')}-TRUNCATED",
+                         "severity": "INFO", "path": files[0][0] if files else ".",
+                         "line": 0,
+                         "message": f"{len(all_cands)} candidates exceed cap {MAX_CANDIDATES}; "
+                                    f"{len(all_cands) - len(cands)} not judged this run"})
     print(json.dumps(findings))
 
 

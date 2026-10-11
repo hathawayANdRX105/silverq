@@ -1,6 +1,13 @@
 # CD-07: cargo clippy（确定性硬门槛, merge only）
 # FAIL: rustc 编译错误 + unused_* / dead_code（真信号）
-# WARN: collapsible_if 等风格（不阻断, 避免硬门槛被噪音冲掉）
+# WARN: collapsible_if 等默认风格 + 显式启用的 12 条 pedantic/restriction/nursery
+# （too_many_lines / semicolon_if_nothing_returned / wildcard_imports /
+#   needless_pass_by_value / struct_excessive_bools / explicit_iter_loop /
+#   explicit_into_iter_loop / cloned_instead_of_copied / redundant_clone /
+#   collapsible_else_if / redundant_else / single_match_else）
+# 不启用: cognitive_complexity（与 CK-CCN lizard ceiling 6 冗余且更松）、
+# many_single_char_names（数学/索引代码 FP 高）、unwrap_used/expect_used
+# 作 FAIL（与 semantic_rust error_panic 重复判决）——启用清单经用户确认
 enabled: true
 hooks: [merge]
 sla: l1
@@ -16,7 +23,7 @@ harness:
     - |
       ROOT=$(git rev-parse --show-toplevel)
       cd "$ROOT" || exit 2
-      cargo clippy --workspace --all-targets --message-format json 2>/dev/null |
+      cargo clippy --workspace --all-targets --message-format json -- -W clippy::too_many_lines -W clippy::semicolon_if_nothing_returned -W clippy::wildcard_imports -W clippy::needless_pass_by_value -W clippy::struct_excessive_bools -W clippy::explicit_iter_loop -W clippy::explicit_into_iter_loop -W clippy::cloned_instead_of_copied -W clippy::redundant_clone -W clippy::collapsible_else_if -W clippy::redundant_else -W clippy::single_match_else 2>/dev/null |
         grep '"reason":"compiler-message"' |
         jq -s '
           [.[]

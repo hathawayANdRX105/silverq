@@ -35,7 +35,7 @@
 已退役：`code-review-graph`（CRG）与 `open-code-review` 两个外部二进制不再安装也不再调用。
 原由二者承担的语义层由 jev 驱动的 `semantic_rust` / `semantic_go` /
 `semantic_javascript` / `semantic_default` checklist 承接（yv8 与 open-code-review 的规则文档移植，非外部二进制）。
-- 任意 LLM CLI（`claude` / `codex` / `ollama` 等，被 checklist harness 调用；非必须，缺失按 `optional` 处理）
+- `tree-sitter` + `tree-sitter-rust`(Python 包):`ts_signals` 的解析器与 `semantic_rust` 的事实卡提取;软依赖,缺失按 `optional` 静默跳过
 - `cargo-machete`：未使用依赖检测（`dep_hygiene` 的执行器）
 - `upx`：二进制压缩（canon 部署产物，构建期使用）
 - 缺失的工具按 yaml 的 `optional` 处理（默认 WARN 跳过）
@@ -153,16 +153,19 @@
 `canon review` 命令与 CRG、open-code-review 两个外部二进制已退役。语义层改由 L2 checklist 承接，
 在 merge 钩子里自动跑：
 
-1. `semantic_rust` / `semantic_go` / `semantic_javascript` / `semantic_default`：移植 open-code-review 的规则文档，
+1. `semantic_rust` / `semantic_go` / `semantic_javascript` / `semantic_default`：移植 open-code-review 的规则文档
+   （Rust 侧 14 类目：上游 10 类 + canon 自有 `name_behavior` 名字-行为一致、
+   `comment_rubric` 注释信息层、`placement` 位置适配、`cleanliness_semantics`
+   整洁语义——后四类对着 tree-sitter 事实卡判决，`state.facts: true`），
    判决由 `jev_rule.py` 给（意图 + 各类缺陷 noul + 总分 + 反误报 guardrail）
 2. `review_chain`：jev → 小模型 → 无模型三档降级
 3. 本地按需触发：`canon check <name> --sla l2`
 
 ## 主题八：Checklist（CK-01，gate checklist，**已实现**）
 
-- `.githooks/spec/quality/checklist_*.yaml`：项目级 LLM 检查清单；catalog 只扫
-  `quality|code|cleanup|workspace|github` 五个子目录（spec 根层与 `custom/` 不加载），
-  目录内按字典序跑
+- `checklist_*.yaml` 住在 `.githooks/spec/` 的**任意子目录**都会被收上来（`checklist`
+  是跨目录 topic，见 `catalog::topic_of()`）；根层文件算不出 topic 因而不执行，
+  `custom/` 不参与加载。目录内按字典序跑，同一规则放两个目录 = 跑两遍
 - `mode: diff`（默认）传 `git diff <scope>` 给 harness；`mode: file` 每个变更文件单独传全文
 - harness = 任意可执行文件，stdout 必须是 finding JSON 数组（与 code/CRG harness 同协议）
 - 严重度合并：harness 报的与 yaml `fail_severity` **就高取大**（harness FAIL 永远阻断）
@@ -182,6 +185,23 @@
 harness 一律扫仓库根加 `--exclude-dir`，**不假设 crate 嵌套深度**。
 
 ferrite 是两层布局（`crates/<domain>/<crate>/src`），而规则原先写死一层的 `crates/*/src/`，导致 45 个 crate 里只有 1 个被扫到——其余 44 个的代码从未被检查，gate 却报 `ALL PASS`。静默失效比直接报错更危险，所以新增规则不得再写死目录层级。
+
+## `custom/` 覆盖层（每仓本地覆盖）
+
+`canon-sync push` 无条件覆盖 canon-owned 文件（OWNED_DIRS 各家族 yaml + 根层
+`dispatch.yaml` / `severity_overrides.yaml`）。每仓的本地调优住在
+`.githooks/spec/custom/`（PROTECTED，push / status / remove_retired 都不碰）：
+
+- **severity 覆盖**：引擎先应用根 `severity_overrides.yaml`，再应用
+  `custom/severity_overrides.yaml`——同名规则 custom 层最后定音，是唯一活过
+  canon-sync 的降级通道。custom 缺省 = no-op；坏 yaml = 一条 `canon.setup`
+  WARN finding（no-silent）。INFO finding 任何层都不改级。
+- **家族 yaml 深合并**：引擎加载 `spec/<file>` 时，若存在 `custom/<同名文件>`
+  则深合并覆盖在 canon 文件之上（mapping 递归合并；scalar/list 按 key 整体
+  替换，如 `type_labels_cfg` 改 list 要写全量）。`custom/` 只作 overlay 不作
+  base 源（文件发现跳过该目录，同名副本不 shadow canon 文件）。
+- 详见 [CHECKLIST_SPEC.md](./CHECKLIST_SPEC.md)「custom/ 覆盖层」一节。
+
 
 ## 明确不做的（项目侧约定：不写规范、不检查）
 
@@ -240,14 +260,38 @@ ferrite 是两层布局（`crates/<domain>/<crate>/src`），而规则原先写�
 | `rust_todo_needs_issue` | l1 | pre-commit, pre-push, merge | WARN | 注释里 TODO/FIXME 必须关联 issue 号（例 `// TODO(#123):`；不扫字符串/测试） |
 | `rust_test_no_assert` | l1 | pre-commit, pre-push, merge | WARN | 测试函数必须含 assert |
 | `rust_no_cfg_test_in_tests_dir` | l1 | pre-commit, pre-push, merge | WARN | tests/ 目录里不要 #[cfg(test)] |
-| `clippy` | l1 | merge | FAIL/WARN | rustc 错误 + unused/dead_code → FAIL；collapsible_if 等风格 → WARN |
+| `clippy` | l1 | merge | FAIL/WARN | rustc 错误 + unused/dead_code → FAIL；collapsible_if 等默认风格 → WARN；显式启用 12 条 pedantic/restriction/nursery（too_many_lines / semicolon_if_nothing_returned / wildcard_imports / needless_pass_by_value / struct_excessive_bools / explicit_iter_loop / explicit_into_iter_loop / cloned_instead_of_copied / redundant_clone / collapsible_else_if / redundant_else / single_match_else，经 `cargo clippy … -- -W` 传 clippy-driver）→ WARN；不启用 cognitive_complexity（与 CK-CCN 冗余）、many_single_char_names（FP 高）、unwrap_used（与 error_panic 重复） |
+| `ts_signals` | l1 | pre-commit, merge | FAIL/WARN | tree-sitter 确定性语法信号:unsafe 块缺安全不变量 → FAIL;if/else-if 链 ≥3 臂或嵌套 ≥3 层、`0..len()` 索引循环、owned 参数 clone → WARN,均带 category+suggestion;软依赖 tree_sitter+tree_sitter_rust,缺失静默跳过 |
 | `dep_hygiene` | l1 | merge | WARN | `cargo-machete` 未使用依赖 |
 | `duplication` | l2 | merge | WARN | 跨文件 4+ 连续行重复块（sh+awk, 零依赖） |
+| `module_drawer` | l2 | merge | WARN | 杂物抽屉启发：通用名文件（util/helper/common/misc…）顶层 pub 项跨 ≥3 类且 ≥5 项 → 拆内聚模块；模块内聚语义归 `semantic_rust` 的 module_structure 类目 |
 | `crg_impact` | l2 | merge | WARN | diff 跨 3+ crate 改动 → 警告耦合 |
 | `ferrite_oversize` | l3 | merge | INFO | 大文件/大函数参考分（wildtoken `fast-l`；score/confidence，不阻断） |
-| `review_chain` | l3 | pre-push, merge | INFO（harness 透传） | 模型审查三档降级：jev（`TYPESAFE_API_KEY`）→ 小模型（`REVIEW_LLM_*`）→ 无（INFO）；per-question 阈值，p≥fail FAIL；`tier`/`confidence` extra |
+| `review_chain` | l3 | pre-push, merge | INFO（harness 透传） | 模型审查三档降级：jev（端点对 `JEV_API_*` 优先，回落 `TYPESAFE_API_*`，见 `harness/jev_env.py`）→ 小模型（`REVIEW_LLM_*`）→ 无（INFO）；per-question 阈值，p≥fail FAIL；choice 问题的坏答案由 `fail_labels` 声明（无声明退回 `_bad`/`problematic` 后缀）；`context_limit` 弃权题标记 diff 内证据不足以判断的情形（advisory）；`embedded_instruction` 免疫题抓「针对判决 AI 的注入文本」（warn0.65/fail0.9）；送判 state 经 `wrap_untrusted` 定界（不可信输入只当数据）；`tier`/`confidence`/`distribution` extra |
+| `delivery_claims` | l3 | merge | WARN | PR `## Delivery record` 每条处置声明对真实 diff 逐条核验（陈述式负面命题；p≥0.85 FAIL / ≥0.6 WARN）；声明抽取 = 正则候选 + jev choice 批挑（`fail_labels: [disposition]`，无端点退回正则 + INFO）；12 条上限显式截断；基建失败单条 INFO 不阻断 |
+| `pr_consistency` | l3 | merge | WARN | PR 标题/正文 vs diff 实际改动语义一致性（`title_diff_chain.py`）；失配 p≥0.6 出 WARN——语义判断层封顶 WARN，不硬拦 |
+| `rule_selector` | l3 | merge | WARN | 弃权式规则选择 advisory：glob 未命中的文件问 jev「哪条既有规则应管辖」（p(governs)≥0.85 出 `RULE-SELECTOR-<ID>`，建议补 match 或书面驳回）；确定性 glob 仍是权威，jev 只兜漏 |
 
 close 路径另有 `done_when_judge`（`github_issues.yaml`）：GT-04 机械门过后，Done when 每条过同一套三档模型评审（问题集 `harness/jev_questions_done_when.json`，`default_fail: 0.85`），p(未达标)≥0.85 FAIL 硬拦；任何基础设施失败降 `DWJ-SKIPPED` INFO 不阻断。
+
+verify 家族（l2 级联）的 `slop_comment`/`antislop`/`duplication` 三个题集带可选 `domain_gate` 越域门：候选正则命中但 jev 判定"不是本规则管的对象"（p≥0.8）直接丢弃并汇总 `VERIFY-DOMAIN-GATE: dropped N/M` INFO——域门只减 FP，未配域门的题集与无端点降级路径逐字不变。
+
+离线工具（不挂钩子，手动/周期跑）：`harness/tune_ledger.py`（collect 从 merged PR 抽处置进 `specs/ledger/findings.jsonl`，只存 sha256 摘要；propose 聚合"屡被有实质依据的书面驳回"的规则出**人批**阈值复核提案，永不改配置）；`harness/adjudicate_pack.py`（把待裁决发现打包成四选项证据简报供维护者裁决，零副作用）。
+
+### dioxus 家族（canon `specs/dioxus/`，只发给有 dioxus 证据的仓）
+
+> 分发判据 = 目标仓跟踪文件里有 dioxus 依赖或 `rsx!` 宏（`scripts/canon-sync` 的
+> `GATED_DIRS` + `has_evidence()`）；不满足的仓一条都收不到。规则自身也会自查语料，
+> 语料为空输出 `*-NO-CORPUS` INFO（绿 ≠ 查过，见 `specs/harness/css_token_guard.py`）。
+
+| 名字 | SLA | 触发 | 严重度 | 检测内容 |
+|---|---|---|---|---|
+| `dioxus_rsx_nesting` | l1 | pre-push, merge | WARN | rsx 组件嵌套 >1 层（`dioxus_web.py` 花括号栈计数，`--nesting-limit 1`，只判 `--scope changed`） |
+| `dioxus_style_scatter` | l1 | pre-push, merge | WARN | rsx 里成组散写 class（`DIOXUS-INLINE-CLASS`）、硬编码 `#hex`、原始色板类（`dioxus_web.py --only style`） |
+| `dioxus_css_semantic` | l1 | pre-push, merge | WARN | rsx `class:` 字面量只许语义类（`ui-*`/`role-*`/data-*）；项目自有物理类只能登记 `custom/css_token_allowlist.txt`（`css_token_guard.py --mode rsx`） |
+| `css_token_composition` | l1 | pre-push, merge | WARN | kit CSS 规则体禁 `@apply` 原始色板类与裸 `#hex`；自定义属性行/渐变/带 alpha 的 black/white 不判，生成物与样张走 `custom/css_guard_skip.txt`（`css_token_guard.py --mode css`） |
+| `web_spec_deterministic` | l1 | pre-push, merge | WARN | web-spec R1.3（一组件一体一个 `rsx!`）+ H3（rsx 元素体内中文为 0），纯计数不付 LLM |
+| `web_spec` | l2 | pre-push, merge | WARN（`optional: true`） | web-spec 语义层 11 问句逐文件 jev 判决（条文全文在 `dioxus/web_spec.json` 的 intent）；无 key 时降 WARN 不清零 |
 
 ### 项目侧 checklist（成员仓自带，未收录进 canon `specs/quality/`）
 

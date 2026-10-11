@@ -16,6 +16,7 @@
       "some_pending": "at least one item is not demonstrated",
       "not_started": "the evidence does not correspond to the items at all"
     },
+    "fail_labels": ["some_pending", "not_started"],
     "fail": 0.85,
     "warn": 0.5
   }

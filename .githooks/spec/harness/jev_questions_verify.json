@@ -27,6 +27,16 @@
     "fail": 0.8,
     "warn": 0.55
    },
+   "domain_gate": {
+    "type": "noul",
+    "instructions": "This candidate is outside the rule's domain — the code pattern it matches is not what the rule intent describes.",
+    "criteria": {
+     "true": "the matched line is not a source-code comment in a language this rule targets (e.g. it sits in a string literal, a data/lock file, or a comment of an unrelated language such as shell)",
+     "false": "the matched line is a source-code comment in one of the targeted languages (python/rust/js/ts/go) and is the comment pattern this rule targets"
+    },
+    "fail": 0.8,
+    "warn": 0.6
+   },
    "severity": {
     "type": "score",
     "instructions": "How damaging is this comment to a maintainer? (0=cosmetic .. 2=misleading)",
@@ -78,6 +88,16 @@
     ],
     "fail": 2,
     "warn": 1
+   },
+   "domain_gate": {
+    "type": "noul",
+    "instructions": "This candidate is outside the rule's domain — the code pattern it matches is not what the rule intent describes.",
+    "criteria": {
+     "true": "the matched token is not code this rule targets — e.g. a comment in a shell script or config file, a string in a data file, or documentation prose",
+     "false": "the matched token sits in real source code of the targeted languages and is the token pattern this rule targets"
+    },
+    "fail": 0.8,
+    "warn": 0.6
    }
   }
  },
@@ -104,6 +124,16 @@
     ],
     "fail": 2,
     "warn": 1
+   },
+   "domain_gate": {
+    "type": "noul",
+    "instructions": "This candidate is outside the rule's domain — the code pattern it matches is not what the rule intent describes.",
+    "criteria": {
+     "true": "the repeated block is generated output or boilerplate scaffolding (lock files, generated bindings, repeated template structure) rather than hand-written logic",
+     "false": "the repeated block is hand-written logic of the targeted languages — the drift this rule targets"
+    },
+    "fail": 0.8,
+    "warn": 0.6
    }
   }
  }

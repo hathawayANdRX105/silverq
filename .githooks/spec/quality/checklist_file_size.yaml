@@ -1,8 +1,12 @@
 # 泛用: 单文件体积上限（架构门禁，拆分触发器）
-# 为什么: 100k 级别的巨型文件无法 review / 无法可靠测试。超阈值即提示按职责拆分。
-# 阈值: 1500 行 或 35KB（宽松档，只提示不阻断）；存量超标留 WARN，清账后可升 FAIL。
-# 检测: 扫仓库根所有 .rs（-prune 按目录名剪枝, worktree 安全）, 数行数 + 字节
-# grep 模式, 零 LLM, 毫秒级（仅 wc）
+# 为什么: 1500 行 / 35KB 级别的巨型文件无法 review / 无法可靠测试。超阈值即提示按职责拆分。
+# 阈值: 由 CLI 参数传入（默认 1500 行 / 35840 字节），不再写死在 shell heredoc。
+# 棘轮: 存量超标记进 debt.tsv(进仓)，门禁只判升降，治「每个 merge 重复刷存量 WARN」的告警疲劳。
+#       持平/下降 = 静默容忍；上升或新增超标 = WARN；账本缺失 = 照常报并提示先跑 seed。
+# 记账: 首次 `python3 .githooks/spec/harness/file_size_gate.py seed --root .`
+#       生成 debt.tsv(3 列 key\t行数\thash, 进仓)。judge 不建账本，只让存量只降不升。
+# 检测: 自扫全仓 git ls-files '*.rs'(grep 模式, 零 LLM, worktree 安全), 数行数 + 字节
+# 截断: 最多报 50 条，超出补一条 INFO "... and N more (truncated)"，不再 `| head -30` 静默截断。
 enabled: true
 hooks: [merge]
 sla: l1
@@ -12,28 +16,17 @@ match:
   paths_exclude: ["target/", ".wt/"]
 mode: grep
 harness:
-  command: "sh"
+  command: "python3"
   args:
-    - "-c"
-    - |
-      ROOT=$(git rev-parse --show-toplevel); cd "$ROOT"
-      LIMIT_LINES=1500
-      LIMIT_BYTES=35840
-      matches=$(git ls-files -- '*.rs' | while read -r f; do
-            lines=$(( $(wc -l < "$f" 2>/dev/null) ))
-            bytes=$(( $(wc -c < "$f" 2>/dev/null) ))
-            if [ "$lines" -gt "$LIMIT_LINES" ] || [ "$bytes" -gt "$LIMIT_BYTES" ]; then
-              printf '%s:0:%s 行 / %s 字节\n' "$f" "$lines" "$bytes"
-            fi
-          done | head -30)
-      if [ -z "$matches" ]; then
-        echo '[]'
-      else
-        printf '%s' "$matches" | jq -R -s '
-          split("\n") | map(select(length > 0))
-          | map(capture("^(?<path>.+):(?<line>[0-9]+):(?<rest>.*)$"))
-          | map({id: "FILE-TOO-BIG", severity: "WARN", path: .path, line: (.line|tonumber),
-                message: ("文件过大 (>1500 行 或 >35KB), 考虑按单一职责拆分: " + .rest)})'
-      fi
+    - ".githooks/spec/harness/file_size_gate.py"
+    - "judge"
+    - "--root"
+    - "."
+    - "--max-lines"
+    - "1500"
+    - "--max-bytes"
+    - "35840"
+    - "--max-report"
+    - "50"
 optional: true
 timeout: 30
