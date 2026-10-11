@@ -2,6 +2,9 @@
 #
 # Each hook runs the listed topics in order. Add/remove topics here
 # without touching the hook scripts.
+# 本文件随 canon 分发，canon-sync push 会无条件覆盖 —— 每仓本地调优
+# （severity_overrides / 话题列表）写到 `.githooks/spec/custom/dispatch.yaml`
+# （受保护不被覆盖；引擎加载时深合并，custom 层优先）。
 
 # commit 快路径：只做基本代码检查（lint + 高价值候选判决）
 # 工作区卫生（WS-*）在 merge 把关：干净树是合并标准，不是提交标准

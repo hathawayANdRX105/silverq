@@ -22,4 +22,4 @@ harness:
   # 范围 = 本次变更（抓新引入的复制漂移）; 无 key / 请求失败 -> 候选降级 WARN
 optional:
  true
-timeout: 30
+timeout: 60

@@ -1,6 +1,6 @@
 {
   "semantic_rust_review": {
-    "message": "语义审查（Rust）判定本次改动有缺陷；overall_severity 分数越高问题越重（warn>=1 / fail>=2），具体类目判定见 finding 的 extra 字段。按 10 类目核对 diff：typos / ownership_lifetime / error_panic / unsafe_boundaries / concurrency / async_cancellation / collections_perf / type_api_design / macros / security；确认无问题后书面驳回。",
+    "message": "语义审查（Rust）判定本次改动有缺陷；overall_severity 分数越高问题越重（warn>=1 / fail>=2），具体类目判定见 finding 的 extra 字段。按 15 类目核对 diff（事实卡驱动：name_behavior / comment_rubric / placement / clone_necessity / cleanliness_semantics 对着每项的 FACT CARD 判决）：typos / name_behavior / comment_rubric / placement / clone_necessity / cleanliness_semantics / ownership_lifetime / error_panic / unsafe_boundaries / concurrency / async_cancellation / collections_perf / type_api_design / macros / security；确认无问题后书面驳回。",
     "intent": "Rust code review against the OpenCodeReview semantic rubric (internal/config/rules/rule_docs/rust.md). Judge the CHANGED Rust code (not the whole file) against each category; a finding is one of the listed conditions actually present in the diff, not a style preference. Favor precision over recall: report only defects likely real; correctness/security findings are blocking, style-only are advisory. Use file_read/code_search context to establish call sites, ownership, and boundaries before claiming a non-local defect; do not infer defects from a function name alone. Before reporting any non-local claim, establish the call site, ownership, synchronization, and trust boundary from the diff and provided context; report a finding only on concrete evidence actually present in the change; prefer a false negative over a false positive; do not turn formatter/linter-enforced style into blocking findings. The overall_severity score counts only defects that survive this guard.",
     "paths_include": [
       "**/*.rs"
@@ -12,6 +12,7 @@
     "state": {
       "file": true,
       "diff": true,
+      "facts": true,
       "context_files": []
     },
     "questions": {
@@ -114,6 +115,56 @@
         },
         "fail": 0.85,
         "warn": 0.6
+      },
+      "name_behavior": {
+        "type": "noul",
+        "instructions": "Name-behavior correspondence in the changed Rust code: does each item's name describe what the code actually does? Judge against the item's FACT CARD (name, doc comment, signature, called symbols, return type): a name lies when the called symbols or return type contradict it — a 'parse' that only validates, a 'get' that computes, a 'send' that only formats, a 'load' that returns a constant. Also judge whether the name conveys the item's role — an identifier so abbreviated or misleading that a reader cannot infer what the item does. Judge declaration sites in the changed code only; cite the identifier and line as evidence; compiler-enforced casing is not a finding (rustc owns that).",
+        "criteria": {
+          "true": "A changed item's name contradicts or misrepresents its actual behavior per its fact card, or is too misleading to infer the item's role",
+          "false": "Names in the changed code accurately describe behavior"
+        },
+        "fail": 0.85,
+        "warn": 0.65
+      },
+      "comment_rubric": {
+        "type": "noul",
+        "instructions": "Comment information-layer defects in the changed Rust code. Comments are the information OUTSIDE the code — judge whether the doc comment carries what a caller or maintainer needs, against the item's FACT CARD: (1) purpose — why the item exists, not what it executes; (2) caller context — who calls it, how it fits the module; (3) caveats — preconditions, cost, what to watch out for; (4) gaps — what is missing or not yet handled; (5) implementation notes — non-obvious approach choices; (6) accuracy — the description must match the signature and called symbols on the fact card; (7) typos in identifiers and doc text. A comment that merely restates the code is not a defect unless it misleads. Cite line evidence. Do not report AI-boilerplate phrasing — the slop_comment rule owns that.",
+        "criteria": {
+          "true": "A changed item's comment lacks information a caller or maintainer needs, or describes something the code does not do",
+          "false": "Comments in the changed code carry the information a caller or maintainer needs"
+        },
+        "fail": 0.85,
+        "warn": 0.65
+      },
+      "placement": {
+        "type": "noul",
+        "instructions": "Placement and aggregation defects in the changed Rust code: does each item belong in this file / mod / crate? Judge against the file's full item inventory (FACT CARDS): a struct, function, impl or trait whose collaborators are elsewhere; items that cohere more strongly with another module; a file that mixes unrelated responsibilities; a struct that should be split (fields with disjoint users) or aggregated (fields always used together); a trait that belongs in its own module. Judge from the changed code with file-level context; cite file and line evidence. Do not report file length (the file_size gate owns that) or the generic-filename signal (ts_signals owns that).",
+        "criteria": {
+          "true": "The change places items in the wrong file/mod/crate, or a struct/trait should be split or aggregated differently",
+          "false": "Items in the changed code are placed where their collaborators live"
+        },
+        "fail": 0.85,
+        "warn": 0.65
+      },
+      "clone_necessity": {
+        "type": "noul",
+        "instructions": "Clone-necessity defects in the changed Rust code: a clone() whose value never needs ownership — the receiver is only read, only borrowed, or immediately dropped — where taking &recv (with a lifetime if it must outlive the call), an iterator, Cow, or an ownership transfer expresses the same intent without the copy. Judge from the FACT CARD plus the surrounding code: the clone is justified when the value is stored, moved into a callee that takes ownership, returned as owned, or crosses a thread boundary. Covers the shapes the deterministic layer deliberately does not flag: clone of a struct field (self.field.clone()), clone of a local binding (let s = ...; s.clone()), clone feeding a value only read afterwards. Do not re-report what is already covered: TS-CLONE-OWNED flags clone of an owned function parameter, and clippy's clone_on_copy / cloned_instead_of_copied / redundant_clone own Copy types and provably dead clones. Cite the receiver and line as evidence; only judge clones the change itself introduces.",
+        "criteria": {
+          "true": "The change introduces a clone() whose ownership is never required, where a borrow, iterator, Cow, or ownership transfer expresses the same intent without the copy",
+          "false": "Clones in the changed code are justified by a real ownership, storage, or thread requirement"
+        },
+        "fail": 0.85,
+        "warn": 0.65
+      },
+      "cleanliness_semantics": {
+        "type": "noul",
+        "instructions": "Cleanliness defects needing semantic judgment in the changed Rust code, excluding clone (the clone_necessity category owns it): (1) recursion where a loop is semantically equivalent — no depth bound, no tree/graph traversal, no early-exit justification; (2) if/else dispatch clearer as a match or lookup table beyond ts_signals' chain detection; (3) concurrency optimization — locking granularity, unnecessary Arc/Mutex, blocking calls in async context; (4) struct field cohesion. Only judge patterns the change itself introduces; cite line evidence; do not report patterns clippy already flags — the clippy gate owns those.",
+        "criteria": {
+          "true": "The change introduces a semantically unjustified recursion, unclear dispatch, suboptimal concurrency, or weak field cohesion",
+          "false": "Cleanliness of the changed code is sound"
+        },
+        "fail": 0.85,
+        "warn": 0.65
       },
       "overall_severity": {
         "type": "score",

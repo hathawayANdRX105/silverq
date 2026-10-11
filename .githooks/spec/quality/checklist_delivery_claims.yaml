@@ -1,0 +1,35 @@
+# CK-DELIVERY-CLAIMS: L3 模型层 — 拿分支 diff 当证据, 逐条验证 PR
+# `## Delivery record` 声明是否被支持 (jev_verify 语义: claims vs evidence,
+# 此前全仓未用的形态——Delivery record 从装饰变成可门禁的语义检查)
+#
+# 方向语义: 每条声明是一题 noul, true = 「证据（diff）不支持或矛盾该声明」
+#   (HIGH=BAD, 与 severity 同向); p>=0.85 FAIL, p>=0.6 WARN, 否则 INFO 参照。
+#   题目必须写成陈述式负面命题（true=unsupported）: 疑问句会让模型顺着
+#   问句把 true 读成 supported，判定整体翻转（实测踩出的坑，见 harness 注释）。
+#   外加 evidence_sufficient 总判 (true=证据为空/仅声明, fail 0.9/warn 0.6,
+#   对齐 done_when 的方向)。
+#
+# 判定局限: JeV 只判 diff 证据内的可见性，不能证明全仓范围事实——
+#   「本 diff 应包含的变更」可核验；但「全仓已删除 X」「ceiling 提到 10」
+#   这类 repo-wide 声明在 diff 里天然不可见，模型只给 ~0.28，过不了阈值。
+#   故这类声明不会出 finding（漏报可接受，误报已被方向纠正消除）。
+#
+# 降级契约 (policy layer): 只走 jev 档, 无 key / 网络 / 解析失败 → 单条 INFO
+#   降级, 永不阻断; 无 PR body / 无 gh 也 → 单条 INFO。findings 带
+#   {tier: "jev", confidence, claim} extra。
+# 手动跑法: canon check delivery_claims
+# 凭据: TYPESAFE_API_KEY / TYPESAFE_API_BASE / JEV_MODEL (同 review_chain)
+enabled: true
+hooks: [merge]
+sla: l3
+fail_severity: WARN
+mode: diff
+match:
+  paths_include: ["**/*"]
+  paths_exclude: ["target/", ".wt/"]
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/delivery_chain.py"
+optional: true
+timeout: 120

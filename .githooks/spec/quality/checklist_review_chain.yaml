@@ -1,7 +1,8 @@
 # CK-REVIEW-CHAIN: 模型审查层三档降级 — jev -> 小模型 -> 工具检查
 #
 # 重要判断(审查/代码质量规范)优先交给 jev (TypeSafe System One 决策模型):
-#   TYPESAFE_API_KEY 存在 -> jev 定型问题, 拿校准概率(100-500ms)
+#   jev 端点对存在 -> jev 定型问题, 拿校准概率(100-500ms)
+#   端点对 = JEV_API_KEY+JEV_API_BASE_URL(优先) 或 TYPESAFE_API_KEY+TYPESAFE_API_BASE, 见 harness/jev_env.py
 # jev 不可用 -> 降级小模型 (OpenAI 兼容):
 #   REVIEW_LLM_BASE_URL + REVIEW_LLM_API_KEY + REVIEW_LLM_MODEL
 # 都不可用 -> INFO 说明; 确定性工具检查(ccn/duplication/antislop/slop_comment

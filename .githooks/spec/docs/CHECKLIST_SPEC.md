@@ -21,6 +21,28 @@
 
 启动时 `crates/gate/src/catalog.rs` 的 `catalog::load()` 扫 `.githooks/spec/{quality,code,cleanup,workspace,github}/` 下的 yaml（spec 根层与 `custom/` 不在扫描范围），**顺序按文件名字典序**（用户想让谁先跑就改名加前缀，如 `00_`、`10_`）。
 
+## `custom/` 覆盖层（每仓本地覆盖）
+
+`canon-sync push` 无条件覆盖所有 canon-owned spec 文件（OWNED_DIRS 家族 yaml +
+`dispatch.yaml` / `severity_overrides.yaml`），每仓的本地调优写在
+`.githooks/spec/custom/` 下（PROTECTED 列表，push / status / remove_retired 都不碰）：
+
+- **severity 覆盖**：引擎先应用根 `severity_overrides.yaml`，再应用
+  `custom/severity_overrides.yaml`（同名规则 custom 层最后定音——它是唯一能
+  活过 canon-sync 的降级通道）。custom 缺省 = 静默 no-op；存在但 yaml 解析坏
+  = 一条 `canon.setup` WARN finding（no-silent，只报一次）。INFO finding
+  任何层都不改级（确认项恒绿）。
+- **家族 yaml 深合并**：引擎加载 `spec/<file>`（如 `github_pull_requests.yaml`、
+  `dispatch.yaml`）时，若存在 `custom/<同名文件>` 则深合并覆盖在 canon 文件之上：
+  mapping 逐 key 递归合并，scalar / list 按 key 整体替换（如 `type_labels_cfg`
+  要改就写全量）。`custom/` 只作 overlay 不作 base 源：同名副本不会 shadow
+  canon 文件，文件发现（`find_spec_file`）跳过 `custom/` 目录；canon 侧没有
+  该文件时，custom 单文件可以顶替整份 cfg。
+- **坏 yaml 的处置不对称**：坏 `custom/severity_overrides.yaml` 报 WARN
+  finding；坏 `custom/<家族文件>` 静默保留 canon base（项目本地糖不能拉垮正本），
+  行为与 `merge_custom_overlay` 的文档一致。
+
+
 ## YAML Schema
 
 ```yaml
@@ -296,3 +318,29 @@ timeout: 30
 - ❌ 并行多 harness — rayon 已经够，复杂度不在这
 - ❌ Web UI 配 checklist — yaml 就是 UI
 - ❌ 自动生成 harness — 不同 LLM CLI 协议差太多
+
+## delivery_claims（CK-DELIVERY-CLAIMS，L3 模型层）
+
+`checklist_delivery_claims.yaml`（`mode: diff`，`sla: l3`，仅 `merge` 钩子，`optional: true`，`fail_severity: WARN`）：
+把 PR 的 `## Delivery record` 从「结构检查」升级为「声明 vs 证据」语义检查——分支 diff 当证据，
+逐条声明（上限 12 条，超出显式截断 INFO）判「diff 不支持/矛盾该声明」（true=BAD，0.85 FAIL / 0.6 WARN），
+外加 `evidence_sufficient` 总判（true=证据空/仅声明，0.9 / 0.6）。
+PR body 来源：`GATE_PR_BODY_FILE` 文件钩子优先，否则 `gh pr view`；无 body / 无声明 / 任何基础设施
+失败 → 单条 INFO 降级，永不阻断（policy layer，DWJ 契约）。手动跑：`canon check delivery_claims`。
+
+## pr_consistency（CK-PR-CONSISTENCY，L3 模型层）
+
+`checklist_pr_consistency.yaml`（`mode: diff`，`sla: l3`，仅 `merge`，`optional: true`，`fail_severity: WARN`）：
+CM-03 只比 (标题 type, 分支) 字符串元组，补一层语义对照——一题 noul「标题/描述与 diff 实际内容矛盾或明显失配」
+（陈述式负面命题，0.85/0.6）。compare 型判断误报率高于逐条声明核验，**severity 封顶 WARN**
+（harness 内部降档并标 semantic advisory）。PR 标题正文经 `GATE_PR_TITLE_FILE`/`GATE_PR_BODY_FILE`
+钩子或 `gh pr view`；缺失或基建失败 → 单条 INFO 不阻断。手动跑：`canon check pr_consistency`。
+
+## rule_selector（CK-RULE-SELECTOR，L3 模型层）
+
+`checklist_rule_selector.yaml`（`mode: diff`，`sla: l3`，仅 `merge`，`optional: true`，`fail_severity: WARN`）：
+确定性 `paths_include` glob 保持权威，jev 只兜漏网：对「没有任何域规则 glob 命中」的变更文件，
+问规则目录里哪些规则 intent 管辖此改动（choice governs/not_relevant，`fail_labels: ["governs"]`，
+p≥0.85 才出 `RULE-SELECTOR-<ID>` WARN，提示补 match 或写书面驳回；每文件 ≤5 条、单调用 ≤12 题、
+候选 >25 先按文件类型粗筛）。纯 catch-all 与 l3 层规则不计覆盖也不进候选。
+无端点对 / 目录不可读 → 单条 INFO，永不阻断。手动跑：`canon check rule_selector`。

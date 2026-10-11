@@ -2,6 +2,9 @@
 # 格式: "规则ID": "FAIL" | "WARN" | "INFO"
 #
 # 适用于所有 hook (pre-commit / pre-push / merge / gh create)
+# 注意：本文件随 canon 分发，canon-sync push 会无条件覆盖 —— 每仓本地调优
+# 写到 `.githooks/spec/custom/severity_overrides.yaml`（受保护不被覆盖；
+# 同名规则 custom 层是最后定音）。INFO finding 任何层都不改级。
 # 只有非 INFO 的 finding 会被覆盖 (确认项不受影响)
 #
 # 完整规则列表:
@@ -58,4 +61,9 @@
 # 注意: 只有 FAIL 会拦截，WARN 仅提示。想让 PR 强制关联 issue，
 # 用 github_pull_requests.yaml 的 fixes_linkage_mode，不要用本文件覆盖。
 
-severity_overrides: {}
+# === COMMIT 门禁收紧（commit 标题/类型一致性）===
+# CM 锁死: commit message 是契约字段, 不是提示。
+severity_overrides:
+  CM-01: "FAIL"   # commit 标题非 conventional commit
+  CM-02: "FAIL"   # commit 标题含 CJK
+  CM-03: "FAIL"   # commit 与 PR type 不一致

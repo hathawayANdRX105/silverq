@@ -57,7 +57,7 @@ canon check web_spec --sla l2             # 语义层（需 jev key；无 key �
 - `fail_severity: WARN` + `sla: l2` = **非阻断处置型**：存量债大（ferrite 实测 RAW-PALETTE
   1015 条），先 `--scope changed` 管增量，存量走 merge 全仓审计 + 书面驳回
   （写进 PR 的 Delivery record）。
-- 无 `TYPESAFE_API_KEY` 时语义层候选原样降 WARN（召回不丢），绝不静默清零——
+- 无 jev 端点对（`JEV_API_*` / `TYPESAFE_API_*`，见 harness/jev_env.py）时语义层候选原样降 WARN（召回不丢），绝不静默清零——
   看到 `tier: candidates-raw` 的 finding = 没判，按 intent 条文人工核一遍。
 
 ## 4. 三仓适配说明

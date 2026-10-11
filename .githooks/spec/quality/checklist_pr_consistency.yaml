@@ -1,0 +1,29 @@
+# CK-PR-CONSISTENCY: L3 模型层 — PR 标题/正文 vs diff 的语义一致性
+# (compare 形态: 描述说的与 diff 实际改的是否一致。CM-03 只比 (标题 type,
+# 分支) 字符串元组,「标题说修内存泄漏实际改 UI」抓不住, 这层补语义)
+#
+# 判决方向: 一题 noul, true = 「标题/描述与 diff 实际内容矛盾或明显失配」
+#   (HIGH=BAD, 与 severity 同向)。题目必须写成陈述式负面命题: 疑问句会让
+#   模型顺问句把 true 读反, 判定整体翻转(实测踩坑, 见 review_chain 注释)。
+#   p>=0.85 达 fail 线, 但 severity 封顶 WARN(compare 型判断误报率高于
+#   逐条声明核验, 设计评审结论): harness 内部把 FAIL 降为 WARN 并标注
+#   "semantic advisory", 本 yaml 同样 fail_severity: WARN。
+#
+# 降级契约 (DWJ): 端点对经 jev_env(JEV_API_* 优先, TYPESAFE_* 兜底);
+#   无 key / 网络 / 解析失败 → 单条 INFO, 永不阻断; 拿不到 PR 标题正文
+#   (无 gh、无 GATE_PR_TITLE_FILE/GATE_PR_BODY_FILE 钩子) → 单条 INFO 跳过。
+# 手动跑法: canon check pr_consistency
+enabled: true
+hooks: [merge]
+sla: l3
+fail_severity: WARN
+mode: diff
+match:
+  paths_include: ["**/*"]
+  paths_exclude: ["target/", ".wt/", "node_modules/"]
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/title_diff_chain.py"
+optional: true
+timeout: 120

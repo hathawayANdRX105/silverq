@@ -21,4 +21,4 @@ harness:
   # 无 key / 请求失败 -> 候选降级为 WARN 原样输出（召回不丢，处置照常）
 optional:
  true
-timeout: 15
+timeout: 45

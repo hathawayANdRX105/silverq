@@ -1,0 +1,20 @@
+# CK-MODULE-DRAWER: 杂物抽屉模块启发(确定性, merge only)
+# 文件名是 util/helper/common/misc 等通用名 且 顶层 pub 项跨 ≥3 类且 ≥5 项
+# → WARN:通用名文件正在聚合无关职责,应拆进内聚模块。
+# 边界:文件长度归 file_size gate;模块内聚/trait 内聚等语义判断归
+# semantic_rust 的 module_structure 类目——本 gate 只补两者之间的
+# 确定性信号(名字通用 + 顶层项杂)。
+enabled: true
+hooks: [merge]
+sla: l2
+fail_severity: WARN
+mode: file
+match:
+  paths_include: ["**/*.rs"]
+  paths_exclude: ["target/", ".wt/"]
+harness:
+  command: "python3"
+  args:
+    - ".githooks/spec/harness/module_drawer_gate.py"
+optional: true
+timeout: 60
