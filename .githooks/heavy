@@ -1,0 +1,32 @@
+#!/bin/sh
+# heavy — 用 cgroup CPU 配额跑 CPU 密集命令（cargo / npm / bun / makepkg / 测试 …）。
+#
+# 用法:
+#   .githooks/heavy cargo build -p api
+#   .githooks/heavy cargo test -p <crate>
+#
+# 为什么按核数现算, 而不是写死百分比:
+#   systemd 的 CPUQuota 百分比是**相对单个 CPU** 的, 不是整机。
+#   systemd.resource-control(5) 原文: "The percentage specifies how much CPU time the
+#   unit shall get at maximum, relative to the total CPU time available on one CPU.
+#   Use values > 100% for allotting CPU time on more than one CPU."
+#   所以写死 CPUQuota=70% 在 8 核机器上只有 0.7 个核 —— 实测: 同批 4 并发负载
+#   70% = 33.1s / 200% = 14.3s / 400% = 8.4s; 一次 web 冷编 0.7 核 463s, 无配额 ~77s。
+#   固定百分比在不同核数的机器上含义完全不同, 故这里按 nproc 现算。
+#
+# 配额 = 一半核 (下限 100%): 8 核机器上 400% —— 比原来的 0.7 核快约 5.7 倍,
+# 同时留一半核给桌面与其它会话。
+#
+# 环境变量:
+#   HEAVY_VERBOSE=1  打印实际配额到 stderr
+set -eu
+
+cores=$(nproc 2>/dev/null || echo 2)
+quota=$(( cores * 50 ))
+if [ "$quota" -lt 100 ]; then quota=100; fi
+
+if [ "${HEAVY_VERBOSE:-}" = "1" ]; then
+    echo "heavy: CPUQuota=${quota}% (nproc=${cores})" >&2
+fi
+
+exec systemd-run --user --scope -q -p "CPUQuota=${quota}%" -- "$@"
