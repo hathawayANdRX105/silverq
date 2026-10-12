@@ -66,7 +66,8 @@ pub struct InboundRuntime {
     pub selection: SharedSelection,
     pub tuning: SharedTuning,
     pub pinned: Arc<AtomicBool>,
-    pub china: Arc<crate::proxy::dns::ChinaSet>,
+    pub china: Arc<crate::proxy::dns::DomainSet>,
+    pub force_proxy: Arc<crate::proxy::dns::DomainSet>,
     pub routes: Arc<RouteCache>,
     pub pool: SharedPool,
 }
