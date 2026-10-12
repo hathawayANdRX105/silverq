@@ -1,4 +1,4 @@
-<!-- managed by canon agents.yaml @ 2026-10-04 -->
+<!-- managed by canon agents.yaml @ 2026-10-13 -->
 ## silverq 约定
 
 > 本文件写**每个会话都必须遵守的硬约束**，和**遇到什么情况该读哪份文档**。
@@ -19,11 +19,11 @@ silverq 实例——用户曾因此严厉警告（2026-09-20）。
 |---|---|
 | `cargo check --features meow-tun --all-targets` | 增量检查，推送前确认能编译（秒级） |
 | `cargo fmt --all` | 随时 |
-| `cargo build --release --features meow-tun` | **仅部署需要产物时**，且必须 `systemd-run --user --scope -p CPUQuota=70% --` 包裹 |
+| `cargo build --release --features meow-tun` | **仅部署需要产物时**，且必须 `.githooks/heavy` 包裹 |
 | `~/.local/bin/silverq-lab.sh` | 容器实验室 gauntlet，数据面/TUN 实验的唯一本地运行场所 |
 | `git` / `gh` / `grep` / 文件读写 | 轻量，不限 |
 
-CPU 密集型命令（编译/测试/装包）一律 `systemd-run --user --scope -p CPUQuota=70% --` 前缀，禁止裸跑。
+CPU 密集型命令（编译/测试/装包）一律 `.githooks/heavy` 前缀，禁止裸跑（`heavy` 按 `nproc` 的一半现算 CPUQuota；注意该百分比是**单核**百分比，不是整机——写死 70% 在 8 核上只有 0.7 核，理由见 `.githooks/heavy` 头注）。
 
 ### 宿主机生产实例保护（硬约束）
 
@@ -82,7 +82,7 @@ CPU 密集型命令（编译/测试/装包）一律 `systemd-run --user --scope 
 | 发新版本（版本号怎么算、tag、Release 核对） | `.agent/tasks/versioning.md`（流程 + 功能域清单） |
 | TUN 历史排查结论、实验室用法、部署拓扑 | `todo/tun-handover.md`（已冻结，TUN 不做了，仅作史料） |
 | 数据面/TUN 实验（不动宿主机） | `~/.local/bin/silverq-lab.sh`（容器 netns 完整透明链路） |
-| 提交/推送/合并被拦 | `.githooks/GATE_HANDBOOK.md` + `.githooks/spec/SPEC_OVERVIEW.md` |
+| 提交/推送/合并被拦 | `.githooks/GATE_HANDBOOK.md` + `.githooks/spec/docs/SPEC_OVERVIEW.md` |
 | CI 结构与三种 feature 矩阵的理由 | 根 `README.md` 的 CI 一节 |
 | 调度/数据面行为细节 | 根 `README.md`（关键设计 + 已知范围，与代码同步维护） |
 
@@ -96,7 +96,7 @@ CPU 密集型命令（编译/测试/装包）一律 `systemd-run --user --scope 
 
 ## 发现处置纪律
 
-自动检查（canon 的 `FAIL`/`WARN`、`jev` L3 语义发现、CRG / `ocr review` 审查意见）
+自动检查（canon 的 `FAIL`/`WARN`、`jev` L3 语义发现、CRG 审查意见）
 产出的是**发现**，不是判决。每条发现都必须被显式处置，不存在"绕过"这个选项。
 
 ### 先读规范，再改代码
@@ -125,8 +125,8 @@ CPU 密集型命令（编译/测试/装包）一律 `systemd-run --user --scope 
 
 | 禁止 | 为什么 | 正确做法 |
 |---|---|---|
-| 改 `.githooks/spec/` 规则、降低 `fail_severity`、删 spec 文件 | 把约束改没，不是修问题 | 开 issue 说明规则缺陷，交维护者决定 |
-| `--no-verify`、跳过钩子、直接推 | 绕过的是整个门禁体系 | 修到清零；规则有误走 issue |
+| 改 `.githooks/spec/` 规则、降低 `fail_severity`、删 spec 文件 | 把约束改没，不是修问题 | 在对话里说明规则缺陷，交用户决定 |
+| `--no-verify`、跳过钩子、直接推 | 绕过的是整个门禁体系 | 修到清零；规则有误上报用户 |
 | `head` / `tail` / `grep -v` 截断输出后当没看见 | 后面的 finding 被吞 | 完整读输出 |
 | 加 `#[allow(dead_code)]` / `# noqa` 消告警 | 压制信号而非解决 | 删无用代码，或写清保留理由 |
 | 建空文件 / 空目录 / 占位文件骗过目录类规则 | 结构噪音 | 真按规则合并或删除 |
@@ -138,13 +138,13 @@ CPU 密集型命令（编译/测试/装包）一律 `systemd-run --user --scope 
 - **每条 finding 一个处置**：修复（默认）或**书面驳回**。
 - 修复 → 在交付记录里写：`规则 ID → 根因 → 改法（file:line）`。
 - 驳回 → 必须写 `规则 ID + 不修理由 + 依据`，由维护者裁决。沉默即违规。
-- 交付记录落点：PR 正文 `## Delivery record` 段，或 issue 的交付评论。
+- 交付记录落点：PR 正文 `## Delivery record` 段。
 - WARN 与 FAIL 同等对待。WARN 只是不拦，不是可忽略。
 
 ### 规范层级
 
 - `.githooks/` 是 canon 领地：agent 不改规则。
-- `.agent/rules/`、`specs/rules/` 是规范正本：发现规则与现实冲突 → 提 issue，不自行改写。
+- `.agent/rules/`、`specs/rules/` 是规范正本：发现规则与现实冲突 → 上报用户，不自行改写。
 - 本纪律与各仓既有条款冲突时，以本纪律为准（它更严格）。
 
 ## 代码风格
@@ -164,9 +164,10 @@ CPU 密集型命令（编译/测试/装包）一律 `systemd-run --user --scope 
 
 ### 占位符与未完成
 
-- 未实现的函数或 trait 用语言原生宏，并带 issue 号：
+- 未实现的函数或 trait 用语言原生宏，标识写在 `#` 信息位里（issue / PR 号皆可，不要求对应
+  任何外部系统；`#` 前缀与闸门例外词对齐，缺 `#` 会被 notes 闸门拦）：
   - Rust：`todo!("TODO(#123): 说明这里要做什么")` / `unimplemented!("…")`
-- TODO / FIXME 注释必须带 issue 号：`// TODO(#123): …`。
+- TODO / FIXME 注释必须带可追溯标识：`// TODO(#123): …`。
 - 不留空的 `todo!()` / `pass` / `NotImplemented` 桩而无说明。
 
 ### 复用与删除
@@ -193,9 +194,10 @@ CPU 密集型命令（编译/测试/装包）一律 `systemd-run --user --scope 
   测试；testless 异常/零命中自动降级全量，绝不静默跳过。全量务必
   `cargo test --workspace`（根包 workspace 下裸 `cargo test` 只跑根包）。
 - 不要在会话里自行 `export RUSTC_WRAPPER` 或改 jobs——统一走仓配置；
-  重命令照旧套 cgroup CPU 配额（`systemd-run --user --scope -p CPUQuota=70% --`）。
+  重命令照旧套 cgroup CPU 配额，用 `.githooks/heavy <cmd>`（按 `nproc` 的一半现算，下限 100%）；
+  **CPUQuota 的百分比是单核百分比**，别写死数字——理由见 `.githooks/heavy` 头注。
 - 增量编译已关（缓存优先）：同树连续小改动按 crate 级重编是预期行为，不是
-  回归；若本仓热重载明显变慢，提 issue 议局部放开。
+  回归；若本仓热重载明显变慢，跟用户确认后局部放开。
 - 新建 `.wt` worktree 直接用；旧布局 worktree 若报 workspace 收编错误，
   根因与修法见 canon 仓 `Cargo.toml` 的 `exclude` 注释。
 - 配置细节、坑清单与实测基线：skill `rust-dev-perf`。
@@ -211,7 +213,7 @@ CPU 密集型命令（编译/测试/装包）一律 `systemd-run --user --scope 
 
 ### 敏感与不可逆
 
-- 凭据、token、密钥、私钥：不打印到输出、不写进提交、不粘到 issue/PR 正文。
+- 凭据、token、密钥、私钥：不打印到输出、不写进提交、不粘到 PR 正文。
 - 不擅自 dump 整个配置文件或环境变量（可能含密钥）。要看就只看需要的字段。
 - 系统级配置、字体、全局环境、dotfiles 里的全局项：默认别动，改动前先问。
 - 数据库迁移、配置格式变更、依赖大版本升级：先确认可回滚。
@@ -250,24 +252,14 @@ CPU 密集型命令（编译/测试/装包）一律 `systemd-run --user --scope 
   `61958173+hathawayANdRX105@users.noreply.github.com`（服务端 squash 落库时写的）。
 - 禁止 `Co-authored-by:`  trailer 署其他人或机器人账号。
 
-### Issue
-
-Issue 是**追踪单元**，不是 PR 的前置条件——默认开发流是纯 PR 开发，不要求先建 issue。
-只有这些情况才建 issue：记录遗留/暂缓事项、登记需要后续开发的工作、留下需要检索的决策记录。
-
-- 标题中文；正文 heading 英文、内容中文。
-- sub-issue 必须自包含：正文不写 `Parent:` / `Related:` / PR 占位符，直接写清它要什么。
-- 关闭前 `Done when` 的 checkbox 全勾。
-
 ### PR
 
 - 标题纯英文（conventional commit 风格）；正文小节标题英文、内容中文。
 - 正文按仓库模板（`.github/PULL_REQUEST_TEMPLATE.md`）写：背景 / 改了什么 / 为什么 /
   实现步骤 / 交付记录 / 怎么验证 / 检查清单。
-- 不强制关联 issue：确实在关闭某个 issue 时才写 `Fixes #<n>`（一个 PR 只关一个）；
-  纯 PR 开发什么都不用写。审查发现的问题在同一 PR 上继续提交修复，不另开 issue/PR。
+- 验收标准写在 PR 的 `Construction plan` 里。审查发现的问题在同一 PR 上继续提交修复，不另开 PR。
 - 开启或更新 PR 后看 CI 结果到底（`gh pr checks`），红了就修，不等用户来问。
-- 被 canon 拦下就修代码，**不改规则**。规则确有缺陷 → 开 issue 交维护者裁决。
+- 被 canon 拦下就修代码，**不改规则**。规则确有缺陷 → 上报用户裁决。
 
 ### 合并
 
