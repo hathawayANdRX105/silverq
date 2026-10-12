@@ -1,8 +1,8 @@
-//! DNS 解析（src/proxy/dns.rs）：报文编解码纯函数 + 中国域名直连表 +
+//! DNS 解析（src/proxy/dns.rs）：报文编解码纯函数 + 域名后缀表（国内直连 / 强制代理）+
 //! 节点域名预解析的无网可测部分。
 
 use silverq::proxy::dns::{
-    build_query, load_china_domains, parse_answers, resolve_dial_addrs, resolve_host, ChinaSet,
+    build_query, load_domain_list, parse_answers, resolve_dial_addrs, resolve_host, DomainSet,
 };
 use silverq::proxy::nodespec::{NodeSpec, Protocol};
 use std::net::IpAddr;
@@ -65,8 +65,8 @@ fn build_query_rejects_bad_names() {
 }
 
 #[test]
-fn china_set_matches_suffix_not_substring() {
-    let cs = ChinaSet::new(&["example.com".into(), "baidu.com".into()]);
+fn domain_set_matches_suffix_not_substring() {
+    let cs = DomainSet::new(&["example.com".into(), "baidu.com".into()]);
     assert!(cs.matches("example.com"));
     assert!(cs.matches("a.example.com"));
     assert!(cs.matches("EXAMPLE.com."));
@@ -77,16 +77,16 @@ fn china_set_matches_suffix_not_substring() {
 }
 
 #[test]
-fn load_china_domains_skips_comments_and_blank() {
+fn load_domain_list_skips_comments_and_blank() {
     let dir = std::env::temp_dir().join("silverq-china-test");
     let _ = std::fs::create_dir_all(&dir);
     let p = dir.join("domains.txt");
     std::fs::write(&p, "a.com\n\n# comment\n b.com \n").unwrap();
     assert_eq!(
-        load_china_domains(&p),
+        load_domain_list(&p),
         vec!["a.com".to_string(), "b.com".to_string()]
     );
-    assert!(load_china_domains(&dir.join("missing.txt")).is_empty());
+    assert!(load_domain_list(&dir.join("missing.txt")).is_empty());
 }
 
 #[test]

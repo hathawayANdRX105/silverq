@@ -757,16 +757,20 @@ fn ip_literals_opt_out_of_route_decisions() {
         "::ffff:8.8.8.8",
     ] {
         assert!(
-            !route_cache_eligible(host, false, false),
+            !route_cache_eligible(host, false, false, false),
             "{host} 不应进入域名级路线决策"
         );
     }
     // 域名正常参与（未钉住、非国内、非本地）。
-    assert!(route_cache_eligible("www.gstatic.com", false, false));
+    assert!(route_cache_eligible("www.gstatic.com", false, false, false));
     // 三类既有旁路保持不变。
-    assert!(!route_cache_eligible("www.baidu.com", false, true)); // 国内
-    assert!(!route_cache_eligible("www.gstatic.com", true, false)); // 钉住
-    assert!(!route_cache_eligible("localhost", false, false)); // 本地
+    assert!(!route_cache_eligible("www.baidu.com", false, true, false)); // 国内
+    assert!(!route_cache_eligible("www.gstatic.com", true, false, false)); // 钉住
+    assert!(!route_cache_eligible("localhost", false, false, false)); // 本地
+                                                                      // 强制代理命中：不进路线缓存，走候选链（地区门禁域名，如 opencode.ai）。
+    assert!(!route_cache_eligible("opencode.ai", false, false, true));
+    // 强制表赢过国内表：同域名两表都列时按强制代理处理。
+    assert!(!route_cache_eligible("www.baidu.com", false, true, true));
 }
 
 #[tokio::test]

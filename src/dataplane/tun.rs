@@ -386,7 +386,7 @@ impl TunRuntime {
         // DNS 层就拿真实 IP，不落 198.18/15 路由，TUN 根本不碰它们。
         // 表缺失 = 空 skipper = 全部照旧走 fake-IP（安全降级）。
         let china_patterns =
-            crate::proxy::dns::load_china_domains(&crate::proxy::dns::china_domains_path());
+            crate::proxy::dns::load_domain_list(&crate::proxy::dns::china_domains_path());
         if !china_patterns.is_empty() {
             resolver.set_fakeip_skipper(Skipper::new(&china_patterns, SkipperMode::BlackList));
         }

@@ -34,8 +34,17 @@ pub fn is_local_target(host: &str) -> bool {
 /// Direct/Race 记录对它是无意义的。更实际的是，客户端发来的公网 IPv6
 /// 目标在本机只有私网 v6 时盲拨必然 `Network is unreachable`，白白烧掉
 /// 一次直连尝试（竞速场景还会拖慢整条路径）。这类目标一律交给候选链。
-pub fn route_cache_eligible(host: &str, pinned: bool, china_hit: bool) -> bool {
-    !pinned && !is_local_target(host) && !china_hit && host.parse::<std::net::IpAddr>().is_err()
+pub fn route_cache_eligible(
+    host: &str,
+    pinned: bool,
+    china_hit: bool,
+    force_proxy_hit: bool,
+) -> bool {
+    !pinned
+        && !is_local_target(host)
+        && !china_hit
+        && !force_proxy_hit
+        && host.parse::<std::net::IpAddr>().is_err()
 }
 
 /// 按 selection 顺序取前 `max_attempts` 个候选 adapter，返回 (tag, adapter) 对。

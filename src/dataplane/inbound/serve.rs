@@ -83,6 +83,12 @@ pub(super) async fn handle_one(
         Proto::Http => {}
     }
 
+    // 强制代理域名表（force-proxy-domains.txt）：命中域名必须走代理候选链，
+    // 优先级高于国内直连与路线缓存竞速。给「直连通但上游按出口 IP 地区
+    // 拒绝服务」的域名用（如 opencode.ai zen 地区门禁）。与钉住的区别：
+    // 钉住=整机流量钉单节点；本表只把表内域名送进候选链，其余流量不受影响。
+    let force_hit = ctx.runtime.force_proxy.matches(&target.host);
+
     // 直连判定（跳过候选链）：
     // - 回环/私网目标：语义对齐 TUN 数据面的私网安全网——这类地址只在
     // - 国内域名：直连更快；域名形态必须先经真实 DNS 解析——系统解析在
@@ -99,7 +105,7 @@ pub(super) async fn handle_one(
         DirectDial::None
     } else if is_local_target(&target.host) {
         DirectDial::Host
-    } else if ctx.runtime.china.matches(&target.host) {
+    } else if !force_hit && ctx.runtime.china.matches(&target.host) {
         match crate::proxy::dns::resolve_host(&target.host).await {
             Some(ip) => DirectDial::Ip(ip),
             None => {
@@ -111,15 +117,16 @@ pub(super) async fn handle_one(
         DirectDial::None
     };
 
-    // 路由缓存决策（回环/国内/钉住不进缓存：那些是策略或本机语义，非性能选择）。
+    // 路由缓存决策（回环/国内/钉住/强制代理不进缓存：那些是策略或本机语义，非性能选择）。
     // 未命中/过期 → 并行竞速（直连 ‖ 首选，上游首字节判胜，#23）；命中 → 按
     // 缓存里曾成功的路线走；条目路线慢 → 同样进竞速。缓存直连命中失败后要
     // 回退代理候选链（proxy_fallback）。
-    let china_hit = ctx.runtime.china.matches(&target.host);
+    let china_hit = !force_hit && ctx.runtime.china.matches(&target.host);
     let cache_eligible = route_cache_eligible(
         &target.host,
         ctx.runtime.pinned.load(Ordering::Relaxed),
         china_hit,
+        force_hit,
     );
     let mut race = false;
     // 缓存驱动的直连（区别于回环/国内的策略直连）：失败后要回退候选链，

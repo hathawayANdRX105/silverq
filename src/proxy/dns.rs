@@ -67,9 +67,23 @@ pub fn china_domains_path() -> std::path::PathBuf {
         .join("china-domains.txt")
 }
 
-/// 读国内域名表：一行一个域名，`#` 注释跳过。文件不存在/为空 → 空表
+/// 强制代理域名表路径：默认 `~/.config/silverq/rules/force-proxy-domains.txt`，
+/// 环境变量 `SILVERQ_FORCE_PROXY_DOMAINS` 可覆盖。
+pub fn force_proxy_domains_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("SILVERQ_FORCE_PROXY_DOMAINS") {
+        return std::path::PathBuf::from(p);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home)
+        .join(".config")
+        .join("silverq")
+        .join("rules")
+        .join("force-proxy-domains.txt")
+}
+
+/// 读域名表：一行一个域名，`#` 注释跳过。文件不存在/为空 → 空表
 /// （所有调用方对空表都是 no-op，不阻断启动）。
-pub fn load_china_domains(path: &std::path::Path) -> Vec<String> {
+pub fn load_domain_list(path: &std::path::Path) -> Vec<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => text
             .lines()
@@ -81,15 +95,15 @@ pub fn load_china_domains(path: &std::path::Path) -> Vec<String> {
     }
 }
 
-/// 国内域名后缀集合：label 对齐的后缀匹配（`example.com` 命中自身与
-/// `*.example.com`，不命中 `notexample.com`）。11 万级条目下每次匹配
-/// 只做 O(域名 label 数) 次 HashSet 查找。
-pub struct ChinaSet {
+/// 域名后缀集合（国内直连表与强制代理表共用）：label 对齐的后缀匹配
+/// （`example.com` 命中自身与 `*.example.com`，不命中 `notexample.com`）。
+/// 11 万级条目下每次匹配只做 O(域名 label 数) 次 HashSet 查找。
+pub struct DomainSet {
     patterns: Vec<String>,
     suffixes: HashSet<String>,
 }
 
-impl ChinaSet {
+impl DomainSet {
     pub fn new(patterns: &[String]) -> Self {
         Self {
             patterns: patterns.to_vec(),
