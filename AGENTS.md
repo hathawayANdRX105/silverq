@@ -1,4 +1,4 @@
-<!-- managed by canon agents.yaml @ 2026-10-13 -->
+<!-- managed by canon agents.yaml @ 2026-10-18 -->
 ## silverq 约定
 
 > 本文件写**每个会话都必须遵守的硬约束**，和**遇到什么情况该读哪份文档**。
@@ -186,16 +186,16 @@ CPU 密集型命令（编译/测试/装包）一律 `.githooks/heavy` 前缀，�
 
 ## Rust 开发性能
 
-本仓 `.cargo/config.toml` 已配 `jobs = 4`（多会话并发上限）与
-`rustc-wrapper = sccache`（跨 worktree 编译缓存），`Cargo.toml` 已关增量、
+本仓 `.cargo/config.toml` 已配 `jobs`（多会话并发上限，数值以本仓配置为准）与
+`rustc-wrapper = sccache`（编译缓存），`Cargo.toml` 已关增量、
 降 debuginfo。配置随 cargo 向上搜索对 `.wt/*` worktree 自动生效。
 
 - 跑测试用 `just test-fast`：testless 函数级影响分析，只跑本次改动可能破坏的
-  测试；testless 异常/零命中自动降级全量，绝不静默跳过。全量务必
-  `cargo test --workspace`（根包 workspace 下裸 `cargo test` 只跑根包）。
+  测试；testless 异常/零命中绝不静默跳过。全量口径是 `cargo test --workspace`
+  （根包 workspace 下裸 `cargo test` 只跑根包）；**全量在本地跑还是交 CI
+  （含本地是否直接拒跑），一律以本仓 local 约定为准**。
 - 不要在会话里自行 `export RUSTC_WRAPPER` 或改 jobs——统一走仓配置；
-  重命令照旧套 cgroup CPU 配额，用 `.githooks/heavy <cmd>`（按 `nproc` 的一半现算，下限 100%）；
-  **CPUQuota 的百分比是单核百分比**，别写死数字——理由见 `.githooks/heavy` 头注。
+  重命令套 `.githooks/heavy <cmd>`（配额按核数现算，细节见 `.githooks/heavy` 头注）。
 - 增量编译已关（缓存优先）：同树连续小改动按 crate 级重编是预期行为，不是
   回归；若本仓热重载明显变慢，跟用户确认后局部放开。
 - 新建 `.wt` worktree 直接用；旧布局 worktree 若报 workspace 收编错误，
