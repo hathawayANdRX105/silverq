@@ -98,6 +98,11 @@ impl Daemon {
             .expect("ctl 调用失败");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
+
+    /// daemon 日志全文（判定「是否发生过直连探测」的唯一证据来源）。
+    fn log(&self) -> String {
+        std::fs::read_to_string(self._dir.path().join("log")).unwrap_or_default()
+    }
 }
 
 impl Drop for Daemon {
@@ -208,14 +213,33 @@ fn start_daemon_in(
     start_daemon_in_inner(dir, probe, extra_nodes_before, "1")
 }
 
-/// `interval_secs`: 调度间隔。fallback 计数测试要用长间隔——
-/// 否则首轮测速在请求前就跑完，死节点已被挤出 selection，测不到 fallback。
-fn start_daemon_in_inner(
+/// 起 daemon，并指定规则表路径（国内直连表 / 强制代理白名单）。
+/// 传 `None` = 不设环境变量，走默认路径（测试机上通常不存在 → 空表）。
+fn start_daemon_with_rules(
     dir: tempdirlike::TempDir,
     probe: SocketAddr,
     extra_nodes_before: Option<&str>,
-    interval_secs: &str,
+    china_domains: Option<&std::path::Path>,
+    force_proxy_domains: Option<&std::path::Path>,
 ) -> Daemon {
+    let (mut cmd, socks) = build_daemon_cmd(&dir, probe, extra_nodes_before, "1");
+    if let Some(p) = china_domains {
+        cmd.env("SILVERQ_CHINA_DOMAINS", p);
+    }
+    if let Some(p) = force_proxy_domains {
+        cmd.env("SILVERQ_FORCE_PROXY_DOMAINS", p);
+    }
+    spawn_daemon(cmd, socks, dir)
+}
+
+/// 组装 daemon 命令（不启动）——规则表路径由调用方补 env。
+/// 返回 (命令, socks 监听地址)。
+fn build_daemon_cmd(
+    dir: &tempdirlike::TempDir,
+    probe: SocketAddr,
+    extra_nodes_before: Option<&str>,
+    interval_secs: &str,
+) -> (Command, SocketAddr) {
     let nodes_path = dir.path().join("nodes.yaml");
     let mut yaml = String::from("nodes:\n");
     if let Some(extra) = extra_nodes_before {
@@ -234,17 +258,19 @@ fn start_daemon_in_inner(
     if dir.path().join("silverq.toml").exists() {
         cmd.arg("--config").arg(dir.path().join("silverq.toml"));
     }
-    if dir.path().join("silverq.toml").exists() {
-        cmd.arg("--config").arg(dir.path().join("silverq.toml"));
-    }
-    let child = cmd
-        .env("SILVERQ_LISTEN", socks.to_string())
+    cmd.env("SILVERQ_LISTEN", socks.to_string())
         .env("SILVERQ_CTL_SOCK", dir.path().join("ctl.sock"))
         .env("SILVERQ_SELECTOR_STORE", dir.path().join("selector.json"))
         .env("SILVERQ_STATE", dir.path().join("scores.json"))
         .env("SILVERQ_PROBE_URL", format!("http://{probe}/"))
         .env("SILVERQ_INTERVAL_SECS", interval_secs)
-        .env("SILVERQ_TIMEOUT_MS", "1500")
+        .env("SILVERQ_TIMEOUT_MS", "1500");
+    (cmd, socks)
+}
+
+/// 启动组装好的 daemon 并等它就绪。
+fn spawn_daemon(mut cmd: Command, socks: SocketAddr, dir: tempdirlike::TempDir) -> Daemon {
+    let child = cmd
         .stdout(std::fs::File::create(dir.path().join("log")).unwrap())
         .stderr(std::process::Stdio::from(
             std::fs::OpenOptions::new()
@@ -274,6 +300,18 @@ fn start_daemon_in_inner(
     daemon
 }
 
+/// `interval_secs`: 调度间隔。fallback 计数测试要用长间隔——
+/// 否则首轮测速在请求前就跑完，死节点已被挤出 selection，测不到 fallback。
+fn start_daemon_in_inner(
+    dir: tempdirlike::TempDir,
+    probe: SocketAddr,
+    extra_nodes_before: Option<&str>,
+    interval_secs: &str,
+) -> Daemon {
+    let (cmd, socks) = build_daemon_cmd(&dir, probe, extra_nodes_before, interval_secs);
+    spawn_daemon(cmd, socks, dir)
+}
+
 /// 完成 SOCKS5 握手，返回已建立的流。`cmd`: 0x01 CONNECT / 0x03 UDP ASSOCIATE。
 /// 返回 (流, 服务端应答里的 BND 地址)。
 fn socks5_handshake(proxy: SocketAddr, cmd: u8, dst: SocketAddr) -> (TcpStream, SocketAddr) {
@@ -301,6 +339,41 @@ fn socks5_handshake(proxy: SocketAddr, cmd: u8, dst: SocketAddr) -> (TcpStream, 
     assert_eq!(reply[0], 0x05, "应答 VER");
     assert_eq!(reply[1], 0x00, "应答 REP 应为 success，实际 {}", reply[1]);
     assert_eq!(reply[3], 0x01, "测试期望 IPv4 BND");
+
+    let bnd = SocketAddr::from((
+        [reply[4], reply[5], reply[6], reply[7]],
+        u16::from_be_bytes([reply[8], reply[9]]),
+    ));
+    (s, bnd)
+}
+
+/// SOCKS5 CONNECT 到**域名**目标（ATYP=3 domain）。
+///
+/// 白名单按域名后缀匹配，测试必须用域名形式发目标（ATYP=1 的 IP 字面量
+/// 走的是另一条路：IP 字面量不进路线决策，`is_local_target` 也拦一层）。
+/// 返回 (流, 服务端应答里的 BND 地址)。
+fn socks5_handshake_domain(proxy: SocketAddr, domain: &str, port: u16) -> (TcpStream, SocketAddr) {
+    let mut s = TcpStream::connect(proxy).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+
+    // greeting: VER=5, NMETHODS=1, no-auth
+    s.write_all(&[0x05, 0x01, 0x00]).unwrap();
+    let mut greet = [0u8; 2];
+    s.read_exact(&mut greet).unwrap();
+    assert_eq!(greet, [0x05, 0x00], "greeting 应回 no-auth");
+
+    // request: VER CMD RSV ATYP=3 DOMAIN PORT
+    let mut req = vec![0x05, 0x01, 0x00, 0x03];
+    req.push(domain.len() as u8);
+    req.extend_from_slice(domain.as_bytes());
+    req.extend_from_slice(&port.to_be_bytes());
+    s.write_all(&req).unwrap();
+
+    // reply: VER REP RSV ATYP BND.ADDR(4) BND.PORT(2)
+    let mut reply = [0u8; 10];
+    s.read_exact(&mut reply).unwrap();
+    assert_eq!(reply[0], 0x05, "应答 VER");
+    assert_eq!(reply[1], 0x00, "应答 REP 应为 success，实际 {}", reply[1]);
 
     let bnd = SocketAddr::from((
         [reply[4], reply[5], reply[6], reply[7]],
@@ -683,4 +756,56 @@ fn pin_survives_scheduler_batches() {
     let mut buf = [0u8; 9];
     s.read_exact(&mut buf).expect("解钉后数据面应可用");
     assert_eq!(&buf, b"after-pin");
+}
+
+/// 白名单（强制代理表）命中的域名**不做直连探测**，未命中的照旧探测。
+///
+/// 用户诉求原文：「有没有白名单之类的网站设置呢？让他不要探测，只有在
+/// 没有白名单的时候才进行探测」。
+///
+/// 被墙站点（github 等）每次走未命中竞速都要先烧一轮直连预算
+/// （DNS+TCP，被墙时直接耗满 dial_timeout）才轮到代理，白名单把这一步省掉。
+///
+/// 判定证据是 daemon 日志里的直连侧记录：竞速直连侧失败会打
+/// 「竞速直连侧预算耗尽」/「竞速直连侧 DNS 解析失败」——白名单命中时
+/// 这两行都不该出现。
+#[test]
+fn whitelist_skips_direct_probe_but_other_hosts_still_probe() {
+    let probe = spawn_probe_endpoint();
+
+    // 一个没人监听的端口：直连它必然超时（预算耗尽），日志会留痕。
+    let dead_port = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    // 域名形式的目标（直连要过 DNS 解析），端口指向死端口。
+    let dead_host = format!("blocked-{dead_port}.invalid.test");
+    let other_host = format!("other-{dead_port}.invalid.test");
+
+    let dir = tempdirlike::TempDir::new("whitelist");
+    let whitelist = dir.path().join("force-proxy-domains.txt");
+    std::fs::write(&whitelist, format!("{dead_host}\n")).unwrap();
+
+    let d = start_daemon_with_rules(dir, probe, None, None, Some(&whitelist));
+
+    // 白名单内的域名：走代理候选链，一次直连都不试。
+    let (mut s, _) = socks5_handshake_domain(d.socks, &dead_host, dead_port);
+    // 目标端口没人监听 → 代理链最终失败是预期的；这里只关心「有没有试过直连」。
+    let mut buf = [0u8; 4];
+    let _ = s.read(&mut buf);
+
+    // 白名单外的域名：仍走原有竞速路径（直连侧照旧尝试）。
+    let (mut s2, _) = socks5_handshake_domain(d.socks, &other_host, dead_port);
+    let _ = s2.read(&mut buf);
+
+    let log = d.log();
+    assert!(
+        !log.contains(&format!("host={dead_host}")),
+        "白名单域名不该出现任何直连侧记录：\n{log}"
+    );
+    // 白名单外的域名：直连侧要么 DNS 失败要么预算耗尽——两者都算「探测过」。
+    assert!(
+        log.contains(&format!("host={other_host}")) || log.contains("竞速直连侧"),
+        "非白名单域名应仍做直连探测，日志未见直连侧记录：\n{log}"
+    );
 }

@@ -135,6 +135,83 @@ impl DomainSet {
     }
 }
 
+/// 可热更的域名表：换表时整体替换，匹配路径只持读锁。
+///
+/// 为什么不用裸 `Arc<DomainSet>`：域名表是运维直接编辑的文件
+/// （`~/.config/silverq/rules/*.txt`），改完想立刻生效就得能换表。
+/// 裸 Arc 无法替换，reload 只能整进程重启——生产实例重启有抢跑风险
+/// （见 AGENTS.md 生产实例保护）。整体替换 `Arc<DomainSet>` 让读侧
+/// 无需感知换代：正在匹配的那一次用旧表，下一次用新表。
+pub struct HotDomainSet {
+    inner: parking_lot::RwLock<Arc<DomainSet>>,
+}
+
+impl HotDomainSet {
+    /// 用给定 pattern 建表。
+    pub fn new(patterns: &[String]) -> Self {
+        Self {
+            inner: parking_lot::RwLock::new(Arc::new(DomainSet::new(patterns))),
+        }
+    }
+
+    /// 域名是否命中（label 对齐的后缀匹配，语义同 [`DomainSet::matches`]）。
+    pub fn matches(&self, host: &str) -> bool {
+        self.inner.read().matches(host)
+    }
+
+    /// 表内 pattern 条数（空表 = 该规则未启用）。
+    pub fn len(&self) -> usize {
+        self.inner.read().patterns.len()
+    }
+
+    /// 表是否为空（空表 = 该规则未启用，所有域名都不命中）。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// 整体换表（热更）。旧表在读侧释放后自动回收。
+    pub fn replace(&self, patterns: &[String]) {
+        *self.inner.write() = Arc::new(DomainSet::new(patterns));
+    }
+}
+
+/// 两张规则表的集合：国内直连表 + 强制代理（白名单）表。
+///
+/// 两者都是运维直接编辑的文本文件，一起加载、一起热更——
+/// `silverq config-reload` 重读两个文件换代，改白名单不必重启生产实例。
+///
+/// 表用 `Arc<HotDomainSet>` 持有：ctl（写）与数据面（读）共用同一份，
+/// 换代后两侧立即看到新表。
+pub struct RuleTables {
+    /// 国内域名直连表。
+    pub china: Arc<HotDomainSet>,
+    /// 强制代理域名表（白名单）：命中域名跳过直连探测与路线缓存竞速。
+    pub force_proxy: Arc<HotDomainSet>,
+}
+
+impl RuleTables {
+    /// 从默认路径（受 `SILVERQ_CHINA_DOMAINS` / `SILVERQ_FORCE_PROXY_DOMAINS` 覆盖）加载。
+    pub fn load() -> Self {
+        let china = load_domain_list(&china_domains_path());
+        let force_proxy = load_domain_list(&force_proxy_domains_path());
+        Self {
+            china: Arc::new(HotDomainSet::new(&china)),
+            force_proxy: Arc::new(HotDomainSet::new(&force_proxy)),
+        }
+    }
+
+    /// 重读两个文件并换代。返回 `(国内直连条数, 强制代理条数)`。
+    ///
+    /// 文件缺失/为空 → 空表（空表对所有调用方都是 no-op，不阻断）。
+    pub fn reload(&self) -> (usize, usize) {
+        let china = load_domain_list(&china_domains_path());
+        let force_proxy = load_domain_list(&force_proxy_domains_path());
+        self.china.replace(&china);
+        self.force_proxy.replace(&force_proxy);
+        (china.len(), force_proxy.len())
+    }
+}
+
 /// 构造最小 DNS 查询报文（RD=1，单问题，IN class）。
 pub fn build_query(id: u16, name: &str, qtype: u16) -> Option<Vec<u8>> {
     let mut buf = Vec::with_capacity(17 + name.len());

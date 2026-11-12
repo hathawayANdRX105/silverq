@@ -10,7 +10,7 @@
 //!   延迟分数比握手 900ms 但 20Mbit 的节点漂亮，真实页面却慢 4 倍。
 #![cfg(feature = "meow")]
 
-use crate::proxy::http_probe::{parse_probe_url, read_body_bytes, tls_connect};
+use crate::proxy::http_probe::{bytes_per_second, parse_probe_url, read_body_bytes, tls_connect};
 use crate::scheduler::batch::Measurer;
 use crate::scheduler::node::Node;
 use async_trait::async_trait;
@@ -116,15 +116,14 @@ impl Measurer for MeowMeasurer {
             ..Default::default()
         };
         let conn = adapter.dial_tcp(&metadata).await.ok()?;
-        if parsed.https {
+        // 计时只覆盖 body 读取段：拨号/TLS 握手慢是延迟维度的事，
+        // 混进带宽会让「握手慢但管道快」的节点被误判成带宽差。
+        let (bytes, elapsed) = if parsed.https {
             let tls = tls_connect(parsed.host.as_str(), conn).await?;
-            read_body_bytes(tls, &parsed, max_bytes)
-                .await
-                .map(|b| b as f64)
+            read_body_bytes(tls, &parsed, max_bytes).await?
         } else {
-            read_body_bytes(conn, &parsed, max_bytes)
-                .await
-                .map(|b| b as f64)
-        }
+            read_body_bytes(conn, &parsed, max_bytes).await?
+        };
+        Some(bytes_per_second(bytes, elapsed))
     }
 }

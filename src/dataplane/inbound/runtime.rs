@@ -66,8 +66,10 @@ pub struct InboundRuntime {
     pub selection: SharedSelection,
     pub tuning: SharedTuning,
     pub pinned: Arc<AtomicBool>,
-    pub china: Arc<crate::proxy::dns::DomainSet>,
-    pub force_proxy: Arc<crate::proxy::dns::DomainSet>,
+    /// 国内域名直连表（与 ctl 共用句柄，`silverq config-reload` 换代后立即生效）。
+    pub china: Arc<crate::proxy::dns::HotDomainSet>,
+    /// 强制代理域名表（白名单，与 ctl 共用句柄）：命中域名跳过直连探测与路线缓存竞速。
+    pub force_proxy: Arc<crate::proxy::dns::HotDomainSet>,
     pub routes: Arc<RouteCache>,
     pub pool: SharedPool,
 }

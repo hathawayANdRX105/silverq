@@ -74,9 +74,11 @@ pub fn parse() -> Cmd {
                  用法:\n\
                    silverq serve [nodes.yaml] [--config silverq.toml]  启动 daemon\n\
                    silverq reload [nodes.yaml]      热加载节点表\n\
+                   silverq config-reload            热加载配置（调参 + 路由规则表）\n\
                    silverq select <tag|auto>        手动钉住 / 解钉\n\
                    silverq status                   查看当前状态\n\n\
-                 节点表格式见 nodes.example.yaml；调度配置见 silverq.example.toml"
+                 节点表格式见 nodes.example.yaml；调度配置见 silverq.example.toml；\n\
+                 路由规则表见 ~/.config/silverq/rules/（china-domains / force-proxy-domains）"
             );
             std::process::exit(0);
         }
@@ -89,7 +91,9 @@ pub fn parse() -> Cmd {
                     config: None,
                 }
             } else {
-                die(&format!("未知命令: {first}（serve | reload | select）"))
+                die(&format!(
+                    "未知命令: {first}（serve | reload | config-reload | select）"
+                ))
             }
         }
         None => Cmd::Serve {
