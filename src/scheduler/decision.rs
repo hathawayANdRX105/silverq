@@ -31,6 +31,41 @@ pub fn select_top(
         .collect()
 }
 
+/// 吞吐探测（带宽采样）的目标节点集合：当前 selection ∪ 缺带宽样本的高分候选。
+///
+/// **候选必须带上**：只跑 selection 会饿死新节点——它们进池时
+/// `bw_samples=0`，按保守假设（`BW_UNKNOWN_BPS`）打分必然垫底，一轮就被
+/// 挤出 selection；而 bw 探测只跑 selection → 永远测不到 → 永远垫底。
+/// 补上候选后，新节点几轮内就能测出真实吞吐，按实测值回到正常排序。
+///
+/// 候选数封顶 `capacity`（探测流量可控：≤2×capacity 个节点）。未知带宽
+/// 节点之间的打分里带宽项是同一个保守罚分，所以它们仍按延迟/稳定性排序
+/// ——挑出来的就是最值得先测的那些。
+pub fn bw_probe_targets(
+    pool: &[Node],
+    selection: &[String],
+    capacity: usize,
+    penalty_ms: f64,
+    bw_penalty_per_efold_ms: f64,
+) -> Vec<Node> {
+    let mut tags: Vec<String> = selection.to_vec();
+    let mut missing: Vec<&Node> = pool
+        .iter()
+        .filter(|n| n.bw_samples == 0 && !tags.contains(&n.tag))
+        .collect();
+    missing.sort_by(|a, b| {
+        a.score_with(penalty_ms, bw_penalty_per_efold_ms)
+            .partial_cmp(&b.score_with(penalty_ms, bw_penalty_per_efold_ms))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for n in missing.into_iter().take(capacity) {
+        tags.push(n.tag.clone());
+    }
+    tags.iter()
+        .filter_map(|tag| pool.iter().find(|n| &n.tag == tag).cloned())
+        .collect()
+}
+
 /// 把节点池排成测速顺序：已测过的按分数升序，未测过的按原序，
 /// 然后每批混合两者（每批前 `half` 个取已知、其余补未知）。
 ///

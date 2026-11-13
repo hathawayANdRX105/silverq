@@ -454,12 +454,19 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
             progress.batch_done(persist::now_secs() as i64);
         }
 
-        // 吞吐批：只跑当前 selection，每 bw_interval_rounds 轮一次。
+        // 吞吐批：跑「当前 selection ∪ 缺带宽样本的高分候选」，
+        // 每 bw_interval_rounds 轮一次。
         // 延迟探针（generate_204）看不到带宽——握手 700ms 但只有 1Mbit 的
         // 节点延迟分数比握手 900ms 但 20Mbit 的漂亮，真实页面却慢 4 倍。
         // 不对全池跑：512KB × 40 节点 × 每轮 ≈ 80MB/轮探测流量，免费节点
         // 撑不住，也跟用户真实流量抢带宽。pinned 时 selection 只有一个节点，
         // 分数不影响选择，省下这次下载。
+        //
+        // 必须带上「缺带宽样本的候选」：只跑 selection 会饿死新节点——
+        // 它们进池时 bw_samples=0，按保守假设（BW_UNKNOWN_BPS）打分必然垫底，
+        // 一轮就被挤出 selection；而 bw 探测只跑 selection → 永远测不到 →
+        // 永远垫底。补上候选后，新节点几轮内就能测出真实吞吐，按实测值回到
+        // 正常排序。候选数封顶 capacity（探测流量可控：≤2×capacity 个节点）。
         round_no = round_no.wrapping_add(1);
         if t.bw_interval_rounds > 0
             && round_no.is_multiple_of(t.bw_interval_rounds)
@@ -468,9 +475,13 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
             let bw_nodes: Vec<Node> = {
                 let sel = selection.read().await.clone();
                 let guard = pool.read().await;
-                sel.iter()
-                    .filter_map(|tag| guard.iter().find(|n| &n.tag == tag).cloned())
-                    .collect()
+                decision::bw_probe_targets(
+                    &guard,
+                    &sel,
+                    t.capacity,
+                    t.timeout_penalty,
+                    t.bw_penalty_per_efold_ms,
+                )
             };
             if !bw_nodes.is_empty() {
                 let results = batch::run_bw_batch(
