@@ -263,6 +263,11 @@ fn build_daemon_cmd(
         .env("SILVERQ_SELECTOR_STORE", dir.path().join("selector.json"))
         .env("SILVERQ_STATE", dir.path().join("scores.json"))
         .env("SILVERQ_PROBE_URL", format!("http://{probe}/"))
+        // 带宽探测也指本地端点：默认是 speed.cloudflare.com（真外网），
+        // 吞吐批次每个节点要下 512KB —— CI runner 上会打满外网带宽，
+        // 把 daemon 启动拖过客户端 10s 读超时（表现为 SOCKS5 greeting
+        // 迟迟不来）。e2e 全程回环、不依赖外网是本文件的前提。
+        .env("SILVERQ_BW_PROBE_URL", format!("http://{probe}/"))
         .env("SILVERQ_INTERVAL_SECS", interval_secs)
         .env("SILVERQ_TIMEOUT_MS", "1500");
     (cmd, socks)
