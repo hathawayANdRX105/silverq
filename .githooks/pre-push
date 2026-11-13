@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# pre-push 门禁 —— 跑 rust-specs 的规范检查。
+#
+# 规范正本在 rust-specs 仓（`~/projects/rust-specs`）：`checks` crate 管仓库结构
+# 规则与 GitHub PR/issue 格式，`lints/` 是 dylint 语法规则，`specs/` 是人读规范。
+# 入口统一走 `scripts/spec-check.sh`（.cargo/config.toml 里的 `cargo xtask` alias
+# 指向 rust-specs 的 checks crate）。
+#
+# FAIL/WARN finding 阻断 push；INFO 只打印不阻断（它们是审查背景，不是欠账）。
+# 「零 finding」与「工具链坏了」输出形态一样，所以额外要求引擎给出干净摘要
+# —— 工具链故障绝不能静默放行。
+set -euo pipefail
+REPO=$(git rev-parse --show-toplevel 2>/dev/null)
+cd "$REPO" || exit 1
+
+output="$(bash scripts/spec-check.sh 2>&1)" || true
+printf '%s\n' "$output"
+if printf '%s\n' "$output" | grep -qE '^\[(FAIL|WARN)\]'; then
+    echo "pre-push blocked: spec-check FAIL/WARN findings must be fixed." >&2
+    exit 1
+fi
+# 引擎自己的干净摘要：没有它就说明工具链没跑起来（而不是「没有问题」）。
+if ! printf '%s\n' "$output" | grep -qE '^PASS: [0-9]+ findings, 0 failures$'; then
+    echo "pre-push blocked: spec-check reported no clean summary (toolchain failure?)." >&2
+    exit 1
+fi
