@@ -3,9 +3,11 @@
 //! 这些测试守的是「排序为什么是这样」的语义，不是字段拷贝：
 //! - 重尾分布下线性 EWMA 会给出不存在的中间值（对数域才对）
 //! - 半死节点必须被乘性压下去（加性罚分压不住）
-//! - 未测带宽的节点不奖不罚（乐观初值，探索）
+//! - 未测带宽的节点按保守假设参与排序（不奖不罚的乐观初值会让「没测过」
+//!   的节点稳赢「测过」的，队首被未验证的慢节点占住）
 use silverq::scheduler::node::{
-    Node, DEFAULT_BW_PENALTY_PER_EFOLD_MS, DEFAULT_FAILURE_PENALTY_MS, HP_INITIAL, HP_MAX,
+    Node, BW_UNKNOWN_BPS, DEFAULT_BW_PENALTY_PER_EFOLD_MS, DEFAULT_FAILURE_PENALTY_MS, HP_INITIAL,
+    HP_MAX,
 };
 
 /// 稳定性窗口里塞入指定数量的成败结果。
@@ -62,26 +64,6 @@ fn zero_and_negative_bw_are_ignored() {
 }
 
 #[test]
-fn unmeasured_bw_neither_rewarded_nor_penalized() {
-    // 乐观初值：没测过带宽的节点分数只由延迟+稳定性决定。
-    // 奖励它会让它永远占据队首（测一次就赢）；惩罚它则冷启动时全是 INFINITY 惩罚。
-    let mut measured = Node::new("measured", "1.1.1.1", 443);
-    measured.update(100.0);
-    measured.update_bw(1_000.0); // 极慢 1KB/s
-    let measured_score =
-        measured.score_with(DEFAULT_FAILURE_PENALTY_MS, DEFAULT_BW_PENALTY_PER_EFOLD_MS);
-
-    let mut fresh = Node::new("fresh", "1.1.1.1", 443);
-    fresh.update(100.0);
-    let fresh_score = fresh.score_with(DEFAULT_FAILURE_PENALTY_MS, DEFAULT_BW_PENALTY_PER_EFOLD_MS);
-
-    assert!(
-        fresh_score < measured_score,
-        "未测带宽应中性（=纯延迟分），极慢节点应被罚分压下: fresh={fresh_score:.0} measured={measured_score:.0}"
-    );
-}
-
-#[test]
 fn stability_scales_score_by_inverse_success_rate() {
     // 乘性语义：50% 成功率把有效代价翻倍（300ms → 600ms）。
     // 这不是「翻倍到 1200ms」——期望代价分析下，50% 的请求要重试一次
@@ -91,7 +73,9 @@ fn stability_scales_score_by_inverse_success_rate() {
     flaky.update(300.0);
     outcomes(&mut flaky, &[true, false, true, false, true, false]);
     assert_eq!(flaky.stability(), 0.5);
-    let flaky_score = flaky.score_with(DEFAULT_FAILURE_PENALTY_MS, DEFAULT_BW_PENALTY_PER_EFOLD_MS);
+    // 带宽罚分权重传 0 —— 这条只验「稳定性乘性」这一个维度，混进带宽项
+    // 等于把整个评分公式也钉进用例（宽/严都会随别的维度改动而失效）。
+    let flaky_score = flaky.score_with(DEFAULT_FAILURE_PENALTY_MS, 0.0);
     assert!(
         (flaky_score - 600.0).abs() < 1e-6,
         "300ms/50% → 600，got {flaky_score}"
@@ -101,8 +85,7 @@ fn stability_scales_score_by_inverse_success_rate() {
     let mut steady = Node::new("steady", "1.1.1.1", 443);
     steady.update(500.0);
     outcomes(&mut steady, &[true; 6]);
-    let steady_score =
-        steady.score_with(DEFAULT_FAILURE_PENALTY_MS, DEFAULT_BW_PENALTY_PER_EFOLD_MS);
+    let steady_score = steady.score_with(DEFAULT_FAILURE_PENALTY_MS, 0.0);
     assert!((steady_score - 500.0).abs() < 1e-6);
     assert!(
         steady_score < flaky_score,
@@ -158,6 +141,68 @@ fn fusion_orders_fast_stable_node_above_slow_one() {
     assert!(
         fs < ss,
         "256KB/s 快节点必须排在 16KB/s 慢节点前面（即使延迟贵 3 倍）: fast={fs:.0} slow={ss:.0}"
+    );
+}
+
+/// 带宽未知的节点不能稳赢「已测」节点 —— 打分倒挂回归。
+///
+/// 线上实测的坑：带宽项是 `gap × 罚分权重`，`bw_samples==0` 时若直接跳过
+/// 该项，未知节点就零罚分；而所有已测节点都在背罚分（实测自由节点 ~100KB/s
+/// 对 8MB/s 基准 = 4.2 个 e 倍 ≈ 6300ms）。于是刚 reload 进来、bw 探测还没
+/// 轮到的新节点直接跳到队首，而竞速只用队首候选 —— 所有流量压在一个未验证
+/// 的慢节点上：队首节点 GitHub 实测 13KB/s，同批已测节点 94KB/s，
+/// GitHub 首页 525KB 从 5.6s 变成 40s。
+///
+/// 修法：未知带宽按保守假设 `BW_UNKNOWN_BPS` 参与排序，排在所有已测节点
+/// 之后；bw 探测补上样本后按实测值正常参与。
+#[test]
+fn unknown_bandwidth_ranks_below_measured_nodes() {
+    let penalty = DEFAULT_BW_PENALTY_PER_EFOLD_MS;
+
+    // 已测节点：延迟不错、吞吐实测 ~120KB/s（带真实带宽罚分）
+    let mut measured = Node::new("measured", "1.1.1.1", 443);
+    measured.update(1400.0);
+    measured.update_bw(120_000.0);
+    outcomes(&mut measured, &[true; 8]);
+
+    // 未知节点：延迟略差（2698ms）、没有吞吐样本
+    let mut unknown = Node::new("unknown", "1.1.1.1", 443);
+    unknown.update(2698.0);
+    outcomes(&mut unknown, &[true; 8]);
+
+    let ms = measured.score_with(DEFAULT_FAILURE_PENALTY_MS, penalty);
+    let us = unknown.score_with(DEFAULT_FAILURE_PENALTY_MS, penalty);
+    assert!(
+        ms < us,
+        "带宽未知的节点必须排在已测节点之后（否则它会占住队首坑掉所有流量）: measured={ms:.0} unknown={us:.0}"
+    );
+
+    // 未知节点的带宽罚分 = 保守假设 BW_UNKNOWN_BPS 对应的落差，
+    // 不是零（零罚分就是本回归守的那个 bug）。
+    let conservative_gap = (8_000_000.0f64.ln() - BW_UNKNOWN_BPS.ln()).max(0.0);
+    assert!(
+        conservative_gap > 0.0,
+        "保守假设必须落在参考带宽之下，否则仍等于零罚分"
+    );
+}
+
+/// 两个都未知的节点之间不该被带宽项区分开 —— 保守罚分是同一个常数，
+/// 相对顺序仍由延迟/稳定性决定。
+#[test]
+fn two_unknown_bandwidth_nodes_rank_by_latency() {
+    let penalty = DEFAULT_BW_PENALTY_PER_EFOLD_MS;
+    let mut fast = Node::new("fast", "1.1.1.1", 443);
+    fast.update(500.0);
+    outcomes(&mut fast, &[true; 8]);
+    let mut slow = Node::new("slow", "1.1.1.1", 443);
+    slow.update(2500.0);
+    outcomes(&mut slow, &[true; 8]);
+
+    let fs = fast.score_with(DEFAULT_FAILURE_PENALTY_MS, penalty);
+    let ss = slow.score_with(DEFAULT_FAILURE_PENALTY_MS, penalty);
+    assert!(
+        fs < ss,
+        "未知带宽的节点之间仍按延迟排序: fast={fs:.0} slow={ss:.0}"
     );
 }
 

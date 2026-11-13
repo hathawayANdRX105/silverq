@@ -33,6 +33,22 @@ pub const DEFAULT_BW_PENALTY_PER_EFOLD_MS: f64 = 1500.0;
 /// 上限一个量级，留足头部空间。
 pub const BW_REF_BPS: f64 = 8_000_000.0;
 
+/// 带宽**未知**时的保守假设（B/s）。
+///
+/// 未知不能当「无限快」——那会让「从没测过吞吐」的节点在排序里排到最前：
+/// 打分里的带宽项是 `gap × 罚分权重`，`bw_samples==0` 时若直接跳过该项，
+/// 该节点就一分不罚，而所有**已测**节点都在背罚分（实测自由节点 ~100KB/s
+/// 对 8MB/s 基准 = 4.2 个 e 倍 = 6300ms 罚分），于是「没测过」稳赢「测过」。
+///
+/// 线上实测就是这个坑：队首节点 `bw_bps=null`（刚 reload 进来、还没轮到
+/// bw 探测），GitHub 实测只有 13KB/s；同批已测节点有 94KB/s。因为竞速只用
+/// 队首候选，所有流量都压在这个未验证的慢节点上，GitHub 首页 525KB 花了 40s。
+///
+/// 取 64KB/s 作保守下界：实测自由节点普遍在 98~135KB/s，这个值低于它们，
+/// 于是「未知」节点排在所有「已测」节点之后，等 bw 探测补上样本后自然回到
+/// 正常排序（测出多少就按多少算，不优待也不苛待）。
+pub const BW_UNKNOWN_BPS: f64 = 64.0 * 1024.0;
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // server/port 见下方说明
 pub struct Node {
@@ -379,6 +395,19 @@ impl Node {
             // （1MB/s vs 10KB/s 差 999990，彻底淹没延迟项）；
             // 对数差单调、量纲统一，排序够用。
             let gap = (BW_REF_BPS.ln() - self.bw_log).max(0.0);
+            score += gap * bw_penalty_per_efold_ms;
+        } else {
+            // 带宽未知 → 保守假设（BW_UNKNOWN_BPS），不是「零罚分」。
+            //
+            // 零罚分会让「从没测过吞吐」的节点稳赢所有已测节点（已测节点都
+            // 在背 ~6000ms 带宽罚分），于是刚进池、bw 探测还没轮到的新节点
+            // 直接占据队首；竞速只用队首候选，于是所有流量压在一个未验证
+            // 的慢节点上（实测队首 GitHub 13KB/s，同批已测节点 94KB/s，
+            // GitHub 首页 525KB 从 5.6s 变成 40s）。
+            //
+            // 保守假设让未知节点排在已测节点之后，等 bw 探测补上样本后，
+            // 按实测值正常参与排序。
+            let gap = (BW_REF_BPS.ln() - BW_UNKNOWN_BPS.ln()).max(0.0);
             score += gap * bw_penalty_per_efold_ms;
         }
         score

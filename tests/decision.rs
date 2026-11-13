@@ -191,3 +191,100 @@ fn reload_adopts_scores_so_selection_survives() {
         "reload 后 selection 不能空"
     );
 }
+
+/// 吞吐探测的目标集合 = selection ∪ 缺带宽样本的高分候选。
+///
+/// **候选必须带上**，否则新节点会被饿死：它们进池时 `bw_samples=0`，按保守
+/// 假设（`BW_UNKNOWN_BPS`）打分必然垫底，一轮就被挤出 selection；而 bw 探测
+/// 只跑 selection → 永远测不到 → 永远垫底。线上实测就是这个坑：队首节点
+/// `bw_bps=null`（未验证），GitHub 只有 13KB/s，同批已测节点 94KB/s。
+#[test]
+fn bw_probe_targets_include_unmeasured_candidates() {
+    // selection 里两个节点（都已有带宽样本）
+    let mut sel_a = measured("sel-a", 100.0);
+    sel_a.update_bw(120_000.0);
+    let mut sel_b = measured("sel-b", 120.0);
+    sel_b.update_bw(110_000.0);
+    // 池里另有三个没有带宽样本的候选，延迟依次变差
+    let cand_fast = measured("cand-fast", 90.0);
+    let cand_mid = measured("cand-mid", 300.0);
+    let cand_slow = measured("cand-slow", 900.0);
+
+    let pool = vec![
+        sel_a.clone(),
+        sel_b.clone(),
+        cand_fast.clone(),
+        cand_mid.clone(),
+        cand_slow.clone(),
+    ];
+    let selection = vec!["sel-a".to_string(), "sel-b".to_string()];
+
+    let targets = bw_probe_targets(
+        &pool,
+        &selection,
+        10,
+        DEFAULT_FAILURE_PENALTY_MS,
+        DEFAULT_BW_PENALTY_PER_EFOLD_MS,
+    );
+    let tags: Vec<&str> = targets.iter().map(|n| n.tag.as_str()).collect();
+
+    assert!(
+        tags.contains(&"sel-a") && tags.contains(&"sel-b"),
+        "selection 必须在探测目标里: {tags:?}"
+    );
+    assert!(
+        tags.contains(&"cand-fast"),
+        "缺带宽样本的候选必须被补进来（否则永远测不到）: {tags:?}"
+    );
+    // 候选按分数从高到低补：cand-fast 延迟最好，应排在候选首位
+    let cand_pos = tags.iter().position(|t| *t == "cand-fast").unwrap();
+    let sel_pos = tags.iter().position(|t| *t == "sel-a").unwrap();
+    assert!(
+        cand_pos > sel_pos,
+        "selection 节点排在补进来的候选之前: {tags:?}"
+    );
+}
+
+/// 候选数封顶 capacity —— 探测流量可控（≤2×capacity 个节点）。
+#[test]
+fn bw_probe_targets_candidate_count_is_capped() {
+    let pool: Vec<Node> = (0..50)
+        .map(|i| measured(&format!("c{i:02}"), 100.0 + i as f64))
+        .collect();
+    let targets = bw_probe_targets(
+        &pool,
+        &[],
+        5,
+        DEFAULT_FAILURE_PENALTY_MS,
+        DEFAULT_BW_PENALTY_PER_EFOLD_MS,
+    );
+    assert_eq!(targets.len(), 5, "候选数封顶 capacity: {}", targets.len());
+    // 延迟最好的 5 个被选中
+    let tags: Vec<&str> = targets.iter().map(|n| n.tag.as_str()).collect();
+    assert_eq!(
+        tags,
+        vec!["c00", "c01", "c02", "c03", "c04"],
+        "按分数从高到低补: {tags:?}"
+    );
+}
+
+/// 已有带宽样本的节点不该被重复当成候选（它们已经在 selection 里被探测）。
+#[test]
+fn bw_probe_targets_skip_nodes_already_measured() {
+    let mut measured_bw = measured("has-bw", 100.0);
+    measured_bw.update_bw(120_000.0);
+    let pool = vec![measured_bw, measured("no-bw", 100.0)];
+    let targets = bw_probe_targets(
+        &pool,
+        &[],
+        10,
+        DEFAULT_FAILURE_PENALTY_MS,
+        DEFAULT_BW_PENALTY_PER_EFOLD_MS,
+    );
+    let tags: Vec<&str> = targets.iter().map(|n| n.tag.as_str()).collect();
+    assert!(
+        !tags.contains(&"has-bw"),
+        "已有带宽样本的节点不该进候选（浪费探测流量）: {tags:?}"
+    );
+    assert!(tags.contains(&"no-bw"), "缺样本的节点必须进候选: {tags:?}");
+}

@@ -23,8 +23,18 @@ concurrency = 20
 # HP 在 50 以下时按跌幅加性罚分，最大只到 1 个本值（HP 内置记账，
 # 探活 ±1/−5、实际流量 ±2/−15，无需配置；50 以上无奖励语义）。
 timeout_penalty = 3000.0
-# 探测 URL（generate_204 风格）
-probe_url = "https://www.gstatic.com/generate_204"
+# 探测 URL（generate_204 风格）。多目标探测：全部通过才算健康。
+# 注：key 是 probe_urls（复数、列表），不是 probe_url —— 写单数会让
+# deny_unknown_fields 直接拒绝整个配置文件。
+probe_urls = [
+    "https://www.gstatic.com/generate_204",
+]
+# 带宽探测（吞吐感知排序）：每 N 轮跑一次，1 = 每轮。
+# 延迟探针只测握手+首字节，看不出管道快慢；这条探测读有限字节算 bytes/sec，
+# 按对数域落差罚分并进排序。探测目标 = selection ∪ 缺带宽样本的高分候选。
+bw_interval_rounds = 3
+# 每降低 e 倍（≈2.72x）吞吐，在排序上相当于加多少毫秒延迟。
+bw_penalty_per_efold_ms = 1500.0
 # 节点淘汰（双指标）：连续失败 ≥ max_failures 触发检查——
 # 进入保活期，连续失败持续满 keep_alive_secs 才摘。成功一次即复活。0 = 禁用。
 retire_max_failures = 5
