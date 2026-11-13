@@ -87,7 +87,17 @@ pub(super) async fn handle_one(
     // 优先级高于国内直连与路线缓存竞速。给「直连通但上游按出口 IP 地区
     // 拒绝服务」的域名用（如 opencode.ai zen 地区门禁）。与钉住的区别：
     // 钉住=整机流量钉单节点；本表只把表内域名送进候选链，其余流量不受影响。
+    //
+    // 同时它也是「白名单」语义：命中域名**不做直连探测**——被墙站点
+    // （github 等）每次走未命中竞速都要先烧一轮直连预算（DNS+TCP 各
+    // 一次，被墙时直接耗满 dial_timeout）才轮到代理，白名单把这一步省掉。
     let force_hit = ctx.runtime.force_proxy.matches(&target.host);
+    // 白名单 = 代理专用竞速：直连侧整个不参与，候选之间仍按首字节并行
+    // 竞争。走串行候选链会让队首黑洞节点（能连上但不发数据）白等
+    // 4×首响预算才轮到后面的活节点；竞速的首字节预算只有 dial_timeout。
+    let proxy_only = force_hit;
+    // 钉住标志取一次快照：下面的判定要用，且钉住语义优先于白名单。
+    let pinned = ctx.runtime.pinned.load(Ordering::Relaxed);
 
     // 直连判定（跳过候选链）：
     // - 回环/私网目标：语义对齐 TUN 数据面的私网安全网——这类地址只在
@@ -99,7 +109,7 @@ pub(super) async fn handle_one(
         Host,
         Ip(std::net::IpAddr),
     }
-    let direct: DirectDial = if ctx.runtime.pinned.load(Ordering::Relaxed) {
+    let direct: DirectDial = if pinned {
         // 钉住语义优先于直连判定：钉住 = 所有流量只走该节点、fail 就 fail，
         // 直连旁路会破坏该语义（e2e pinned_* 回归锁定）。
         DirectDial::None
@@ -122,12 +132,7 @@ pub(super) async fn handle_one(
     // 缓存里曾成功的路线走；条目路线慢 → 同样进竞速。缓存直连命中失败后要
     // 回退代理候选链（proxy_fallback）。
     let china_hit = !force_hit && ctx.runtime.china.matches(&target.host);
-    let cache_eligible = route_cache_eligible(
-        &target.host,
-        ctx.runtime.pinned.load(Ordering::Relaxed),
-        china_hit,
-        force_hit,
-    );
+    let cache_eligible = route_cache_eligible(&target.host, pinned, china_hit, force_hit);
     let mut race = false;
     // 缓存驱动的直连（区别于回环/国内的策略直连）：失败后要回退候选链，
     // 且失败要记账，否则一个被墙域名会每次白烧一轮直连超时。
@@ -177,6 +182,14 @@ pub(super) async fn handle_one(
     // 幂等方法（GET/HEAD/OPTIONS/TRACE）双发无害。
     if race && !replay_race_safe(&target.replay) {
         race = false;
+    }
+    // 白名单（强制代理表）命中：直接进竞速，且**不带直连侧**——候选之间
+    // 仍按首字节并行竞争（队首黑洞节点不会白等 4×首响预算才轮到活节点），
+    // 但一次直连都不试。不进路线缓存：路线恒为代理，缓存无信息量。
+    // 钉住时例外：钉住语义是「只用这个节点」，走串行候选链（选择只有
+    // 一个元素，行为等价），别让白名单改写钉住路径。
+    if proxy_only && !pinned && replay_race_safe(&target.replay) {
+        race = true;
     }
 
     // 候选按重排后的顺序逐个尝试（best → 次优），dial 失败自动 fallback
@@ -261,34 +274,41 @@ pub(super) async fn handle_one(
             // HP 归因：代理拨号失败即时扣分；目标无首字节可能是目标本身慢，
             // 只记域名路线失败，不误扣全局节点健康。胜者即时加分，
             // 被胜者取消的负方不奖不罚。
-            let label = format!("{}/{}", target.host, target.port);
-            let host = target.host.clone();
-            let port = target.port;
-            let direct_side: SideFut<'_> = Box::pin(async move {
-                match single_budget_direct(&host, port, dial_timeout, &label).await {
-                    DirectAttempt::Ok(stream) => {
-                        Some(Box::new(stream) as Box<dyn meow_common::conn::ProxyConn>)
+            //
+            // 白名单（proxy_only）：波次1 不含直连侧——一次直连都不试，
+            // 直连 future 连构造都不构造（构造即持有 host/port 副本）。
+            // 非白名单：波次1 = 直连 ‖ 首选候选。
+            let mut waves: Vec<Vec<SideSpec<'_>>> = Vec::new();
+            if !proxy_only {
+                let label = format!("{}/{}", target.host, target.port);
+                let host = target.host.clone();
+                let port = target.port;
+                let direct_side: SideFut<'_> = Box::pin(async move {
+                    match single_budget_direct(&host, port, dial_timeout, &label).await {
+                        DirectAttempt::Ok(stream) => {
+                            Some(Box::new(stream) as Box<dyn meow_common::conn::ProxyConn>)
+                        }
+                        DirectAttempt::DnsFail => {
+                            tracing::info!(host = %host, "竞速直连侧 DNS 解析失败");
+                            None
+                        }
+                        DirectAttempt::BudgetExhausted => {
+                            tracing::info!(host = %host, "竞速直连侧预算耗尽（DNS+dial）");
+                            None
+                        }
                     }
-                    DirectAttempt::DnsFail => {
-                        tracing::info!(host = %host, "竞速直连侧 DNS 解析失败");
-                        None
-                    }
-                    DirectAttempt::BudgetExhausted => {
-                        tracing::info!(host = %host, "竞速直连侧预算耗尽（DNS+dial）");
-                        None
-                    }
-                }
-            });
-            let mut waves: Vec<Vec<SideSpec<'_>>> = vec![vec![SideSpec {
-                route: Route::Direct,
-                // 直连侧失败不归因任何节点
-                tag: None,
-                fut: direct_side,
-            }]];
+                });
+                waves.push(vec![SideSpec {
+                    route: Route::Direct,
+                    // 直连侧失败不归因任何节点
+                    tag: None,
+                    fut: direct_side,
+                }]);
+            }
             if let Some((first_tag, first)) = candidates.first() {
                 let md = &metadata;
                 let ft = first_tag.clone();
-                waves[0].push(SideSpec {
+                let first_side = SideSpec {
                     route: Route::Proxy,
                     tag: Some(ft.clone()),
                     fut: Box::pin(async move {
@@ -307,7 +327,13 @@ pub(super) async fn handle_one(
                             }
                         }
                     }),
-                });
+                };
+                if proxy_only {
+                    // 波次1 尚未建立（白名单没有直连侧）：首选候选独占波次1。
+                    waves.push(vec![first_side]);
+                } else {
+                    waves[0].push(first_side);
+                }
             }
             if candidates.len() > 1 {
                 let md = &metadata;
@@ -354,6 +380,7 @@ pub(super) async fn handle_one(
                     routes: ctx.runtime.routes.as_ref(),
                     host: &target.host,
                     pool: &ctx.runtime.pool,
+                    cache_eligible,
                 },
             )
             .await
@@ -415,10 +442,22 @@ pub(super) async fn handle_one(
                 .await;
         }
         return Ok(());
-    } else if ctx.runtime.pinned.load(Ordering::Relaxed) {
+    } else if pinned {
         // 钉住语义是"只用这个节点"：所有代理候选失败时直连兜底会绕过钉住，
         // 让钉死节点的请求悄悄走直连成功。钉住必须fail 就 fail。
         tracing::info!("已钉住且候选全失败，不做直连兜底（遵守 pin 语义）");
+        if target.proto == Proto::Http {
+            let _ = socket
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+                .await;
+        }
+        return Ok(());
+    } else if proxy_only {
+        // 白名单域名：候选全败也不走直连兜底——白名单的语义就是
+        // 「一次直连都不试」。直连兜底在这里既帮不上忙（被墙站点
+        // 直连必然失败），又要把 max(dial_timeout, first_response)
+        // 的时间白烧掉才返回 503。
+        tracing::info!(host = %target.host, "白名单域名且候选全失败，不做直连兜底");
         if target.proto == Proto::Http {
             let _ = socket
                 .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")

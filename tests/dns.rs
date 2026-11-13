@@ -3,6 +3,7 @@
 
 use silverq::proxy::dns::{
     build_query, load_domain_list, parse_answers, resolve_dial_addrs, resolve_host, DomainSet,
+    HotDomainSet,
 };
 use silverq::proxy::nodespec::{NodeSpec, Protocol};
 use std::net::IpAddr;
@@ -74,6 +75,29 @@ fn domain_set_matches_suffix_not_substring() {
     assert!(!cs.matches("notexample.com"), "子串不能误判为后缀命中");
     assert!(!cs.matches("baidu.cn"));
     assert!(!cs.matches("example.org"));
+}
+
+/// 热更换表：旧表立即失效，新表立即生效（运维改白名单文件后
+/// `silverq config-reload` 的语义）。
+#[test]
+fn hot_domain_set_replace_swaps_matching() {
+    let set = HotDomainSet::new(&["old.example.com".into()]);
+    assert!(set.matches("old.example.com"));
+    assert!(!set.matches("new.example.com"));
+    assert_eq!(set.len(), 1);
+
+    set.replace(&["new.example.com".into()]);
+    assert!(!set.matches("old.example.com"), "旧表必须立即失效");
+    assert!(set.matches("new.example.com"), "新表必须立即生效");
+    assert_eq!(set.len(), 1);
+}
+
+/// 空表 = 规则未启用：任何域名都不命中，且不 panic。
+#[test]
+fn hot_domain_set_empty_matches_nothing() {
+    let set = HotDomainSet::new(&[]);
+    assert!(!set.matches("github.com"));
+    assert_eq!(set.len(), 0);
 }
 
 #[test]

@@ -26,6 +26,12 @@ pub struct RaceCtx<'a> {
     pub routes: &'a RouteCache,
     pub host: &'a str,
     pub pool: &'a SharedPool,
+    /// 该域名是否走路线缓存（白名单域名恒走代理，缓存无信息量 → 不记）。
+    ///
+    /// 白名单域名的路线是策略决定的（必走代理），不是测出来的——
+    /// 记进缓存只会占着 8192 条上限里的位置，且下次查缓存时还得
+    /// 绕开它（`route_cache_eligible` 对白名单返回 false）。
+    pub cache_eligible: bool,
 }
 /// 竞速侧拨号 future：None = 拨号失败或超时（各侧日志已在闭包内打）。
 pub type SideFut<'a> = std::pin::Pin<
@@ -120,8 +126,10 @@ pub async fn race_relay<'a>(
                 continue;
             }
             // 全灭：代理侧各失败已逐侧归因（HP），路线级再记一条 Failed
-            ctx.routes
-                .record(ctx.host, Route::Proxy, RouteOutcome::Failed);
+            if ctx.cache_eligible {
+                ctx.routes
+                    .record(ctx.host, Route::Proxy, RouteOutcome::Failed);
+            }
             if write_503 {
                 let _ = cw
                     .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
@@ -217,8 +225,10 @@ pub async fn race_relay<'a>(
                     return RaceOutcome::ClientLeft;
                 }
                 let wroute = win.route;
-                ctx.routes
-                    .record(ctx.host, wroute, RouteOutcome::Responded(fr));
+                if ctx.cache_eligible {
+                    ctx.routes
+                        .record(ctx.host, wroute, RouteOutcome::Responded(fr));
+                }
                 if let Some(t) = &win.tag {
                     attribute_runtime(ctx.pool, t, true).await;
                 }
@@ -227,7 +237,9 @@ pub async fn race_relay<'a>(
                     r = tokio::io::copy(&mut win.pr, &mut cw) => match r {
                         Ok(_) => RaceOutcome::Won,
                         Err(e) => {
-                            ctx.routes.record(ctx.host, wroute, RouteOutcome::Failed);
+                            if ctx.cache_eligible {
+                                ctx.routes.record(ctx.host, wroute, RouteOutcome::Failed);
+                            }
                             RaceOutcome::DiedAfterWin(e.into())
                         }
                     },

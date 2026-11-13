@@ -92,15 +92,64 @@ fn tls_connector() -> TlsConnector {
     });
     CONNECTOR.clone()
 }
-/// 发 GET、读 body，**最多 `max_bytes` 字节后立即断开**，返回所读字节数。
+/// 有限字节下载的速率（bytes/sec）。
+///
+/// 带宽维度要的量纲是**速率**而不是字节数：同样读满 `max_bytes`，
+/// 2 秒读完的节点是 256KB/s，8 秒读完的是 64KB/s——只看字节数两者
+/// 完全一样，排序无从区分（这正是「延迟快但带宽慢的节点霸占队首」
+/// 的成因）。`elapsed` 只覆盖 body 读取段：拨号与 TLS 握手由延迟
+/// 维度负责，混进来会把慢握手误判成慢带宽。
+///
+/// 耗时为 0（极快的小响应）时按 1ns 兜底，避免除零产出 inf。
+pub fn bytes_per_second(bytes: u64, elapsed: std::time::Duration) -> f64 {
+    let secs = elapsed.as_secs_f64().max(1e-9);
+    bytes as f64 / secs
+}
+
+/// 从 HTTP 响应头缓冲里取状态码。
+///
+/// 状态行形如 `HTTP/1.1 200 OK`：版本、状态码、原因短语三段。
+/// 取第二段解析成数字；非 HTTP 开头或状态码缺失一律 None。
+///
+/// 为什么单独抽函数：原先这段逻辑内联在 `read_body_bytes` 里，用
+/// `header_buf.windows(7).next()` 取「前 7 字节」再 `strip_prefix("HTTP/1.")`——
+/// 7 字节窗口恰好只覆盖 `HTTP/1.` 本身，剥完前缀剩空串，
+/// `split_whitespace().next()` 恒为 None，**任何状态码都判不出来**。
+/// 结果：带宽探测每次都返回 None，`bw_samples` 永远是 0，
+/// 带宽维度从未进入过排序（实测 scores.json 26 个节点全为 `bw_samples: 0`）。
+/// 于是「握手快但带宽只有 1Mbit」的节点一直霸占队首——
+/// 表现就是延迟探测飞快、真实页面很慢。
+pub fn parse_status_code(header: &[u8]) -> Option<u16> {
+    let line = header.split(|b| *b == b'\r' || *b == b'\n').next()?;
+    let line = std::str::from_utf8(line).ok()?;
+    let mut parts = line.split_whitespace();
+    let version = parts.next()?;
+    if !version.starts_with("HTTP/") {
+        return None;
+    }
+    parts.next()?.parse::<u16>().ok()
+}
+
+/// 发 GET、读 body，**最多 `max_bytes` 字节后立即断开**，
+/// 返回 `(已读字节数, 读取耗时)`。
 ///
 /// 读完状态行+头部后开始计数 body。`Connection: close` 让服务端发完就关，
 /// 我们也在达到 max_bytes 时主动断开——不读完整个响应，既省带宽又让
 /// 「快但慢」的节点在有限预算内暴露真实速率。
-pub async fn read_body_bytes<S>(mut stream: S, parsed: &ProbeUrl, max_bytes: u64) -> Option<u64>
+///
+/// 耗时覆盖请求写出 + 响应头 + body 的整个 HTTP 交换：服务端首字节等待
+/// 是真实页面体感的一部分，剔除它会系统性高估慢节点的速率。**拨号与
+/// TLS 握手不算在内**——那属于延迟维度，混进来会把「握手慢但管道快」
+/// 的节点误判成带宽差（TLS 握手由调用方在计时外完成）。
+pub async fn read_body_bytes<S>(
+    mut stream: S,
+    parsed: &ProbeUrl,
+    max_bytes: u64,
+) -> Option<(u64, std::time::Duration)>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    let started = std::time::Instant::now();
     let default_port = if parsed.https { 443 } else { 80 };
     // Host 头带非默认端口，虚拟主机路由才正确（与 meow 的 send_get_and_check 同理）。
     let host_header = if parsed.port == default_port {
@@ -134,14 +183,7 @@ where
     }
     // 只要状态行 2xx/3xx 就算可用下载（3xx 重定向不跟随，字节数 0 会被
     // 上层视为低带宽而非失败——重定向端点本就不是好的带宽探测点）。
-    let status_ok = header_buf
-        .windows(7)
-        .next()
-        .and_then(|w| std::str::from_utf8(w).ok())
-        .and_then(|s| s.strip_prefix("HTTP/1."))
-        .and_then(|s| s.split_whitespace().next())
-        .and_then(|code| code.parse::<u16>().ok())
-        .is_some_and(|c| (200..400).contains(&c));
+    let status_ok = parse_status_code(&header_buf).is_some_and(|c| (200..400).contains(&c));
     if !status_ok {
         return None;
     }
@@ -159,5 +201,5 @@ where
         got += n as u64;
     }
     // 一个字节都没下来：可能是空 body 的 204 被误当带宽端点，视为无效采样。
-    (got > 0).then_some(got)
+    (got > 0).then_some((got, started.elapsed()))
 }

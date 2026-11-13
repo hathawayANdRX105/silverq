@@ -176,6 +176,15 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
     };
     let sched = tokio::spawn(schedule_loop(handles, tuning.clone()));
 
+    // 规则表（国内直连 + 强制代理白名单）：先加载，ctl 与数据面共用同一份句柄，
+    // `silverq config-reload` 重读文件换代 —— 改白名单不必重启生产实例。
+    let rules = Arc::new(silverq::proxy::dns::RuleTables::load());
+    tracing::info!(
+        china = rules.china.len(),
+        force_proxy = rules.force_proxy.len(),
+        "规则表加载"
+    );
+
     // 5. ctl socket（unix）：reload / select / status
     #[cfg(unix)]
     {
@@ -194,6 +203,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             protocols.clone(),
             progress.clone(),
             jev.clone(),
+            rules.clone(),
         ));
         #[cfg(not(feature = "meow"))]
         let ctl_state = Arc::new(ctl::CtlState::new(
@@ -209,6 +219,7 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             protocols.clone(),
             progress.clone(),
             jev.clone(),
+            rules.clone(),
         ));
         let ctl_sock = std::path::PathBuf::from(eff.ctl_sock.clone());
         #[cfg(feature = "meow")]
@@ -236,18 +247,9 @@ async fn serve(nodes: String, cfg_path: Option<String>) -> Result<(), Box<dyn st
             let inbound_reg = registry.clone();
             // 国内域名直连表：SOCKS 入站路径的直连判定 + TUN 的 fake-IP 旁路
             // （TUN 侧在 TunRuntime::new 里独立加载同一文件）。
-            let china_domains =
-                silverq::proxy::dns::load_domain_list(&silverq::proxy::dns::china_domains_path());
-            let china = Arc::new(silverq::proxy::dns::DomainSet::new(&china_domains));
-            tracing::info!(count = china_domains.len(), "国内域名直连表加载");
-            let inb_china = china.clone();
-            // 强制代理域名表：表内域名必须走候选链（覆盖国内直连与竞速）
-            let force_domains = silverq::proxy::dns::load_domain_list(
-                &silverq::proxy::dns::force_proxy_domains_path(),
-            );
-            let force_proxy = Arc::new(silverq::proxy::dns::DomainSet::new(&force_domains));
-            tracing::info!(count = force_domains.len(), "强制代理域名表加载");
-            let inb_force = force_proxy.clone();
+            // 规则表句柄与 ctl 共用：config-reload 换代后数据面立即见新表。
+            let inb_china = rules.china.clone();
+            let inb_force = rules.force_proxy.clone();
             // 域名级路由缓存（慢触发竞速）：SOCKS 入站专用，TUN 路径暂不接入
             let routes = Arc::new(silverq::proxy::route::RouteCache::new());
             let inb_routes = routes.clone();

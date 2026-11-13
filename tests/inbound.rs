@@ -436,6 +436,7 @@ async fn race_records_route_and_hp_on_first_byte_while_connection_open() {
                 routes: &race_routes,
                 host,
                 pool: &race_pool,
+                cache_eligible: true,
             },
         )
         .await
@@ -595,6 +596,7 @@ async fn race_winner_is_first_byte_not_first_connect() {
                 routes: &race_routes,
                 host: "race-test.host",
                 pool: &race_pool,
+                cache_eligible: true,
             },
         )
         .await
@@ -675,6 +677,7 @@ async fn race_second_wave_rescues_after_double_fail() {
                 routes: &race_routes,
                 host: "race-test2.host",
                 pool: &race_pool,
+                cache_eligible: true,
             },
         )
         .await
@@ -770,6 +773,28 @@ fn ip_literals_opt_out_of_route_decisions() {
                                                                       // 强制代理命中：不进路线缓存，走候选链（地区门禁域名，如 opencode.ai）。
     assert!(!route_cache_eligible("opencode.ai", false, false, true));
     // 强制表赢过国内表：同域名两表都列时按强制代理处理。
+    assert!(!route_cache_eligible("www.baidu.com", false, true, true));
+}
+
+/// 白名单（强制代理表）命中的域名**不做直连探测**：不进路线缓存，
+/// 因此也不会进「直连 ‖ 代理」的首字节竞速——被墙站点每轮都白烧一轮
+/// 直连预算（DNS+TCP，被墙时直接耗满 dial_timeout）才轮到代理。
+///
+/// 回归一个真问题：github 等被墙站点走未命中竞速时，直连侧永远失败，
+/// 但那轮直连预算已经烧掉了；白名单把这一步整个省掉。
+#[test]
+fn whitelist_domains_skip_route_cache_and_direct_probe() {
+    // 白名单命中 → 不进路线缓存（= 不参与直连/竞速决策）。
+    assert!(
+        !route_cache_eligible("github.com", false, false, true),
+        "白名单域名不该参与直连/竞速决策"
+    );
+    // 同域名不在白名单 → 正常参与（走未命中竞速）。
+    assert!(
+        route_cache_eligible("github.com", false, false, false),
+        "不在白名单的域名仍走原有竞速路径"
+    );
+    // 白名单压过钉住之外的任何国内直连判定。
     assert!(!route_cache_eligible("www.baidu.com", false, true, true));
 }
 

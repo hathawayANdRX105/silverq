@@ -56,9 +56,12 @@ pub struct CtlState {
     /// 调度进度（schedule_loop 写、web 面板读；与调度循环共享同一 Arc）
     #[cfg_attr(not(feature = "meow"), allow(dead_code))] // 仅 meow 的 web 模块读
     pub progress: Arc<crate::scheduler::SchedulerProgress>,
-    /// jev 决策器（未启用为 None）。ctl status 汇总、web 面板展示，
+    /// jev 决策器（未启用为 None）。ctl status 汇总、web 面板展示；
     /// 与调度循环共享同一实例（head/统计同一份）。
     pub jev: Option<Arc<crate::scheduler::jev::JevDecider>>,
+    /// 规则表（国内直连 + 强制代理白名单）：与数据面共用同一份句柄，
+    /// `config-reload` 重读文件换代 —— 改白名单不必重启生产实例。
+    pub rules: Arc<crate::proxy::dns::RuleTables>,
 }
 
 impl CtlState {
@@ -78,6 +81,7 @@ impl CtlState {
         protocols: std::collections::HashMap<String, String>,
         progress: Arc<crate::scheduler::SchedulerProgress>,
         jev: Option<Arc<crate::scheduler::jev::JevDecider>>,
+        rules: Arc<crate::proxy::dns::RuleTables>,
     ) -> Self {
         Self {
             registry,
@@ -93,6 +97,7 @@ impl CtlState {
             protocols: Mutex::new(protocols),
             progress,
             jev,
+            rules,
         }
     }
 
@@ -111,6 +116,7 @@ impl CtlState {
         protocols: std::collections::HashMap<String, String>,
         progress: Arc<crate::scheduler::SchedulerProgress>,
         jev: Option<Arc<crate::scheduler::jev::JevDecider>>,
+        rules: Arc<crate::proxy::dns::RuleTables>,
     ) -> Self {
         Self {
             pool,
@@ -125,6 +131,7 @@ impl CtlState {
             protocols: Mutex::new(protocols),
             progress,
             jev,
+            rules,
         }
     }
 }
@@ -261,7 +268,11 @@ async fn do_reload(state: &CtlState, path_arg: Option<&str>) -> Result<String, S
 }
 
 /// 重读 silverq.toml → 更新可热更调参（不动节点表）。
-/// 与 `silverq reload`（节点表）互补：调参与节点各自热加载。
+/// 与 `silverq reload`（节点表）互补：调参与规则表各自热加载。
+///
+/// 同时重读两张规则表（国内直连 + 强制代理白名单）：白名单是运维直接
+/// 编辑的文本文件，改完要立刻生效才有用——重启生产实例有抢跑风险
+/// （见 AGENTS.md 生产实例保护）。
 fn do_config_reload(state: &CtlState) -> Result<String, String> {
     let path = state.config_path.lock().clone();
     let fc = crate::config::settings::load(std::path::Path::new(&path))?;
@@ -276,7 +287,15 @@ fn do_config_reload(state: &CtlState) -> Result<String, String> {
         "config-reload: 调参已从 {path} 重读"
     );
     *state.tuning.write() = t;
-    Ok(format!("config reloaded from {path}"))
+    let (china, force_proxy) = state.rules.reload();
+    tracing::info!(
+        china,
+        force_proxy,
+        "config-reload: 规则表已重读（国内直连 / 强制代理白名单）"
+    );
+    Ok(format!(
+        "config reloaded from {path} (china={china}, force_proxy={force_proxy})"
+    ))
 }
 async fn do_select(state: &CtlState, arg: Option<&str>) -> Result<String, String> {
     let tag = arg.ok_or_else(|| "select: missing <tag|auto>".to_string())?;

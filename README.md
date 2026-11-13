@@ -22,18 +22,54 @@ factory::build_proxy ──▶ meow 协议 adapter (Vless/Trojan/SS/Hy2)   [复�
 select_top(N)  纯 EWMA 取前 N（无迟滞轮次）
    │
    ▼
-切换:  ① 写共享选择 (inbound 数据面读取, best→次优 fallback)
+切换: ① 写共享选择 (inbound 数据面读取, best→次优 fallback)
        ② 写 meow SelectorStore (外部 meow kernel 读取)
 ```
 
-## 关键设计（按需求）
+### 请求怎么走（数据面路由）
+
+一条入站连接（SOCKS5 / HTTP-CONNECT）按下面的顺序决定走哪条路：
+
+```
+目标域名
+   │
+   ├─ 钉住(pin)？          → 只用钉住的那个节点，不直连、不兜底
+   │
+   ├─ 白名单命中？          → 代理候选**并行竞速**（首选 ‖ 第2/3名），
+   │   force-proxy-domains   **一次直连都不试**；候选全败也不走直连兜底
+   │
+   ├─ 回环/私网 IP？        → 原样直连
+   │
+   ├─ 国内域名？            → 真实 DNS 解析成 IP 后直连
+   │   china-domains.txt
+   │
+   └─ 其余                 → 域名级路线缓存：
+                              未命中/过期 → 直连 ‖ 首选候选 并行竞速，
+                                           上游首字节先到者胜，赢家写回缓存
+                              命中         → 照上次成功的路线走
+```
+
+两个「探测」容易混，含义完全不同：
+
+| 探测 | 频率 | 对象 | 作用 |
+|------|------|------|------|
+| **节点测速**（url_test） | 每轮（`interval_secs`，默认 90s） | 节点池 | 算 EWMA 延迟 + 带宽，决定谁进 selection |
+| **直连探测**（竞速直连侧） | 每条连接首次访问某域名时 | 单个目标域名 | 比较「直连」与「走代理」谁快，把赢家记进路线缓存 |
+
+**被墙站点（github 等）慢在哪**：走的是「其余」分支 → 每条连接的竞速都要先试
+直连，而直连必然失败（DNS 解析 + TCP 拨号耗满 `dial_timeout`）。这段直连探测
+是纯浪费——它赢不了，只消耗预算。白名单把这一步整个省掉。
+
+
 
 - **自适应 EWMA**：alpha 自动，无需手调。波动大→更稳，出现明确趋势→更快跟上。
 - **分批并发**：节点池按当前排名分批测速，`buffer_unordered(concurrency)`，不阻塞在最慢节点。
 - **快慢分离**：测速（周期全池离线）与切换（只读已算好的 EWMA）完全解耦，卡顿隔离。
 - **超时扣分后移**：死/慢节点拿不到前排。
+- **吞吐感知调度（带宽探测）**：延迟探针只测握手+首字节——握手快但管道只有 1Mbit 的节点，分数比握手慢但管道 20Mbit 的还漂亮，真实页面却慢 4 倍。所以另开一条**有限字节下载**探测：读 `bw_max_bytes` 字节算出 bytes/sec，存进对数域 EWMA，按「每降低 e 倍吞吐罚 N ms」并进排序（`bw_penalty_per_efold_ms`）。只在 selection 内跑（每 `bw_interval_rounds` 轮一次），不对全池跑——全池跑是 512KB × 40 节点 ≈ 80MB/轮，免费节点撑不住。**速率量纲必须是 bytes/sec 而不是字节数**：同样读满 512KiB，2 秒读完是 256KB/s、8 秒读完是 64KB/s，只看字节数两者完全一样，排序无从区分。带宽探测只跑 selection（当前 selection 的 10 个节点），所以**未测过带宽的节点带宽项为 0**（不奖不罚，乐观初值）。
 - **节点淘汰（pipeline 双指标 + 地板）**：连续失败 ≥ `retire_max_failures`（默认 5）触发检查——**无任何存活证据**的节点（从未测通、也从未拿到实际流量首字节）立即摘除（从未通过真实握手不会自愈）；曾测通过的、或实际拿过流量首字节的（证据为 `ever_responded`，首字节到手时置位，不靠假探测样本）进入延长保活，连续失败持续满 `retire_keep_alive_secs`（默认 3600s）才摘。期间成功一次即复活。`retire_min_pool`（默认 10，0=禁用）兜底防摘到 0 全黑。可面板热改 + `silverq config-reload` 重读配置。
 - **回环/私网/国内直连判定**（SOCKS 入站）：pin 与强制代理表（`force-proxy-domains.txt`）优先，之后回环/私网目标原样直连、国内域名（`china-domains.txt`，11 万条后缀表）经真实 DNS 解析成 IP 后直连，其余交给域名级路线缓存（下一条）。强制代理表面向「直连通但上游按出口 IP 地区拒绝服务」的域名（如 opencode.ai zen 地区 403）：命中即跳过国内直连与竞速、直入候选链，免去整机钉住。避免每个死候选烧 4s、国内绕远、私网目标被拨到节点侧 loopback。
+- **强制代理白名单 = 被墙站点的「不做直连探测」开关**：被墙域名（github 等）每轮未命中竞速都要先烧一轮直连预算（DNS+TCP，被墙时直接耗满 `dial_timeout`）才轮到代理，白名单把这一步省掉——命中域名直入代理候选链，一次直连都不试。白名单文件：`~/.config/silverq/rules/force-proxy-domains.txt`（后缀匹配，`github.com` 命中自身与 `*.github.com`；`SILVERQ_FORCE_PROXY_DOMAINS` 可改路径）；`#` 注释、空行忽略，文件缺失/为空 = 关闭该规则。**改完 `silverq config-reload` 即时生效**（连同 `china-domains.txt` 一起重读换代），不必重启生产实例——重启有抢跑风险（见 AGENTS.md 生产实例保护）。
 - **事实驱动的路线选择（缓存复用 + 首字节竞速，#23）**：缓存未命中/过期 → 并行竞速：直连 ‖ 代理首选同时发，**上游首字节先到者胜**（TCP 秒连但 TLS 无响应的一侧赢不了），赢家路线**首字节落地当下**写回缓存（长会话期间即可复用，不等收尾）；双败后并行拨第 2、3 名候选（`fallback_attempts` 圈定的后两位），全败才诚实失败——用户路径上不存在失败等待。命中 → 照缓存里上次成功的路线复用终点，可能是代理。首响应/失败写回缓存：当前路线首响应 > 2s 标记 slow → 最多每 30s 重新竞速一次（失败不限频、立即换路线；慢路线期间其他连接沿用最后能工作的路线）；当前路线失败会废掉旧的首字节耗时基线，成功的兜底路线无需再过滞回即可接管。换路线走滞回（新路线快过旧路线一半才接管，旧路线没有耗时基线时成功的直接接管），TTL 3 分钟（命中即续期，只管闲置域名何时重新竞速观察）。非幂等纯 HTTP（POST/PUT 等）不参与首字节双发，降级串行候选链。残余盲区：首字节赢了但中途被掐的直连（GFW 放行 ServerHello 后 RST）——靠 `direct_fails` 记账，连续 2 次把条目切到代理路线（#21）。TUN 路径未接入（首响应信号在 meow 引擎内部）。
 - **节点 dial 真实 DNS 预解析**：节点服务器域名经固定上游（223.5.5.5 / 119.29.29.29，`SILVERQ_RESOLVE_UPSTREAMS` 可覆盖）预解析写 `NodeSpec.dial_addr`，adapter 拨号用真实 IP。修复 TUN + fake-IP 环境下「拨节点变成经候选链拨节点」的自指递归（2026-09-19 事故：健康检查幸存 14-30 → 0-1）。解析失败回退系统解析，只降级不丢节点。
 - **jev 判断接入（可选，默认关）**：`[jev].enabled = true` 时，每轮测速结束后把分数前 6 候选（只 tag + 指标，不发 server/端口/凭证）POST 给 Jev 的 `{model, state, questions}` 协议做一次 bounded decision，胜出节点顶到 selection 队首——其余候选仍按分数排，数据面 best→次优 候选链原样保留。**失败即回退纯分数选择**：传输失败（超时/非 2xx）、非法响应（fail-closed 校验）、逃生舱（ask_user 等）、胜出概率 < 阈值都算；连续失败进冷却，冷却期不发请求。pinned 时不发起也不应用（手动钉住优先级最高）。HTTP 走 reqwest + rustls，`.no_proxy()`（基础设施流量不吃环境代理，避免自指递归）。决策状态在 `silverq status` 的 `jev=` 段与 `/api/status` 的 `jev` 字段。
@@ -59,6 +95,8 @@ cargo run --features meow -- serve nodes.yaml
 # 控制命令（另开终端，走 unix socket，不重启进程）
 silverq status                # 当前池大小 / 选择 / 是否钉住
 silverq reload [nodes.yaml]   # 热加载节点表：新增进池、删除出池、存活继承 EWMA
+silverq config-reload         # 热加载配置：重读 silverq.toml 调参 + 两张规则表
+                              # （china-domains.txt / force-proxy-domains.txt）
 silverq select <tag>          # 手动钉住某节点（调度暂停覆盖）
 silverq select auto           # 取消钉住，恢复自动
 ```
@@ -73,7 +111,7 @@ silverq select auto           # 取消钉住，恢复自动
 | `SILVERQ_STATE` | `~/.local/state/silverq/scores.json` | EWMA 分数存档 |
 | `SILVERQ_RESOLVE_UPSTREAMS` | `223.5.5.5,119.29.29.29` | 节点 dial / 国内直连解析用的真实上游 DNS（逗号分隔） |
 | `SILVERQ_CHINA_DOMAINS` | `~/.config/silverq/rules/china-domains.txt` | 国内域名后缀表（缺失 = 空表 = 无直连判定） |
-| `SILVERQ_FORCE_PROXY_DOMAINS` | `~/.config/silverq/rules/force-proxy-domains.txt` | 强制代理域名后缀表（命中必走候选链，压过国内直连与竞速；缺失 = 空表 = 无强制） |
+| `SILVERQ_FORCE_PROXY_DOMAINS` | `~/.config/silverq/rules/force-proxy-domains.txt` | 强制代理域名后缀表（白名单：命中必走候选链、**不做直连探测**，压过国内直连与竞速；缺失 = 空表 = 无强制）。改完 `silverq config-reload` 即时生效 |
 | `SILVERQ_JEV_ENABLED` | TOML `[jev]` | 临时启停 jev 判断接入（优先级高于 TOML） |
 | `SILVERQ_JEV_BASE_URL` | TOML `[jev]` | jev endpoint 覆盖 |
 | `SILVERQ_JEV_API_KEY` | TOML `[jev]` | jev API key 覆盖（同规则：不入库、不打印） |
