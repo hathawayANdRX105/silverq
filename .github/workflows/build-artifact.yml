@@ -16,6 +16,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # .cargo/config.toml 的 sccache 只装在开发机；runner 没装时必须禁用 wrapper。
+  # ci.yml / release.yml 都有这一行，本 workflow 漏了 → cargo 找 sccache 失败，
+  # 构建在第一步就报 "could not execute process sccache ... No such file"。
+  RUSTC_WRAPPER: ""
 
 jobs:
   build:
