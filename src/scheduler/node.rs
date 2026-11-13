@@ -88,7 +88,7 @@ pub struct Node {
     /// 该节点拿过实际流量响应（代理首字节到手）的先验存活证据。
     /// `samples` 只由探测成功累加，「被真实流量命中过但从未被探测」
     /// （`samples==0`）的节点在 `retire_stale` 里同样按有证据处理
-    /// （延长保活而非立即摘除），并随 HP 一起进存档 `hp_extra`。
+    /// （延长保活），并随 HP 一起进存档 `hp_extra`。
     /// 只有 `note_proxy_success` 置位（探测成功不算），持久化、随
     /// `adopt_score` 迁移（换库不丢证据）。
     pub ever_responded: bool,
@@ -433,10 +433,19 @@ impl Node {
     ///
     /// 健康度与先验存活证据（`ever_responded`）随接管带走（reload 换库
     /// 不换健康、不丢证据）；`last_runtime_failure` 是数据面瞬态时刻，不随接管迁移。
+    ///
+    /// **失败计数（`consecutive_failures` / `failing_since`）不接管**：
+    /// 失败计数描述的是「上一任节点在同一拨测里连续失败了几次」，而
+    /// reload 会重建节点表——上游订阅源可能已经换了凭据、换了服务器地址，
+    /// 旧计数对新节点没有意义。更关键的是它会形成死亡螺旋：节点攒满
+    /// `retire_max_failures` 被摘 → 15min 后 pool reload 把它灌回来 →
+    /// 旧计数一并带回来 → 第一轮再失败一次就又满阈值 → 又被摘。
+    /// 实测每轮摘掉 437~508 个节点（占池 90%+）就是这么来的。
+    ///
+    /// 失败计数只描述「本次进程生命周期内连续失败了几次」，reload 重置
+    /// 它 = 给新表一轮全新的观察期，这正是想要的语义。
     pub fn adopt_score(&mut self, other: &Node) {
         self.ewma = other.ewma;
-        self.consecutive_failures = other.consecutive_failures;
-        self.failing_since = other.failing_since;
         self.samples = other.samples;
         self.last_measured = other.last_measured;
         self.bw_log = other.bw_log;

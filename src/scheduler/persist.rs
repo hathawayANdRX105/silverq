@@ -16,7 +16,7 @@
 //! （`samples==0`）的节点没有 EWMA 可存，但若它被实际流量命中过
 //! （HP 偏离初值或 `ever_responded`），在 `hp_extra` 表里补记健康度
 //! 与先验存活证据——不记的话重启后 HP 回落 50、证据丢失，5 次探测
-//! 失败即被 `retire_stale` 立即摘除，尽管它真实在响应。不存
+//! 失败即被 `retire_stale` 按无证据判死，尽管它真实在响应。不存
 //! `recent` 窗口：它只用于计算自适应 alpha，丢了最多是重启后头几次
 //! alpha 偏保守，不影响排序正确性；而存它会让文件大小和格式复杂度
 //! 都上一个量级。hp 与 EWMA 同寿命（6h 新鲜度）：长期停机重启后
@@ -51,7 +51,7 @@ pub struct Snapshot {
     /// 没探测样本（`samples==0`）节点的补记表：`tag -> (hp, ever_responded)`。
     /// 主 `scores` 不存这类节点（没有 EWMA 可存），但「被实际流量命中过」
     /// 的节点 HP 可能偏离初值、且带 `retire_stale` 保活决策依据
-    /// `ever_responded`——不存则重启后证据丢失，5 次探测失败即被摘除。
+    /// `ever_responded`——不存则重启后证据丢失，5 次探测失败即被判死。
     /// 旧快照没有该字段 → serde 默认空 map，不影响主 `scores` 恢复。
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub hp_extra: HashMap<String, HpExtra>,

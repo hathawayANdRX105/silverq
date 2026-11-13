@@ -124,7 +124,11 @@ fn penalty_never_pollutes_measured_latency_and_recovers_with_successes() {
 }
 
 /// 两级 pipeline：次数硬指标 + 时间延长保活。
-/// samples==0 僵尸达到次数阈值即摘；曾通过的保活期内保留，期满才摘。
+/// 连续失败达次数阈值的节点进入保活期；保活期满才摘。
+///
+/// 无存活证据（samples==0）的节点也走保活期，不再立即摘：节点服务器
+/// 域名解析失败、探测端点对该节点返 403、上游临时抽风，都会让一批节点
+/// 同时攒满阈值——立即摘会把这种批量瞬时故障当成僵尸判死。
 #[test]
 fn retire_pipeline_two_levels() {
     let mut pool = vec![node("zombie"), node("tried"), node("healthy")];
@@ -140,11 +144,83 @@ fn retire_pipeline_two_levels() {
     // healthy: 正常
     apply_batch(&mut pool, &[ok("healthy", 50.0)]);
 
-    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0);
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0, 0.0);
     let tags: Vec<&str> = pool.iter().map(|n| n.tag.as_str()).collect();
-    // zombie(5次失败,从未通过) 被摘; tried(5次失败,曾通过) 在保活期内保留
-    assert_eq!(tags, vec!["tried", "healthy"], "僵尸摘、曾通过的保活");
-    assert_eq!(retired, vec!["zombie"]);
+    // 保活期内全部保留：无证据的与曾通过的都还没到保活线
+    assert_eq!(tags, vec!["zombie", "tried", "healthy"], "保活期内全保留");
+    assert!(retired.is_empty(), "保活期内不摘: {retired:?}");
+}
+
+/// 批量瞬时故障回归：一次全池失败不该把整池摘光。
+///
+/// 线上实测：节点服务器域名批量解析失败 / 探测端点批量返 403 时，
+/// 一轮摘掉 437~508 个节点（占池 90%+），把用户自有的精选节点一并摘光；
+/// 摘掉的节点只能等 15min 后的 reload 重灌，重灌后又被 `adopt_score`
+/// 带回旧失败计数，于是「reload → 批量误杀 → 再 reload」成环。
+///
+/// 两处防线各自独立：
+/// 1. 保活期——未测通节点也进保活期，整批瞬时失败**本轮一个都不摘**。
+/// 2. 单轮比例上限——即便保活期满、节点真的该摘，一轮也只摘一部分，
+///    池子不会一次摘空（池空了只能等下次 reload 重灌，期间数据面无候选）。
+#[test]
+fn retire_mass_failure_does_not_empty_pool() {
+    // 100 个节点全部连续失败 9 次（远超阈值 5），保活期 1 小时
+    let mut pool: Vec<Node> = (0..100).map(|i| node(&format!("n{i:03}"))).collect();
+    let mut ms: Vec<Measurement> = Vec::new();
+    for i in 0..100 {
+        for _ in 0..9 {
+            ms.push(timeout(&format!("n{i:03}")));
+        }
+    }
+    apply_batch(&mut pool, &ms);
+
+    // 防线 1：保活期内整批失败一个都不摘
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0, 0.2);
+    assert!(
+        retired.is_empty(),
+        "批量瞬时故障不该立刻摘节点：{retired:?}"
+    );
+    assert_eq!(pool.len(), 100, "池不能被一次摘空: {}", pool.len());
+
+    // 防线 2：保活期满后节点确实该摘，但单轮上限 20% → 最多摘 20 个
+    let stale = std::time::Instant::now() - std::time::Duration::from_secs(7200);
+    for n in pool.iter_mut() {
+        n.failing_since = Some(stale);
+    }
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0, 0.2);
+    assert_eq!(retired.len(), 20, "单轮最多摘 20%: {}", retired.len());
+    assert_eq!(pool.len(), 80, "池不能被一次摘空: {}", pool.len());
+}
+
+/// 单轮上限为 0 或 1 时 = 不限（保持旧行为）。
+#[test]
+fn retire_batch_cap_zero_means_unlimited() {
+    let mut pool: Vec<Node> = (0..50).map(|i| node(&format!("n{i:02}"))).collect();
+    let mut ms: Vec<Measurement> = Vec::new();
+    for i in 0..50 {
+        for _ in 0..9 {
+            ms.push(timeout(&format!("n{i:02}")));
+        }
+    }
+    apply_batch(&mut pool, &ms);
+
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(0), 0, 0.0);
+    assert_eq!(retired.len(), 50, "0 = 不限: {}", retired.len());
+    assert!(pool.is_empty());
+}
+
+/// 保活期满后无证据节点照样摘 —— 保活期不是免死金牌。
+#[test]
+fn retire_unprobed_node_after_keep_alive_expires() {
+    let mut pool = vec![node("never")];
+    let zs: Vec<Measurement> = (0..9).map(|_| timeout("never")).collect();
+    apply_batch(&mut pool, &zs);
+    // 把 failing_since 拨回 2 小时前（保活期 1 小时 → 已满）
+    pool[0].failing_since = Some(Instant::now() - std::time::Duration::from_secs(7200));
+
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0, 0.0);
+    assert_eq!(retired, vec!["never".to_string()], "保活期满，无证据也摘");
+    assert!(pool.is_empty());
 }
 
 /// 曾通过的节点连续失败持续满保活时长后才摘（时间指标）。
@@ -158,7 +234,7 @@ fn retire_tried_node_after_keep_alive_expires() {
     // 手动把 failing_since 拨回 2 小时前
     pool[0].failing_since = Some(Instant::now() - std::time::Duration::from_secs(7200));
 
-    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0);
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0, 0.0);
     assert_eq!(retired, vec!["old-tried"], "保活期满，摘除");
     assert!(pool.is_empty());
 }
@@ -173,7 +249,7 @@ fn retire_tried_node_kept_within_keep_alive() {
     apply_batch(&mut pool, &tos);
     pool[0].failing_since = Some(Instant::now() - std::time::Duration::from_secs(600)); // 10 分钟
 
-    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0);
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0, 0.0);
     assert!(retired.is_empty(), "保活期内保留");
     assert_eq!(pool.len(), 1);
 }
@@ -184,7 +260,7 @@ fn retire_disabled_at_zero() {
     let mut pool = vec![node("zombie")];
     let zs: Vec<Measurement> = (0..9).map(|_| timeout("zombie")).collect();
     apply_batch(&mut pool, &zs);
-    let retired = retire_stale(&mut pool, 0, std::time::Duration::from_secs(3600), 0);
+    let retired = retire_stale(&mut pool, 0, std::time::Duration::from_secs(3600), 0, 0.0);
     assert!(retired.is_empty());
     assert_eq!(pool.len(), 1);
 }
@@ -195,7 +271,7 @@ fn retire_respects_threshold_grace() {
     let mut pool = vec![node("fresh-dead")];
     let ds: Vec<Measurement> = (0..2).map(|_| timeout("fresh-dead")).collect();
     apply_batch(&mut pool, &ds);
-    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0);
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0, 0.0);
     assert!(retired.is_empty());
     assert_eq!(pool.len(), 1);
 }
@@ -216,7 +292,7 @@ fn retire_floor_backfills_best_candidates() {
         .collect();
     apply_batch(&mut pool, &wa);
 
-    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(0), 2);
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(0), 2, 0.0);
     let tags: Vec<&str> = pool.iter().map(|n| n.tag.as_str()).collect();
     assert_eq!(pool.len(), 2, "回填到地板: {tags:?}");
     assert!(
@@ -232,7 +308,7 @@ fn retire_floor_keeps_everything_when_large() {
     let mut pool = vec![node("zombie")];
     let zs: Vec<Measurement> = (0..5).map(|_| timeout("zombie")).collect();
     apply_batch(&mut pool, &zs);
-    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(0), 10);
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(0), 10, 0.0);
     assert_eq!(pool.len(), 1);
     assert!(retired.is_empty());
 }
@@ -272,7 +348,7 @@ fn bw_success_clears_failure_streak_and_saves_node_from_retirement() {
     assert!(pool[0].bw_bps().is_some(), "带宽样本必须落库");
 
     // 1h 保活期 + 5 次阈值：现在两条线都不再满足 → 不摘
-    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 1);
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 1, 0.0);
     assert!(
         retired.is_empty(),
         "带宽成功过的活节点不能被 retire_stale 摘掉：{retired:?}"
@@ -317,8 +393,11 @@ fn bw_timeout_still_penalizes() {
 // 阈值后，旧逻辑按「无证据僵尸」立即摘除——尽管它真实在响应。
 
 /// 有实际流量证据的节点（`samples==0` 但 `ever_responded`）连续 5 次
-/// 探测失败：在保活宽限内与「曾测通过」同权保留，不按无证据僵尸
-/// 立即摘除（回归评审 P2：重启丢证据后 5 次探测失败即被摘）。
+/// 探测失败：在保活宽限内保留（回归评审 P2：重启丢证据后 5 次探测失败
+/// 即被摘）。
+///
+/// 注：现在未测通节点也走保活期，所以这条用例守的是「保活期内保留」
+/// ——无证据节点与有证据节点在保活期内同权。
 #[test]
 fn traffic_live_unprobed_node_kept_for_grace() {
     let mut pool = vec![node("ghost")];
@@ -332,7 +411,7 @@ fn traffic_live_unprobed_node_kept_for_grace() {
     // 把保活计时拨到 10 分钟前（仍在 1h 宽限内）
     pool[0].failing_since = Some(Instant::now() - std::time::Duration::from_secs(600));
 
-    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0);
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0, 0.0);
     assert!(
         retired.is_empty(),
         "有实际流量证据的节点宽限期内不能摘除：{retired:?}"
@@ -351,21 +430,34 @@ fn traffic_live_unprobed_node_retires_after_keep_alive_expires() {
     // 保活计时拨到 3h 前（> 1h 保活线）
     pool[0].failing_since = Some(Instant::now() - std::time::Duration::from_secs(3 * 3600));
 
-    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0);
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0, 0.0);
     assert_eq!(retired, vec!["ghost".to_string()], "保活期满证据节点也要摘");
     assert!(pool.is_empty());
 }
 
-/// 从未成功、也从未拿过实际流量响应的节点：连续失败达阈值立即摘除
-/// （无先验证据，不存在"临时故障"，无保活价值）。
+/// 从未成功、也从未拿过实际流量响应的节点：连续失败达阈值后进入保活期，
+/// 保活期满才摘除。
+///
+/// 早先这里是「立即摘除」——那会把批量瞬时故障（节点服务器域名批量解析
+/// 失败、探测端点批量返 403）当成僵尸判死，一轮摘掉池子的 90%+。现在
+/// 未测通节点与曾测通节点一样走保活期：保活期内的节点每轮仍被探测，
+/// 成功一次即复活。
 #[test]
-fn never_responded_node_retired_immediately() {
+fn never_responded_node_retired_after_keep_alive_expires() {
     let mut pool = vec![node("never")];
     let tos: Vec<Measurement> = (0..5).map(|_| timeout("never")).collect();
     apply_batch(&mut pool, &tos);
     assert!(!pool[0].ever_responded);
 
-    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0);
-    assert_eq!(retired, vec!["never".to_string()], "无证据僵尸立即摘");
+    // 保活期内：保留
+    let mut within = pool.clone();
+    let retired = retire_stale(&mut within, 5, std::time::Duration::from_secs(3600), 0, 0.0);
+    assert!(retired.is_empty(), "保活期内不摘: {retired:?}");
+    assert_eq!(within.len(), 1);
+
+    // 保活期满：摘除
+    pool[0].failing_since = Some(Instant::now() - std::time::Duration::from_secs(7200));
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0, 0.0);
+    assert_eq!(retired, vec!["never".to_string()], "保活期满，无证据也摘");
     assert!(pool.is_empty());
 }

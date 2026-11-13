@@ -357,7 +357,7 @@ fn unprobed_dead_node_restores_hp_but_not_evidence_and_still_retires() {
         "不能凭空造出存活证据"
     );
 
-    // 重启：只拿回 HP，不拿证据；重演 5 次失败 → 立即退役
+    // 重启：只拿回 HP，不拿证据；重演 5 次失败 → 进保活期（保活期满才摘）
     let mut fresh = vec![Node::new("dead", "9.9.9.9", 443)];
     assert_eq!(load_from(&path, &mut fresh), 1);
     assert_eq!(fresh[0].hp, HP_INITIAL - 25, "HP 经 hp_extra 恢复");
@@ -366,11 +366,18 @@ fn unprobed_dead_node_restores_hp_but_not_evidence_and_still_retires() {
     for _ in 0..5 {
         apply_batch(&mut fresh, &[dead_probe()]);
     }
-    let retired = retire_stale(&mut fresh, 5, std::time::Duration::from_secs(3600), 0);
+    let retired = retire_stale(&mut fresh, 5, std::time::Duration::from_secs(3600), 0, 0.0);
+    assert!(
+        retired.is_empty(),
+        "不工作节点进保活期而非立即摘除：{retired:?}"
+    );
+    // 保活期满 → 照摘
+    fresh[0].failing_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(7200));
+    let retired = retire_stale(&mut fresh, 5, std::time::Duration::from_secs(3600), 0, 0.0);
     assert_eq!(
         retired,
         vec!["dead".to_string()],
-        "不工作节点重启后仍可退役"
+        "保活期满，不工作节点仍可退役"
     );
 
     let _ = std::fs::remove_file(path);

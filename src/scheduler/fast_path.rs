@@ -62,42 +62,61 @@ pub fn apply_batch(nodes: &mut [Node], measurements: &[Measurement]) {
 /// 1. 连续失败 < `max_failures`：正常观察，不淘汰。
 /// 2. 连续失败 ≥ `max_failures` 且**无任何存活证据**（samples==0 且
 ///    `ever_responded==false`，从未探测成功、从未拿过实际流量首字节）：
-///    立即摘除——密码错、协议死、被墙死都不会自愈，不存在"临时故障"，
-///    无保命价值。
+///    延长保活——连续失败持续满 `keep_alive` 才摘。
 /// 3. 连续失败 ≥ `max_failures` 且**有存活证据**（曾测通过，或实际流量
-///    曾响应）：延长保活——可能是临时故障，继续观察，直到连续失败
-///    持续满 `keep_alive` 才摘。期间测速成功一次即复活
-///    （consecutive_failures 清零、计时重置）。
+///    曾响应）：同样延长保活，直到连续失败持续满 `keep_alive` 才摘。
+///    期间测速成功一次即复活（consecutive_failures 清零、计时重置）。
+///
+/// 第 2、3 类都走保活期是有意的：节点服务器域名解析失败、探测端点对该
+/// 节点返回 403、上游临时抽风——这些都会让一批节点同时攒满
+/// `max_failures`。早先「无存活证据立即摘」把这种批量瞬时故障当成僵尸
+/// 判死：实测一轮摘掉 437~508 个（占池 90%+），且把用户自有的精选节点
+/// 一并摘光。摘掉的节点只能等 15min 后的 reload 重灌，重灌后又被
+/// `adopt_score` 带回旧的失败计数，于是「reload → 批量误杀 → 再 reload」
+/// 成环，池子永远在换血。
 ///
 /// 第 3 类的「实际流量曾响应」证据是 `ever_responded`（`note_proxy_success`
 /// 置位，不靠写假探测样本/EWMA）：一个「被流量命中过但从未被探测」
 /// （samples==0）的节点，若重启丢了这份证据、再攒满 5 次连续探测失败
-/// 就会被按无证据僵尸立即摘除，尽管它真实在响应——该证据随
+/// 就会被按无证据僵尸摘除，尽管它真实在响应——该证据随
 /// `hp_extra` 存档、随 `adopt_score` 迁移，就是为了保住它。
 ///
-/// `max_failures == 0` 禁用。`keep_alive == 0` 表示有证据的也立即摘。
+/// `max_failures == 0` 禁用。`keep_alive == 0` 表示立即摘。
+/// `max_retire_per_round` 是单轮批量上限（占池子比例），防止一次
+/// 全池网络抖动把池子摘空到无法服务；超出的部分留到下一轮再摘。
 /// 返回被摘的 tag 列表（日志用）。
 pub fn retire_stale(
     nodes: &mut Vec<Node>,
     max_failures: u32,
     keep_alive: Duration,
     min_pool: usize,
+    max_retire_per_round: f64,
 ) -> Vec<String> {
     if max_failures == 0 {
         return Vec::new();
     }
+    let total = nodes.len();
     let (mut kept, mut retired): (Vec<_>, Vec<_>) = nodes.drain(..).partition(|n| {
         if n.consecutive_failures < max_failures {
             return true; // 保留
         }
         match (n.samples, n.ever_responded, n.failing_since) {
-            // 从未测通、也从未拿过实际流量响应：僵尸，立即摘
-            (0, false, _) => false,
             (_, _, None) => true, // 不应发生（failures>0 必有 failing_since），保守保留
             // 有存活证据（曾测通过 / 实际流量曾响应）：保活期内保留
             (_, _, Some(t0)) => t0.elapsed() < keep_alive,
         }
     });
+    // 单轮批量上限：一次全池抖动不该把池子一次摘空。超出上限的部分本轮
+    // 留下（下一轮继续观察），按「失败次数少 → samples 多」排序，
+    // 优先摘最像死节点的。
+    if max_retire_per_round > 0.0 && max_retire_per_round < 1.0 && !retired.is_empty() {
+        let cap = ((total as f64) * max_retire_per_round).floor() as usize;
+        if retired.len() > cap {
+            retired.sort_by_key(|n| (n.consecutive_failures, std::cmp::Reverse(n.samples)));
+            let overflow = retired.split_off(cap);
+            kept.extend(overflow);
+        }
+    }
     // 地板保护：摘到低于 min_pool 时回填最可能活的（失败次数少 → samples 多）。
     // 留着不摘的节点每轮仍会被探测，成功一次即复活；摘了只能等 reload 重灌。
     if kept.len() < min_pool && !retired.is_empty() {

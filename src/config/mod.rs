@@ -18,6 +18,11 @@ pub const DEFAULT_RETIRE_MAX_FAILURES: u32 = 5;
 pub const DEFAULT_RETIRE_KEEP_ALIVE_SECS: u64 = 3600;
 /// 淘汰地板：池子低于该数时不再摘（摘到 0 = 全黑，留着还有自愈机会）。
 pub const DEFAULT_RETIRE_MIN_POOL: usize = 10;
+/// 单轮最多淘汰池子的比例。0 = 不限（保持旧行为）。
+///
+/// 默认 0.5：一次全池网络抖动最多摘一半，池子不会一次摘空——池子空了
+/// 只能等下一次 reload 重灌，期间数据面无候选可拨。
+pub const DEFAULT_MAX_RETIRE_PER_ROUND: f64 = 0.5;
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:17321";
 
 /// TUN 透明代理默认值。

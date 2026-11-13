@@ -26,11 +26,16 @@ timeout_penalty = 3000.0
 # 探测 URL（generate_204 风格）
 probe_url = "https://www.gstatic.com/generate_204"
 # 节点淘汰（双指标）：连续失败 ≥ max_failures 触发检查——
-# 从未测通的立即摘；曾测通过的保活满 keep_alive_secs 才摘。成功一次即复活。0 = 禁用。
+# 进入保活期，连续失败持续满 keep_alive_secs 才摘。成功一次即复活。0 = 禁用。
 retire_max_failures = 5
 retire_keep_alive_secs = 3600
 # 淘汰地板：摘除后池子不得低于该数（防全黑）。0 = 无地板。
 retire_min_pool = 10
+# 单轮最多淘汰池子的比例（0.0~1.0）。超出的部分留到下一轮再摘。
+# 0 = 不限。0.2 = 一轮最多摘五分之一：一次全池网络抖动（上游全断、探测
+# 端点故障）不会把池子一次摘空——池子空了只能等下一次 reload 重灌，
+# 期间数据面无候选可拨。
+max_retire_per_round = 0.5
 
 [data_plane]
 # 监听地址（SOCKS5 / HTTP-CONNECT 混合）
