@@ -364,6 +364,40 @@ fn adopt_score_carries_evidence() {
     assert!(!fresh_z.ever_responded, "从未拿过流量的节点接管后仍无证据");
 }
 
+/// reload 接管**不**带走失败计数 —— 死亡螺旋回归。
+///
+/// 线上实测的环：节点攒满 `retire_max_failures` 被摘 → 15min 后 pool
+/// reload 把它灌回来 → `adopt_score` 把旧失败计数一并带回来 → 第一轮再
+/// 失败一次就又满阈值 → 又被摘。一轮摘掉 437~508 个节点（占池 90%+），
+/// 连用户自有的精选节点一起摘光，池子永远在换血。
+///
+/// 失败计数描述的是「本次进程生命周期内连续失败了几次」；reload 重置它
+/// = 给新表一轮全新的观察期。
+#[test]
+fn adopt_score_does_not_carry_failure_streak() {
+    let mut old = Node::new("x", "1.1.1.1", 443);
+    // 连续失败 5 次（达 retire_max_failures 默认阈值）
+    for _ in 0..5 {
+        old.penalize();
+    }
+    assert_eq!(old.consecutive_failures, 5);
+    assert!(old.failing_since.is_some());
+
+    let mut fresh = Node::new("x", "1.1.1.1", 443);
+    fresh.adopt_score(&old);
+    assert_eq!(
+        fresh.consecutive_failures, 0,
+        "失败计数不随接管迁移：否则 reload 后第一轮就又满阈值"
+    );
+    assert!(fresh.failing_since.is_none(), "保活计时不随接管迁移");
+    // 分数与健康度仍要带走（reload 不能把整池分数清空）
+    let mut scored = Node::new("y", "1.1.1.1", 443);
+    scored.update(120.0);
+    let mut fresh_scored = Node::new("y", "1.1.1.1", 443);
+    fresh_scored.adopt_score(&scored);
+    assert_eq!(fresh_scored.ewma, 120.0, "EWMA 仍随接管迁移");
+}
+
 /// `hp_extra` 恢复只写 HP 与证据，不写任何探测样本/EWMA——
 /// 不能伪造 `samples`/`ewma` 把「没测过」伪装成「测通过」。
 #[test]

@@ -462,6 +462,7 @@ fn configs_json(state: &CtlState) -> String {
             "retire_max_failures": t.retire_max_failures,
             "retire_min_pool": t.retire_min_pool,
             "retire_keep_alive_secs": t.retire_keep_alive_secs,
+            "max_retire_per_round": t.max_retire_per_round,
             // 吞吐感知调度（延迟探针看不到带宽，另开一条有限字节下载探测）
             "bw_interval_rounds": t.bw_interval_rounds,
             "bw_timeout_ms": t.bw_timeout_ms,
@@ -509,6 +510,9 @@ fn apply_config_patch(state: &CtlState, body: &str) -> String {
     }
     if let Some(n) = get("retire_keep_alive_secs").and_then(|x| x.as_u64()) {
         t.retire_keep_alive_secs = n;
+    }
+    if let Some(n) = get("max_retire_per_round").and_then(|x| x.as_f64()) {
+        t.max_retire_per_round = n;
     }
     if let Some(n) = get("bw_interval_rounds").and_then(|x| x.as_u64()) {
         t.bw_interval_rounds = n as u32;

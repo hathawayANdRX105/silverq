@@ -67,7 +67,8 @@ select_top(N)  纯 EWMA 取前 N（无迟滞轮次）
 - **快慢分离**：测速（周期全池离线）与切换（只读已算好的 EWMA）完全解耦，卡顿隔离。
 - **超时扣分后移**：死/慢节点拿不到前排。
 - **吞吐感知调度（带宽探测）**：延迟探针只测握手+首字节——握手快但管道只有 1Mbit 的节点，分数比握手慢但管道 20Mbit 的还漂亮，真实页面却慢 4 倍。所以另开一条**有限字节下载**探测：读 `bw_max_bytes` 字节算出 bytes/sec，存进对数域 EWMA，按「每降低 e 倍吞吐罚 N ms」并进排序（`bw_penalty_per_efold_ms`）。只在 selection 内跑（每 `bw_interval_rounds` 轮一次），不对全池跑——全池跑是 512KB × 40 节点 ≈ 80MB/轮，免费节点撑不住。**速率量纲必须是 bytes/sec 而不是字节数**：同样读满 512KiB，2 秒读完是 256KB/s、8 秒读完是 64KB/s，只看字节数两者完全一样，排序无从区分。带宽探测只跑 selection（当前 selection 的 10 个节点），所以**未测过带宽的节点带宽项为 0**（不奖不罚，乐观初值）。
-- **节点淘汰（pipeline 双指标 + 地板）**：连续失败 ≥ `retire_max_failures`（默认 5）触发检查——**无任何存活证据**的节点（从未测通、也从未拿到实际流量首字节）立即摘除（从未通过真实握手不会自愈）；曾测通过的、或实际拿过流量首字节的（证据为 `ever_responded`，首字节到手时置位，不靠假探测样本）进入延长保活，连续失败持续满 `retire_keep_alive_secs`（默认 3600s）才摘。期间成功一次即复活。`retire_min_pool`（默认 10，0=禁用）兜底防摘到 0 全黑。可面板热改 + `silverq config-reload` 重读配置。
+- **节点淘汰（pipeline 双指标 + 地板 + 单轮上限）**：连续失败 ≥ `retire_max_failures`（默认 5）触发检查——节点进入保活期，连续失败持续满 `retire_keep_alive_secs`（默认 3600s）才摘，期间成功一次即复活。**未测通的节点同样走保活期**：节点服务器域名批量解析失败、探测端点对该节点批量返 403、上游临时抽风，都会让一批节点同时攒满阈值——早先「无存活证据立即摘」把这种批量瞬时故障当僵尸判死，实测一轮摘掉 437~508 个节点（占池 90%+），连用户自有的精选节点一起摘光。`retire_min_pool`（默认 10，0=禁用）兜底防摘到 0 全黑。`max_retire_per_round`（默认 0.5，0=不限）是单轮淘汰比例上限：一次全池抖动最多摘一半，池子不会一次摘空——池子空了只能等下一次 reload 重灌，期间数据面无候选可拨。可面板热改 + `silverq config-reload` 重读配置。
+- **reload 不继承失败计数（切断死亡螺旋）**：`silverq reload` 按 tag 接管旧节点的分数（EWMA、带宽、健康度、存活证据），但**失败计数（`consecutive_failures` / `failing_since`）不接管**。失败计数描述的是「本次进程生命周期内连续失败了几次」；上游订阅源可能已换凭据、换地址，旧计数对新节点没有意义。更关键的是它会成环：节点攒满阈值被摘 → 15min 后 pool reload 把它灌回来 → 旧计数一并带回 → 第一轮再失败一次又满阈值 → 又被摘。接管失败计数 = 给新表一轮全新的观察期。
 - **回环/私网/国内直连判定**（SOCKS 入站）：pin 与强制代理表（`force-proxy-domains.txt`）优先，之后回环/私网目标原样直连、国内域名（`china-domains.txt`，11 万条后缀表）经真实 DNS 解析成 IP 后直连，其余交给域名级路线缓存（下一条）。强制代理表面向「直连通但上游按出口 IP 地区拒绝服务」的域名（如 opencode.ai zen 地区 403）：命中即跳过国内直连与竞速、直入候选链，免去整机钉住。避免每个死候选烧 4s、国内绕远、私网目标被拨到节点侧 loopback。
 - **强制代理白名单 = 被墙站点的「不做直连探测」开关**：被墙域名（github 等）每轮未命中竞速都要先烧一轮直连预算（DNS+TCP，被墙时直接耗满 `dial_timeout`）才轮到代理，白名单把这一步省掉——命中域名直入代理候选链，一次直连都不试。白名单文件：`~/.config/silverq/rules/force-proxy-domains.txt`（后缀匹配，`github.com` 命中自身与 `*.github.com`；`SILVERQ_FORCE_PROXY_DOMAINS` 可改路径）；`#` 注释、空行忽略，文件缺失/为空 = 关闭该规则。**改完 `silverq config-reload` 即时生效**（连同 `china-domains.txt` 一起重读换代），不必重启生产实例——重启有抢跑风险（见 AGENTS.md 生产实例保护）。
 - **事实驱动的路线选择（缓存复用 + 首字节竞速，#23）**：缓存未命中/过期 → 并行竞速：直连 ‖ 代理首选同时发，**上游首字节先到者胜**（TCP 秒连但 TLS 无响应的一侧赢不了），赢家路线**首字节落地当下**写回缓存（长会话期间即可复用，不等收尾）；双败后并行拨第 2、3 名候选（`fallback_attempts` 圈定的后两位），全败才诚实失败——用户路径上不存在失败等待。命中 → 照缓存里上次成功的路线复用终点，可能是代理。首响应/失败写回缓存：当前路线首响应 > 2s 标记 slow → 最多每 30s 重新竞速一次（失败不限频、立即换路线；慢路线期间其他连接沿用最后能工作的路线）；当前路线失败会废掉旧的首字节耗时基线，成功的兜底路线无需再过滞回即可接管。换路线走滞回（新路线快过旧路线一半才接管，旧路线没有耗时基线时成功的直接接管），TTL 3 分钟（命中即续期，只管闲置域名何时重新竞速观察）。非幂等纯 HTTP（POST/PUT 等）不参与首字节双发，降级串行候选链。残余盲区：首字节赢了但中途被掐的直连（GFW 放行 ServerHello 后 RST）——靠 `direct_fails` 记账，连续 2 次把条目切到代理路线（#21）。TUN 路径未接入（首响应信号在 meow 引擎内部）。
@@ -94,7 +95,7 @@ cargo run --features meow -- serve nodes.yaml
 
 # 控制命令（另开终端，走 unix socket，不重启进程）
 silverq status                # 当前池大小 / 选择 / 是否钉住
-silverq reload [nodes.yaml]   # 热加载节点表：新增进池、删除出池、存活继承 EWMA
+silverq reload [nodes.yaml]   # 热加载节点表：新增进池、删除出池、继承 EWMA（失败计数不继承）
 silverq config-reload         # 热加载配置：重读 silverq.toml 调参 + 两张规则表
                               # （china-domains.txt / force-proxy-domains.txt）
 silverq select <tag>          # 手动钉住某节点（调度暂停覆盖）
@@ -110,6 +111,7 @@ silverq select auto           # 取消钉住，恢复自动
 | `SILVERQ_SELECTOR_STORE` | `~/.local/state/silverq-selector.json` | 外部 meow kernel 读的 selector store |
 | `SILVERQ_STATE` | `~/.local/state/silverq/scores.json` | EWMA 分数存档 |
 | `SILVERQ_RESOLVE_UPSTREAMS` | `223.5.5.5,119.29.29.29` | 节点 dial / 国内直连解析用的真实上游 DNS（逗号分隔） |
+| `SILVERQ_MAX_RETIRE_PER_ROUND` | TOML `[scheduler]` | 单轮最多淘汰池子的比例（0.0~1.0），0 = 不限 |
 | `SILVERQ_CHINA_DOMAINS` | `~/.config/silverq/rules/china-domains.txt` | 国内域名后缀表（缺失 = 空表 = 无直连判定） |
 | `SILVERQ_FORCE_PROXY_DOMAINS` | `~/.config/silverq/rules/force-proxy-domains.txt` | 强制代理域名后缀表（白名单：命中必走候选链、**不做直连探测**，压过国内直连与竞速；缺失 = 空表 = 无强制）。改完 `silverq config-reload` 即时生效 |
 | `SILVERQ_JEV_ENABLED` | TOML `[jev]` | 临时启停 jev 判断接入（优先级高于 TOML） |

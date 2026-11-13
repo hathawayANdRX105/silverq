@@ -502,14 +502,19 @@ async fn schedule_loop(h: SchedulerHandles, tuning: ctl::SharedTuning) {
             }
         }
 
-        // 轮末淘汰：从未测通且连续失败达阈值的节点摘出池子（0 = 禁用）。
+        // 轮末淘汰：连续失败达阈值且保活期已满的节点摘出池子（0 = 禁用）。
         // 摘除后下一批的 select_top / persist 自然瘦身；registry 留着的
         // 死 adapter 由下一次 reload 重建时清掉（freenode-pool 每 15min reload）。
         if t.retire_max_failures > 0 {
             let keep = Duration::from_secs(t.retire_keep_alive_secs);
             let mut guard = pool.write().await;
-            let retired =
-                fast_path::retire_stale(&mut guard, t.retire_max_failures, keep, t.retire_min_pool);
+            let retired = fast_path::retire_stale(
+                &mut guard,
+                t.retire_max_failures,
+                keep,
+                t.retire_min_pool,
+                t.max_retire_per_round,
+            );
             drop(guard);
             if !retired.is_empty() {
                 tracing::info!(count = retired.len(), tags = ?retired, "淘汰节点（pipeline 双指标）");

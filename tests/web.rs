@@ -32,6 +32,7 @@ fn tuning_validation_clamps() {
         retire_max_failures: 5000,
         retire_keep_alive_secs: 7200,
         retire_min_pool: 10,
+        max_retire_per_round: 5.0,
         bw_interval_rounds: 0,
         bw_timeout_ms: 10,
         bw_max_bytes: 0,
@@ -46,6 +47,7 @@ fn tuning_validation_clamps() {
     assert_eq!(t.timeout_penalty, 100.0);
     assert_eq!(t.retire_max_failures, 1000);
     assert_eq!(t.fallback_attempts, 10);
+    assert_eq!(t.max_retire_per_round, 1.0, "淘汰比例夹到 [0,1]");
     assert_eq!(t.bw_interval_rounds, 1);
     assert_eq!(t.bw_timeout_ms, 1000);
     assert_eq!(t.bw_max_bytes, 16 * 1024);

@@ -66,6 +66,13 @@ pub struct SchedulerSection {
     pub retire_keep_alive_secs: u64,
     /// 淘汰地板：摘除后池子不得低于该数（防全黑）。0 = 无地板。
     pub retire_min_pool: usize,
+    /// 单轮最多淘汰池子的比例（0.0~1.0）。超出的部分留到下一轮再摘。
+    ///
+    /// 0 = 不限（保持旧行为）。1.0 = 等同不限。用 0.2 表示一轮最多摘
+    /// 五分之一：一次全池网络抖动（上游全断、探测端点故障）不会把池子
+    /// 一次摘空——池子空了只能等 15min 后的 reload 重灌，期间数据面
+    /// 无候选可拨。
+    pub max_retire_per_round: f64,
 }
 
 impl Default for SchedulerSection {
@@ -86,6 +93,7 @@ impl Default for SchedulerSection {
             retire_max_failures: crate::config::DEFAULT_RETIRE_MAX_FAILURES,
             retire_keep_alive_secs: crate::config::DEFAULT_RETIRE_KEEP_ALIVE_SECS,
             retire_min_pool: crate::config::DEFAULT_RETIRE_MIN_POOL,
+            max_retire_per_round: crate::config::DEFAULT_MAX_RETIRE_PER_ROUND,
         }
     }
 }
@@ -308,6 +316,7 @@ pub struct Effective {
     pub retire_max_failures: u32,
     pub retire_keep_alive_secs: u64,
     pub retire_min_pool: usize,
+    pub max_retire_per_round: f64,
     pub ui_dir: String,
     pub state: String,
     pub ctl_sock: String,
@@ -376,6 +385,7 @@ pub struct RuntimeTuning {
     pub retire_max_failures: u32,
     pub retire_keep_alive_secs: u64,
     pub retire_min_pool: usize,
+    pub max_retire_per_round: f64,
 }
 
 impl RuntimeTuning {
@@ -395,6 +405,7 @@ impl RuntimeTuning {
             retire_max_failures: eff.retire_max_failures,
             retire_keep_alive_secs: eff.retire_keep_alive_secs,
             retire_min_pool: eff.retire_min_pool,
+            max_retire_per_round: eff.max_retire_per_round,
         }
         .validated()
     }
@@ -416,6 +427,8 @@ impl RuntimeTuning {
         self.retire_max_failures = self.retire_max_failures.clamp(0, 1000); // 0 = 禁用
         self.retire_keep_alive_secs = self.retire_keep_alive_secs.clamp(0, 86400);
         self.retire_min_pool = self.retire_min_pool.clamp(0, 500);
+        // 0 = 不限（保持旧行为）；1.0 = 等同不限。只夹到 [0,1]。
+        self.max_retire_per_round = self.max_retire_per_round.clamp(0.0, 1.0);
         self
     }
 }
@@ -465,6 +478,10 @@ impl Effective {
                 fc.scheduler.retire_keep_alive_secs,
             ),
             retire_min_pool: env_parsed_or("SILVERQ_RETIRE_MIN_POOL", fc.scheduler.retire_min_pool),
+            max_retire_per_round: env_parsed_or(
+                "SILVERQ_MAX_RETIRE_PER_ROUND",
+                fc.scheduler.max_retire_per_round,
+            ),
             // TOML 里的 ~ 不经 shell，程序自己展开（paths 同款，别再忘）
             ui_dir: expand_home(env_or(
                 "SILVERQ_UI_DIR",
