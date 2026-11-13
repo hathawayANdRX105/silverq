@@ -233,7 +233,7 @@ ui_dir = "~/.local/share/silverq/ui"   # zashboard 静态目录
   旧版本快照缺 `hp` 字段时读回初值 50（serde 默认，不奖不罚）。
   没有探测样本（`samples==0`）但被实际流量命中过的节点，HP 与 `ever_responded`
   另存进 `hp_extra` 表（旧快照缺该字段读回空表，主表不受影响）——否则重启后
-  这类节点会被判成「无证据僵尸」，5 次探测失败即被立即摘除，尽管它真实在响应。
+  这类节点会丢掉存活证据，被按无证据节点判死，尽管它真实在响应。
 - **trojan 的 transport 无法接**：meow 的 `TrojanAdapter` 只持有 `Arc<TlsLayer>`，
   `dial_tcp` 里硬编码 `TCP → tls_layer.connect → 写 header`，公开构造函数只有
   `new` 和 `with_mux`，**没有插入 ws/grpc 层的位置**。要支持需上游给 trojan 加

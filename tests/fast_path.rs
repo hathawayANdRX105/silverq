@@ -158,7 +158,10 @@ fn retire_pipeline_two_levels() {
 /// 摘掉的节点只能等 15min 后的 reload 重灌，重灌后又被 `adopt_score`
 /// 带回旧失败计数，于是「reload → 批量误杀 → 再 reload」成环。
 ///
-/// 现在两处防线：未测通节点也走保活期；单轮淘汰有比例上限。
+/// 两处防线各自独立：
+/// 1. 保活期——未测通节点也进保活期，整批瞬时失败**本轮一个都不摘**。
+/// 2. 单轮比例上限——即便保活期满、节点真的该摘，一轮也只摘一部分，
+///    池子不会一次摘空（池空了只能等下次 reload 重灌，期间数据面无候选）。
 #[test]
 fn retire_mass_failure_does_not_empty_pool() {
     // 100 个节点全部连续失败 9 次（远超阈值 5），保活期 1 小时
@@ -171,7 +174,19 @@ fn retire_mass_failure_does_not_empty_pool() {
     }
     apply_batch(&mut pool, &ms);
 
-    // 单轮上限 20% → 最多摘 20 个
+    // 防线 1：保活期内整批失败一个都不摘
+    let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0, 0.2);
+    assert!(
+        retired.is_empty(),
+        "批量瞬时故障不该立刻摘节点：{retired:?}"
+    );
+    assert_eq!(pool.len(), 100, "池不能被一次摘空: {}", pool.len());
+
+    // 防线 2：保活期满后节点确实该摘，但单轮上限 20% → 最多摘 20 个
+    let stale = std::time::Instant::now() - std::time::Duration::from_secs(7200);
+    for n in pool.iter_mut() {
+        n.failing_since = Some(stale);
+    }
     let retired = retire_stale(&mut pool, 5, std::time::Duration::from_secs(3600), 0, 0.2);
     assert_eq!(retired.len(), 20, "单轮最多摘 20%: {}", retired.len());
     assert_eq!(pool.len(), 80, "池不能被一次摘空: {}", pool.len());
@@ -378,8 +393,11 @@ fn bw_timeout_still_penalizes() {
 // 阈值后，旧逻辑按「无证据僵尸」立即摘除——尽管它真实在响应。
 
 /// 有实际流量证据的节点（`samples==0` 但 `ever_responded`）连续 5 次
-/// 探测失败：在保活宽限内与「曾测通过」同权保留，不按无证据僵尸
-/// 立即摘除（回归评审 P2：重启丢证据后 5 次探测失败即被摘）。
+/// 探测失败：在保活宽限内保留（回归评审 P2：重启丢证据后 5 次探测失败
+/// 即被摘）。
+///
+/// 注：现在未测通节点也走保活期，所以这条用例守的是「保活期内保留」
+/// ——无证据节点与有证据节点在保活期内同权。
 #[test]
 fn traffic_live_unprobed_node_kept_for_grace() {
     let mut pool = vec![node("ghost")];

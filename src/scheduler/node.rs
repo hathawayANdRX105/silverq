@@ -88,7 +88,7 @@ pub struct Node {
     /// 该节点拿过实际流量响应（代理首字节到手）的先验存活证据。
     /// `samples` 只由探测成功累加，「被真实流量命中过但从未被探测」
     /// （`samples==0`）的节点在 `retire_stale` 里同样按有证据处理
-    /// （延长保活而非立即摘除），并随 HP 一起进存档 `hp_extra`。
+    /// （延长保活），并随 HP 一起进存档 `hp_extra`。
     /// 只有 `note_proxy_success` 置位（探测成功不算），持久化、随
     /// `adopt_score` 迁移（换库不丢证据）。
     pub ever_responded: bool,
