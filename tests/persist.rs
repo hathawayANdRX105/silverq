@@ -32,8 +32,10 @@ fn roundtrip_restores_scores() {
         Node::new("b", "2.2.2.2", 443),
     ];
     assert_eq!(load_from(&path, &mut fresh), 2);
-    assert_eq!(fresh[0].score(), 50.0);
-    assert_eq!(fresh[1].score(), 300.0);
+    // 断言恢复的是延迟 EWMA 本身，而不是 score()——score 里混着稳定性乘子、
+    // 带宽罚分、健康度罚分，钉死具体分值等于把评分公式也钉死。
+    assert_eq!(fresh[0].ewma, 50.0, "延迟 EWMA 应被恢复");
+    assert_eq!(fresh[1].ewma, 300.0, "延迟 EWMA 应被恢复");
 
     let _ = std::fs::remove_file(path);
 }
@@ -54,7 +56,7 @@ fn unmeasured_nodes_are_not_saved() {
         Node::new("never", "2.2.2.2", 443),
     ];
     assert_eq!(load_from(&path, &mut fresh), 1, "只应恢复测过的那个");
-    assert_eq!(fresh[0].score(), 80.0);
+    assert_eq!(fresh[0].ewma, 80.0, "延迟 EWMA 应被恢复");
     assert!(fresh[1].score().is_infinite(), "没测过的应保持 INFINITY");
 
     let _ = std::fs::remove_file(path);
