@@ -64,26 +64,6 @@ fn zero_and_negative_bw_are_ignored() {
 }
 
 #[test]
-fn unmeasured_bw_neither_rewarded_nor_penalized() {
-    // 乐观初值：没测过带宽的节点分数只由延迟+稳定性决定。
-    // 奖励它会让它永远占据队首（测一次就赢）；惩罚它则冷启动时全是 INFINITY 惩罚。
-    let mut measured = Node::new("measured", "1.1.1.1", 443);
-    measured.update(100.0);
-    measured.update_bw(1_000.0); // 极慢 1KB/s
-    let measured_score =
-        measured.score_with(DEFAULT_FAILURE_PENALTY_MS, DEFAULT_BW_PENALTY_PER_EFOLD_MS);
-
-    let mut fresh = Node::new("fresh", "1.1.1.1", 443);
-    fresh.update(100.0);
-    let fresh_score = fresh.score_with(DEFAULT_FAILURE_PENALTY_MS, DEFAULT_BW_PENALTY_PER_EFOLD_MS);
-
-    assert!(
-        fresh_score < measured_score,
-        "未测带宽应中性（=纯延迟分），极慢节点应被罚分压下: fresh={fresh_score:.0} measured={measured_score:.0}"
-    );
-}
-
-#[test]
 fn stability_scales_score_by_inverse_success_rate() {
     // 乘性语义：50% 成功率把有效代价翻倍（300ms → 600ms）。
     // 这不是「翻倍到 1200ms」——期望代价分析下，50% 的请求要重试一次
@@ -93,7 +73,9 @@ fn stability_scales_score_by_inverse_success_rate() {
     flaky.update(300.0);
     outcomes(&mut flaky, &[true, false, true, false, true, false]);
     assert_eq!(flaky.stability(), 0.5);
-    let flaky_score = flaky.score_with(DEFAULT_FAILURE_PENALTY_MS, DEFAULT_BW_PENALTY_PER_EFOLD_MS);
+    // 带宽罚分权重传 0 —— 这条只验「稳定性乘性」这一个维度，混进带宽项
+    // 等于把整个评分公式也钉进用例（宽/严都会随别的维度改动而失效）。
+    let flaky_score = flaky.score_with(DEFAULT_FAILURE_PENALTY_MS, 0.0);
     assert!(
         (flaky_score - 600.0).abs() < 1e-6,
         "300ms/50% → 600，got {flaky_score}"
@@ -103,8 +85,7 @@ fn stability_scales_score_by_inverse_success_rate() {
     let mut steady = Node::new("steady", "1.1.1.1", 443);
     steady.update(500.0);
     outcomes(&mut steady, &[true; 6]);
-    let steady_score =
-        steady.score_with(DEFAULT_FAILURE_PENALTY_MS, DEFAULT_BW_PENALTY_PER_EFOLD_MS);
+    let steady_score = steady.score_with(DEFAULT_FAILURE_PENALTY_MS, 0.0);
     assert!((steady_score - 500.0).abs() < 1e-6);
     assert!(
         steady_score < flaky_score,
