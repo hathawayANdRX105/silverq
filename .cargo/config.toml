@@ -1,9 +1,20 @@
-# canon 体系性能配置（rust-dev-perf skill）
+# silverq 构建配置。
 
-# ── canon 体系性能配置（rust-dev-perf skill）────────────────────
 [build]
 # 多会话并发上限：每个 cargo 进程最多 4 个并行编译单元
 jobs = 4
 # sccache 跨 worktree 编译缓存
 # （勿用 [env] RUSTC_WRAPPER：cargo 启动时自读该变量，[env] 够不着）
 rustc-wrapper = "sccache"
+
+[env]
+# rust-specs 检出路径（规则库门禁用：scripts/spec-check.sh → cargo xtask）。
+# 入口按「仓同级」推断，只在 <projects>/<repo>/.wt/<name> 布局下成立；这个
+# 默认值让门禁在任何 worktree 根下都能用。环境里显式设的 RUST_SPECS_DIR 优先
+# （force = false）。
+RUST_SPECS_DIR = { value = "/home/hathaway/projects/rust-specs", force = false }
+
+[alias]
+# rust-specs 的 checks crate（PR/issue 格式门禁 + 仓库结构规则）。
+# 薄壳：不 vendor 源码，直接指向检出目录的 manifest。
+xtask = "run -q --manifest-path /home/hathaway/projects/rust-specs/checks/Cargo.toml -p checks --"

@@ -141,7 +141,10 @@ src/
 ├── dataplane/         # inbound.rs（SOCKS5/HTTP-CONNECT TCP）、udp.rs（UDP 中继）、
 │                      # tun.rs（TUN 透明代理，meow-tun feature）——meow feature
 ├── web/               # mod.rs（内嵌面板 + JSON API）——meow feature
-└── ctl/               # cli.rs（子命令解析）、protocol.rs（unix socket 控制通道）
+├── ctl/               # cli.rs（子命令解析）、protocol.rs（unix socket 控制通道）
+scripts/
+├── spec-check.sh      # 规范门禁入口（rust-specs structure + 语义层）
+└── lint-dylint.sh     # dylint 语法 lint（rust-specs 通用规则）
 ```
 
 ## 已验证 / 已知范围
@@ -259,6 +262,39 @@ ui_dir = "~/.local/share/silverq/ui"   # zashboard 静态目录
 
 三种 feature 都进矩阵的原因：meow 关掉时走 `NoopMeasurer`，是独立编译路径；
 `meow-tun` 多编译一整块 TUN 数据面，只测两种会漏掉 cfg 分支里的错误（已踩过）。
+
+## 规范门禁（rust-specs）
+
+规范正本在 [rust-specs](https://github.com/hathawayANdRX105/rust-specs) 仓——canon 已退役，
+规则库统一迁到 rust-specs：`checks` crate 管仓库结构规则与 GitHub PR/issue 格式，
+`lints/` 是 dylint 语法规则，`specs/` 是人读规范，`agents/` 用 TOML profile 生成 `AGENTS.md`。
+
+本仓的接入（`.githooks/` 只剩两个文件）：
+
+| 文件 | 作用 |
+|---|---|
+| `.githooks/heavy` | CPU 密集命令的 cgroup 配额包装（与规则库无关，各仓通用） |
+| `.githooks/pre-push` | 跑 `scripts/spec-check.sh`；FAIL/WARN 阻断，且要求引擎给出 `PASS: N findings, 0 failures` 干净摘要——工具链故障不能静默放行 |
+
+```bash
+bash scripts/spec-check.sh              # 结构规则（changed 口径）
+bash scripts/spec-check.sh --scope all  # 全仓结构规则
+bash scripts/lint-dylint.sh             # dylint 语法 lint（通用规则）
+cargo xtask check github-pr --number <N>  # PR 格式门禁
+```
+
+`.cargo/config.toml` 里的 `cargo xtask` alias 指向 rust-specs 的 `checks` crate
+（`RUST_SPECS_DIR` 可覆盖路径），不 vendor 源码。
+
+> **dylint 的装配顺序坑**（`scripts/lint-dylint.sh` 头注）：`cargo dylint --path <rust-specs>`
+> 把 lint 编到 **rust-specs** 的 `target/release/lib<name>.so`（plain 名），再把带 toolchain
+> 后缀的 `lib<name>@<toolchain>.so` 放进**消费仓**的 `target/dylint/libraries/`；但随后的
+> metadata 步骤查的是消费仓里 **plain 名**的 `.so`——找不到就报
+> `Could not get metadata for .../lib<name>.so`。脚本把 plain 名补上，dylint 随后的步骤
+> 才拿得到 metadata。
+
+`AGENTS.md` 由 `cargo agents push silverq` 生成（profile 在 rust-specs 的
+`agents/profiles/silverq.toml`），`cargo agents check silverq` 验漂移。
 
 ## TUN 手动测试
 
