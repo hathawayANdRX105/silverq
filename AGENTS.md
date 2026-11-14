@@ -9,8 +9,8 @@
 
 | Purpose | Command |
 | ------- | ------- |
-| 规范门禁（结构规则 + dylint） | `bash scripts/spec-check.sh` / `bash scripts/lint-dylint.sh` |
-| PR 格式门禁 | `cargo xtask check github-pr --title ... --body-file ...` |
+| 规范门禁（结构规则 + dylint） | `just spec-check` / `just lint`（`just gate` 两层都跑） |
+| PR 格式门禁 | `just pr-check <N>` |
 | 生产实例状态 | `silverq status` |
 | 规则表热更（白名单 / 国内直连表） | `silverq config-reload` |
 | 容器实验室（数据面 / TUN 实验） | `~/.local/bin/silverq-lab.sh` |
