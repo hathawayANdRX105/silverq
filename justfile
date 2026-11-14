@@ -1,40 +1,76 @@
-# canon 体系：性能与测试配方（详见 rust-dev-perf skill）
-default:
-    @just --list
+# silverq — justfile
+#
+# 门禁与日常命令的入口。规范正本在 rust-specs 仓（`~/projects/rust-specs`）——
+# `checks` crate 管仓库结构规则与 GitHub PR/issue 格式，`lints/` 是 dylint 语法规则。
+#
+# AGENTS.md 的「本地重命令禁令」仍然有效：just 的 target 不会替你绕过它。
+# 编译 / 测试 / 装包这类 CPU 密集命令仍要 `.githooks/heavy` 包裹。
 
-# 全量测试（--workspace：根包 workspace 下裸 `cargo test` 只跑根包，不是全量）。
-# 日常开发优先用 `just test-fast`（只跑受影响测试，比全量快一个数量级）；
-# ★ 本配方用于 CI / 合并前全量验收，日常不建议直接用
-test:
-    cargo test --workspace
+# rust-specs 检出目录（规则库）。与 .cargo/config.toml 的 RUST_SPECS_DIR 同源。
+rust_specs_dir := env_var_or_default("RUST_SPECS_DIR", "/home/hathaway/projects/rust-specs")
 
-# ── canon 体系：testless 函数级测试选择（rust-dev-perf skill）──
-# 作用：替代 `cargo test` 跑日常开发——testless 做函数级影响分析，
-# 只跑「本次改动可能破坏的测试」，比全量快一个数量级（canon 实测 27s→0.1s 级）。
-# 安全网：testless 异常 / JSON 异常 / 过滤器零命中 → 自动降级 `cargo test --workspace` 全量，
-# 绝不静默跳过任何测试。CI 与合并前仍以全量 `just test` 为准。
-# 用法：just test-fast（对比 HEAD）/ just test-fast main（对比 main）
-# ★ 强烈推荐：日常默认入口，优先于 cargo test / just test
-test-fast base="HEAD":
-    #!/usr/bin/env bash
-    set -uo pipefail
-    json="$(testless select --from "{{base}}" 2>/dev/null)" && rc=0 || rc=$?
-    if [ "$rc" -ne 0 ] || ! printf '%s' "$json" | jq -e . >/dev/null 2>&1; then
-        echo "testless 不可用或输出异常（exit=$rc）→ 降级全量（workspace）"
-        exec cargo test --workspace
-    fi
-    names="$(printf '%s\n' "$json" | jq -r '.tests[] | .name | last' | sort -u | tr '\n' ' ')"
-    if [ -z "${names// }" ]; then
-        echo "✓ 本次改动（vs {{base}}）不影响任何测试"
-        exit 0
-    fi
-    echo "受影响测试过滤器: $names"
-    out="$(cargo test --workspace -- $names 2>&1)" && rc=0 || rc=$?
-    printf '%s\n' "$out"
-    passed="$(printf '%s\n' "$out" | awk '/^test result:/{for(i=1;i<=NF;i++) if($i=="passed;") s+=$(i-1)} END{print s+0}')"
-    if [ "$rc" -ne 0 ]; then exit 1; fi
-    if [ "$passed" -eq 0 ]; then
-        echo "过滤器零命中（可疑）→ 降级全量（workspace）"
-        exec cargo test --workspace
-    fi
-    echo "✓ 受影响测试全部通过（passed=$passed）"
+default: check
+
+# Build check
+check:
+    cargo check --features meow-tun --all-targets
+
+# Format
+fmt:
+    cargo fmt --all
+
+# Format check (no file changes)
+fmt-check:
+    cargo fmt --all --check
+
+# Clippy
+clippy:
+    cargo clippy --all-targets -- -D warnings
+
+# Build binary
+build:
+    cargo build
+
+# Run the daemon against the production config
+run:
+    silverq serve ~/.config/silverq/nodes.yaml --config ~/.config/silverq/silverq.toml
+
+# ── 规范门禁（rust-specs）────────────────────────────────────────────────
+
+# Normative gate — structure rules. Usage:
+#   just spec-check                          # changed scope (default)
+#   just spec-check --scope all              # full repo
+#   just spec-check --class advisory         # advisory layer
+#   just spec-check --class semantic         # jev semantic layer (needs the jev endpoint)
+#   just spec-check --base <ref>             # custom base
+spec-check *args:
+    bash scripts/spec-check.sh {{args}}
+
+# dylint syntax lint (rust-specs general rules). Usage:
+#   just lint                                # changed scope
+#   just lint --all                          # full repo
+#   just lint --base <ref>                   # custom base
+lint *args:
+    bash scripts/lint-dylint.sh {{args}}
+
+# Both gate layers: structure rules + dylint. The pre-push hook runs the
+# structure layer only; this is the full local check.
+gate: spec-check lint
+
+# GitHub PR format gate (rust-specs checks crate). Usage:
+#   just pr-check <number>
+#   just pr-check --title "..." --body-file <path> [--labels a,b] [--branch <name>]
+pr-check *args:
+    cargo xtask check github-pr {{args}}
+
+# GitHub issue format gate (rust-specs checks crate).
+issue-check *args:
+    cargo xtask check github-issue {{args}}
+
+# AGENTS.md drift check — the file is generated from the rust-specs profile.
+agents-check:
+    cargo run -q --manifest-path {{rust_specs_dir}}/agents/Cargo.toml -p agents -- check silverq
+
+# Render AGENTS.md from the rust-specs profile (writes the repo's AGENTS.md).
+agents-push:
+    cargo run -q --manifest-path {{rust_specs_dir}}/agents/Cargo.toml -p agents -- push silverq --force

@@ -3,8 +3,7 @@
 #
 # 规范正本在 rust-specs 仓（`~/projects/rust-specs`）：`checks` crate 管仓库结构
 # 规则与 GitHub PR/issue 格式，`lints/` 是 dylint 语法规则，`specs/` 是人读规范。
-# 入口统一走 `scripts/spec-check.sh`（.cargo/config.toml 里的 `cargo xtask` alias
-# 指向 rust-specs 的 checks crate）。
+# 入口统一走 justfile 的 `just spec-check`（scripts/spec-check.sh 是它的实现）。
 #
 # FAIL/WARN finding 阻断 push；INFO 只打印不阻断（它们是审查背景，不是欠账）。
 # 「零 finding」与「工具链坏了」输出形态一样，所以额外要求引擎给出干净摘要
@@ -13,7 +12,7 @@ set -euo pipefail
 REPO=$(git rev-parse --show-toplevel 2>/dev/null)
 cd "$REPO" || exit 1
 
-output="$(bash scripts/spec-check.sh 2>&1)" || true
+output="$(just spec-check 2>&1)" || true
 printf '%s\n' "$output"
 if printf '%s\n' "$output" | grep -qE '^\[(FAIL|WARN)\]'; then
     echo "pre-push blocked: spec-check FAIL/WARN findings must be fixed." >&2

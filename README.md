@@ -277,14 +277,19 @@ ui_dir = "~/.local/share/silverq/ui"   # zashboard 静态目录
 | `.githooks/pre-push` | 跑 `scripts/spec-check.sh`；FAIL/WARN 阻断，且要求引擎给出 `PASS: N findings, 0 failures` 干净摘要——工具链故障不能静默放行 |
 
 ```bash
-bash scripts/spec-check.sh              # 结构规则（changed 口径）
-bash scripts/spec-check.sh --scope all  # 全仓结构规则
-bash scripts/lint-dylint.sh             # dylint 语法 lint（通用规则）
-cargo xtask check github-pr --number <N>  # PR 格式门禁
+just spec-check                # 结构规则（changed 口径）
+just spec-check --scope all    # 全仓结构规则
+just lint                      # dylint 语法 lint（通用规则）
+just lint --all                # 全仓 dylint
+just gate                      # 两层门禁（结构 + dylint）
+just pr-check <N>              # PR 格式门禁
+just issue-check <N>           # issue 格式门禁
+just agents-check              # AGENTS.md 漂移检查
 ```
 
-`.cargo/config.toml` 里的 `cargo xtask` alias 指向 rust-specs 的 `checks` crate
-（`RUST_SPECS_DIR` 可覆盖路径），不 vendor 源码。
+`just` 是入口，`scripts/spec-check.sh` / `scripts/lint-dylint.sh` 是它的实现
+（CI 与 pre-push 也走同一套）。`.cargo/config.toml` 里的 `cargo xtask` alias 指向
+rust-specs 的 `checks` crate（`RUST_SPECS_DIR` 可覆盖路径），不 vendor 源码。
 
 > **dylint 的装配顺序坑**（`scripts/lint-dylint.sh` 头注）：`cargo dylint --path <rust-specs>`
 > 把 lint 编到 **rust-specs** 的 `target/release/lib<name>.so`（plain 名），再把带 toolchain
