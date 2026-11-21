@@ -7,26 +7,23 @@
 #   scripts/lint-dylint.sh --all             # 全 workspace（不按 diff 过滤）
 #
 # 环境变量:
-#   RUST_SPECS_DIR   rust-specs 路径（默认 /home/hathaway/projects/rust-specs）
 #   DYLINT_TOOLCHAIN dylint 用的 toolchain（默认 nightly-2026-08-20，须带 rustc-dev）
 #
 # 退出码:
 #   0 = 无 finding
 #   2 = 工具链 / rust-specs / 基线缺失
 #
-# 为什么需要这个脚本（dylint 6.2 的装配顺序问题）:
-#   `cargo dylint --path <rust-specs>` 把 lint 编到 **rust-specs** 的
-#   target/release/lib<name>.so（plain 名），再把带 toolchain 后缀的
-#   lib<name>@<toolchain>.so 放进 **消费仓** 的 target/dylint/libraries/。
-#   但随后的 metadata 步骤查的是消费仓里 **plain 名** 的 .so —— 找不到。
-#   ferrite 的 target/dylint/libraries 里两个名字都在（plain + @toolchain），
-#   所以那边能跑通。脚本把 plain 名补上，dylint 随后的步骤才拿得到 metadata。
+# 规则库接入方式（2026-11-21 起）: [workspace.metadata.dylint] git-tag 条目
+# （root Cargo.toml，tag 固定 lints-v2026.11.21）。`cargo dylint --all` 由 dylint
+# 自己拉取、编译并加载 lints/*，本脚本不再从 RUST_SPECS_DIR 预编译拷贝 .so。
+# 保留本脚本只做两件事：按 git diff 收窄扫描范围（cargo dylint 没有 changed-
+# scope 概念），以及滤掉规则库自身的 manifest 噪音。升级规则 = 改 Cargo.toml
+# 里的 tag（见 ~/homono/specs/rust-specs-projects.md §6）。
 set -euo pipefail
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "✗ 不在 git 仓库内" >&2; exit 2; }
 cd "$ROOT"
 
-RUST_SPECS_DIR="${RUST_SPECS_DIR:-/home/hathaway/projects/rust-specs}"
 DYLINT_TOOLCHAIN="${DYLINT_TOOLCHAIN:-nightly-2026-08-20}"
 BASE="origin/master"
 ALL=0
@@ -50,7 +47,6 @@ done
 
 die() { echo "✗ $1" >&2; exit 2; }
 
-[ -d "$RUST_SPECS_DIR/lints" ] || die "rust-specs 不在 $RUST_SPECS_DIR（RUST_SPECS_DIR 可覆盖）"
 rustup toolchain list 2>/dev/null | grep -q "^$DYLINT_TOOLCHAIN" \
   || die "toolchain $DYLINT_TOOLCHAIN 未安装（需 rustc-dev 组件）"
 
@@ -87,19 +83,6 @@ for pkg in meta["packages"]:
 ' "$@"
 }
 
-LINT_LIB_DIR="$ROOT/target/dylint/libraries/$DYLINT_TOOLCHAIN-x86_64-unknown-linux-gnu/release"
-
-# 把 lint 编出来（dylint 的 metadata 步骤需要产物就位），再把 plain 名补进
-# 消费仓的 dylint 目录 —— 详见头注的装配顺序说明。
-(cd "$RUST_SPECS_DIR" && cargo +"$DYLINT_TOOLCHAIN" build --release \
-  --workspace --exclude checks --exclude agents) >/dev/null 2>&1 || true
-mkdir -p "$LINT_LIB_DIR"
-for so in "$RUST_SPECS_DIR/target/release/"*.so; do
-  [ -f "$so" ] || continue
-  base="$(basename "$so")"
-  [ -f "$LINT_LIB_DIR/$base" ] || cp -f "$so" "$LINT_LIB_DIR/$base"
-done
-
 if [ "$ALL" = 1 ]; then
   pkgs=(".")
 else
@@ -116,7 +99,8 @@ else
 fi
 
 for pkg in "${pkgs[@]}"; do
-  cmd=(cargo +"$DYLINT_TOOLCHAIN" dylint --path "$RUST_SPECS_DIR" --pattern 'lints/*' --all)
+  # metadata entry 加载（dylint 自己从 tag 拉取并编译规则库）。
+  cmd=(cargo +"$DYLINT_TOOLCHAIN" dylint --all)
   if [ "$ALL" = 0 ]; then
     cmd+=(-p "$pkg" --no-deps)
   else
@@ -130,10 +114,11 @@ for pkg in "${pkgs[@]}"; do
   set -e
 
   # dylint 的 finding 走 cargo 的 warning 通道（退出码 0），只把 lint 诊断留下。
-  # rust-specs 各 lint crate 自己的 manifest 警告（missing [lints] 等）与本仓无关，
-  # 一并滤掉——它们是规则库的构建噪音，不是被扫仓的 finding。
-  grep -E "^(warning|error)(\[|:)" "$out" \
-    | grep -vE "generated [0-9]+ warning|unused (dependency|manifest)|missing \[lints\]|ignoring the configured target directory" \
+  # --message-format=short 的行首是 "path:line:col: warning: ..."，不能锚定行首；
+  # rust-specs 各 lint crate 自己的 manifest 警告（missing [lints] 等）与本仓
+  # 无关，一并滤掉——它们是规则库的构建噪音，不是被扫仓的 finding。
+  grep -E "(^|: )(warning|error)(\[|:)" "$out" \
+    | grep -vE "generated [0-9]+ warning|unused (dependency|manifest)|missing \[lints\]|ignoring the configured target directory|workspace \(manifest\) generated" \
     || true
 
   # 工具链坏了（找不到 metadata / 编译失败）不能当「零 finding」静默放行。
